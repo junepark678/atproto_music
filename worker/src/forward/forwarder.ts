@@ -1011,7 +1011,11 @@ async function execute(rt: ForwardRuntime, job: Job, now: number): Promise<boole
 /** Re-read the durable authorization at the last synchronous point before either remote effect. */
 function allowAuthorizedUnlove(rt: ForwardRuntime, job: Job, now: number): boolean {
   const row = job.rows[0]!;
-  const current = rt.db.one<{ authorization_uri: string | null; authorization_rev: string | null; authorization_conflicted: number }>(
+  const current = rt.db.one<{
+    authorization_uri: string | null;
+    authorization_rev: string | null;
+    authorization_conflicted: number;
+  }>(
     "SELECT authorization_uri,authorization_rev,authorization_conflicted FROM forward_outbox WHERE id=? AND state='queued'",
     row.id,
   );

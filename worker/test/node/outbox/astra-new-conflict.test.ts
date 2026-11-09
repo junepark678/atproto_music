@@ -201,13 +201,28 @@ it('fresh review: conflicted queued unlove must not reach upstream', async () =>
     ]);
     sweep(db);
     expect(db.one("SELECT count(*) n FROM forward_outbox WHERE kind='unlove' AND state='queued'")).toEqual({ n: 1 });
-    enqueueHints(db,[{did:ALICE,collection:LOVE,rkey:key,source:'jetstream',hintRev:gone.commit.rev,
-      live:{operation:'create',cid:first.state==='present'?first.cid:''},receiptMs:NOW_MS}]);
-    expect(db.one('SELECT conflicted FROM live_pending_removal_events WHERE uri=? AND rev=?',loveUri,gone.commit.rev)).toEqual({conflicted:1});
+    enqueueHints(db, [
+      {
+        did: ALICE,
+        collection: LOVE,
+        rkey: key,
+        source: 'jetstream',
+        hintRev: gone.commit.rev,
+        live: { operation: 'create', cid: first.state === 'present' ? first.cid : '' },
+        receiptMs: NOW_MS,
+      },
+    ]);
+    expect(
+      db.one('SELECT conflicted FROM live_pending_removal_events WHERE uri=? AND rev=?', loveUri, gone.commit.rev),
+    ).toEqual({ conflicted: 1 });
     const result = await forward(db);
-    console.log('conflicted queued unlove remote calls',result.feedbacks);
+    console.log('conflicted queued unlove remote calls', result.feedbacks);
     expect(result.feedbacks).toEqual([]);
-    expect(db.one("SELECT count(*) n FROM forward_outbox WHERE kind='unlove' AND state='ignored' AND last_error='authorization_conflicted'")).toEqual({ n: 1 });
+    expect(
+      db.one(
+        "SELECT count(*) n FROM forward_outbox WHERE kind='unlove' AND state='ignored' AND last_error='authorization_conflicted'",
+      ),
+    ).toEqual({ n: 1 });
     expect(db.one('SELECT count(*) n FROM live_pending_removals WHERE uri=?', loveUri)).toEqual({ n: 0 });
   });
 });

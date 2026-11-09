@@ -566,12 +566,20 @@ it('fresh: production SQL bounds equal-hi tail seeks, event readiness, and retai
       'WHERE uri=?',
       'WHERE uri=? AND a2_bounded_retention_visit()=1',
     );
-    expect(
-      db.all(boundedRetentionSql, retentionUri, '', '', '', '', '', '', 128),
-    ).toHaveLength(128);
+    expect(db.all(boundedRetentionSql, retentionUri, '', '', '', '', '', '', 128)).toHaveLength(128);
     expect(boundedRetentionVisits).toBe(128);
     const boundedRetentionPlan = db
-      .all<{ detail: string }>(`EXPLAIN QUERY PLAN ${CONFLICT_RETENTION_SCAN_SQL}`, retentionUri, '', '', '', '', '', '', 128)
+      .all<{ detail: string }>(
+        `EXPLAIN QUERY PLAN ${CONFLICT_RETENTION_SCAN_SQL}`,
+        retentionUri,
+        '',
+        '',
+        '',
+        '',
+        '',
+        '',
+        128,
+      )
       .map((row: { detail: string }) => row.detail)
       .join(' ');
     expect(boundedRetentionPlan).toContain('live_pending_removals_page');

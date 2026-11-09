@@ -611,7 +611,14 @@ export function executeAuthorizedRemovals(
     cleanup_cursor_removed_cid: string;
     cleanup_scan_complete: number;
     cleanup_has_match: number;
-  }>(PENDING_EVENT_CLEANUP_PAGE_SQL.replace('expires_at_ms FROM', 'expires_at_ms,cleanup_cursor_window_hi,cleanup_cursor_window_lo,cleanup_cursor_replaced_by_cid,cleanup_cursor_kind,cleanup_cursor_member_uri,cleanup_cursor_removed_cid,cleanup_scan_complete,cleanup_has_match FROM'), args.nowMs, EVENT_CLEANUP_PAGE_SIZE);
+  }>(
+    PENDING_EVENT_CLEANUP_PAGE_SQL.replace(
+      'expires_at_ms FROM',
+      'expires_at_ms,cleanup_cursor_window_hi,cleanup_cursor_window_lo,cleanup_cursor_replaced_by_cid,cleanup_cursor_kind,cleanup_cursor_member_uri,cleanup_cursor_removed_cid,cleanup_scan_complete,cleanup_has_match FROM',
+    ),
+    args.nowMs,
+    EVENT_CLEANUP_PAGE_SIZE,
+  );
   let expiredEvents = 0;
   for (const event of cleanupEvents) {
     if (event.expires_at_ms > args.nowMs) {
@@ -638,7 +645,8 @@ export function executeAuthorizedRemovals(
         event.cleanup_cursor_removed_cid,
         EVENT_CLEANUP_PAGE_SIZE,
       );
-      const hasMatch = event.cleanup_has_match !== 0 || page.some((row) => row.window_lo < event.rev && row.window_hi >= event.rev);
+      const hasMatch =
+        event.cleanup_has_match !== 0 || page.some((row) => row.window_lo < event.rev && row.window_hi >= event.rev);
       const last = page.at(-1);
       if (page.length === EVENT_CLEANUP_PAGE_SIZE && last) {
         db.run(
@@ -666,7 +674,10 @@ export function executeAuthorizedRemovals(
         );
         retainedPending = true;
       } else {
-        db.run('UPDATE live_pending_removal_events SET cleanup_scan_complete=1,cleanup_has_match=0 WHERE rowid=?', event.rowid);
+        db.run(
+          'UPDATE live_pending_removal_events SET cleanup_scan_complete=1,cleanup_has_match=0 WHERE rowid=?',
+          event.rowid,
+        );
       }
     }
     const retainedEffect =

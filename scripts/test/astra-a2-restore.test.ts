@@ -1,3 +1,4 @@
+// biome-ignore-all lint/suspicious/noExplicitAny: restored production fixtures adapt injected service dependencies as in accepted independent tests
 // scripts/admin/restore.ts (ADR 0005 §14.5, §14.3; plan cases M6.3.1/
 // restore_state and M6.3.1/wrong_key; N4-02).
 //
@@ -407,7 +408,7 @@ async function startServer(world: World, port: number, secretsFile = world.secre
       ATMUSIC_LISTEN: `127.0.0.1:${port}`,
       ATMUSIC_ASSETS_DIR: world.dist,
       ATMUSIC_SECRETS_FILE: secretsFile,
-      ATMUSIC_SIGNIN_DIDS: (excludedAtStartup ? [DID_B,DID_C] : [DID_A, DID_B, DID_C]).join(','),
+      ATMUSIC_SIGNIN_DIDS: (excludedAtStartup ? [DID_B, DID_C] : [DID_A, DID_B, DID_C]).join(','),
       LISTENBRAINZ_API_ROOT: 'https://lb.example.test/',
     },
     clock: world.clock,
@@ -583,157 +584,406 @@ function boxOf(doc: Record<string, unknown>): { box: Box; secrets: Secrets } {
 
 // ---------------------------------------------------------------------------
 
-
-import { nodeTimers } from '../../worker/src/node/alarm';
-import { enqueueHints } from '../../worker/src/do/ingest/hints';
-import { runForward } from '../../worker/src/forward/forwarder';
-import { runDeleteSlice } from '../../worker/src/forward/delete-forwarder';
-import { UpstreamPacing } from '../../worker/src/forward/upstream-pacing';
 import { trackKey } from '@atmusic/core/music-key';
+import { enqueueHints } from '../../worker/src/do/ingest/hints';
+import { runDeleteSlice } from '../../worker/src/forward/delete-forwarder';
+import { runForward } from '../../worker/src/forward/forwarder';
 import { projectionListenKey } from '../../worker/src/forward/projection';
-let remoteDeletes=0;
-let remoteSubmits=0;
-const restoreTransport=routerTransport({hosts:{'lb.example.test':async(req)=>{
- const url=new URL(req.url);
- if(url.pathname==='/1/delete-listen'){remoteDeletes++;return Response.json({status:'ok'});}
- if(url.pathname==='/1/submit-listens'){remoteSubmits++;return Response.json({status:'ok'});}
- if(url.pathname.includes('/listens'))return Response.json({payload:{listens:[{listened_at:1768474800,recording_msid:'00000000-0000-4000-8000-000000000001',track_metadata:{artist_name:'Björk',track_name:'Jóga'}}]}});
- return Response.json({error:'unexpected '+url.pathname},{status:404});
-}}});
-const random=seededRandom(555);
-async function signedWorld(){
- remoteDeletes=0;remoteSubmits=0;
- const world=await buildWorld();
- const db=openSqliteDb(world.dbPath,{busyTimeoutMs:BUSY_MS});
- const box=boxOf(world.secretsDoc).box;
- saveLink({db,clock:world.clock,random,box},{did:DID_A,service:'listenbrainz',remoteUser:'alice',credential:'fixture-token'});
- db.run('DELETE FROM operations');
- const keys=await fixtureKeys();const repo=new SignedRepo(DID_A,keys.alice,{clock:world.clock});
- const collection=PREFIX+'.scrobble', rkey='3krestoreproof';
- const record={$type:collection,artist:'Björk',track:'Jóga',listenedAt:'2026-01-15T11:00:00Z',createdAt:'2026-01-15T11:00:00Z'};
- const proof=async()=>verifyRecordProof(await repo.getRecordCar(collection,rkey),{did:DID_A,collection,rkey,signingKey:repo.key.didKey});
- await repo.put(collection,rkey,record);const first=await proof();
- const apply=(db:SqliteDb,p:any,live=false)=>db.tx(()=>applyRecordProof(db,p,{prefix:PREFIX,receiptNs:fromMs(world.clock.nowMs()),nowNs:fromMs(world.clock.nowMs()),...(live?{live:authorizedLiveOptions(db,p,random).live}:{})}));
- apply(db,first,true);
- let delivered=0;
- await runForward({db,clock:world.clock,random,log:{log(){}},box,pacing:new UpstreamPacing(world.clock),lastfm:null,listenbrainz:{submit:async()=>{delivered++;return{ok:true,value:null,rate:{remaining:100,resetInS:0}}}}} as any);
- expect(delivered).toBe(1);
- expect(db.one("SELECT count(*) n FROM forward_outbox WHERE kind='scrobble' AND state='sent' AND link_id IN (SELECT id FROM linked_accounts WHERE service='listenbrainz')")).toEqual({n:1});
- const backup=async()=>{const out=await createBackups({db,dir:join(world.state,'backups'),clock:world.clock,log:captureLog().logger,minFreeBytes:0}).run('manual');if(out.status!=='ok')throw Error(JSON.stringify(out));world.backupPath=out.path;};
- return{world,db,repo,proof,first,apply,backup,collection,rkey,uri:`at://${DID_A}/${collection}/${rkey}`};
-}
-async function realRestore(world:World){
- const base=world.clock.nowMs(), wall=Date.now();world.clock.nowMs=()=>base+Date.now()-wall;
- const systemd=new FakeSystemd(world,{servicePort:0});
- systemd.units['atmusic.service']='active';systemd.units['atmusic.socket']='active';
- const result=await restoreCli(world,systemd,[...baseArgs(world),'--no-ready-check']);
- expect(result.code,result.stderr).toBe(0);expect(systemd.server).not.toBeNull();
- return systemd;
-}
-it('D12 independent real restore startup and real host timers send positive signed pending removal without hints',async()=>{
- const x=await signedWorld();
- await x.repo.delete(x.collection,x.rkey);const gone=await x.proof();x.apply(x.db,gone);
- enqueueHints(x.db,[{did:DID_A,collection:x.collection,rkey:x.rkey,source:'jetstream',hintRev:gone.commit.rev,live:{operation:'delete'},receiptMs:x.world.clock.nowMs()}]);
- expect(x.db.one('SELECT authorized_rev FROM live_pending_removals WHERE uri=?',x.uri)).toEqual({authorized_rev:gone.commit.rev});
- x.db.run('DELETE FROM hints');x.db.run('DELETE FROM live_record_evidence');x.db.run('DELETE FROM timers');
- await x.backup();x.db.close();
- const systemd=await realRestore(x.world);
- await expect.poll(()=>remoteDeletes,{timeout:18000,interval:100}).toBe(1);
- expect(systemd.server!.server.db.one("SELECT count(*) n FROM listenbrainz_deletes WHERE state='sent'")).toEqual({n:1});
- console.log('D12 actual timer remote deletes',remoteDeletes);
-},30000);
+import { UpstreamPacing } from '../../worker/src/forward/upstream-pacing';
+import { nodeTimers } from '../../worker/src/node/alarm';
 
-let useRealTimers=true;
-it('D10 independent real restore replays both direct and delayed signed deletion with one counted upstream delete',async()=>{
- useRealTimers=false;
- const x=await signedWorld();await x.backup();
- await x.repo.delete(x.collection,x.rkey);const gone=await x.proof();x.apply(x.db,gone);
- enqueueHints(x.db,[{did:DID_A,collection:x.collection,rkey:x.rkey,source:'jetstream',hintRev:gone.commit.rev,live:{operation:'delete'},receiptMs:x.world.clock.nowMs()}]);
- expect(x.db.one('SELECT count(*) n FROM live_pending_removals WHERE uri=?',x.uri)).toEqual({n:1});
- x.db.close();
- const systemd=await realRestore(x.world);const db=systemd.server!.server.db;
- expect(db.one('SELECT count(*) n FROM scrobbles WHERE uri=?',x.uri)).toEqual({n:1});
- expect(db.one('SELECT count(*) n FROM live_pending_removals WHERE uri=?',x.uri)).toEqual({n:1});
- let attempts=0;
- const traced={all:db.all.bind(db),one:db.one.bind(db),tx:db.tx.bind(db),run(sql:string,...args:any[]){if(sql.includes('INSERT OR IGNORE INTO listenbrainz_deletes'))attempts++;return db.run(sql,...args);}};
- x.apply(traced as any,gone,true);
- db.tx(()=>executeAuthorizedRemovals(traced,{nowMs:x.world.clock.nowMs(),random,limit:10}));
- // The application direct path and pending settle both attempt the same event key.
- expect(attempts).toBe(2);
- expect(db.one('SELECT count(*) n FROM listenbrainz_deletes')).toEqual({n:1});
- expect(db.one('SELECT count(*) n FROM live_pending_removals')).toEqual({n:0});
- let now=x.world.clock.nowMs(), deletes=0;const clock={nowMs:()=>now};
- const deps={db,clock,random,box:boxOf(x.world.secretsDoc).box,pacing:new UpstreamPacing(clock),client:{
- listWindowPage:async()=>({ok:true,rate:{remaining:100,resetInS:0},value:[{listenedAt:1768474800,artist:'Björk',track:'Jóga',recordingMsid:'00000000-0000-4000-8000-000000000001'}]}),
- deleteListen:async()=>{deletes++;return{ok:true,accepted:true,rate:{remaining:100,resetInS:0}};}}};
- for(let i=0;i<6;i++){await runDeleteSlice(deps as any);now+=1000;}
- expect(deletes).toBe(1);
- copyFileSync(x.world.dbPath+'.pre-restore',x.world.dbPath+'.first-pre-restore');
- rmSync(x.world.dbPath+'.pre-restore');
- const secondRestore=await restoreCli(x.world,systemd,[...baseArgs(x.world),'--no-ready-check']);
- expect(secondRestore.code,secondRestore.stderr).toBe(0);
- const replayDb=systemd.server!.server.db;
- expect(replayDb.one('SELECT count(*) n FROM scrobbles WHERE uri=?',x.uri)).toEqual({n:1});
- x.apply(replayDb,gone,false);
- expect(replayDb.one('SELECT count(*) n FROM live_pending_removals WHERE uri=?',x.uri)).toEqual({n:1});
- replayDb.tx(()=>executeAuthorizedRemovals(replayDb,{nowMs:x.world.clock.nowMs(),random,limit:10}));
- for(let i=0;i<6;i++){await runDeleteSlice({...deps,db:replayDb} as any);now+=1000;}
- expect(deletes).toBe(1);
- expect(replayDb.one("SELECT count(*) n FROM listenbrainz_deletes WHERE state='sent'")).toEqual({n:1});
- console.log('D10 direct/delayed insert attempts',attempts,'counted remote deletes after second restore',deletes);
- useRealTimers=true;
-},30000);
+let remoteDeletes = 0;
+let remoteSubmits = 0;
+const restoreTransport = routerTransport({
+  hosts: {
+    'lb.example.test': async (req) => {
+      const url = new URL(req.url);
+      if (url.pathname === '/1/delete-listen') {
+        remoteDeletes++;
+        return Response.json({ status: 'ok' });
+      }
+      if (url.pathname === '/1/submit-listens') {
+        remoteSubmits++;
+        return Response.json({ status: 'ok' });
+      }
+      if (url.pathname.includes('/listens'))
+        return Response.json({
+          payload: {
+            listens: [
+              {
+                listened_at: 1768474800,
+                recording_msid: '00000000-0000-4000-8000-000000000001',
+                track_metadata: { artist_name: 'Björk', track_name: 'Jóga' },
+              },
+            ],
+          },
+        });
+      return Response.json({ error: 'unexpected ' + url.pathname }, { status: 404 });
+    },
+  },
+});
+const random = seededRandom(555);
+async function signedWorld() {
+  remoteDeletes = 0;
+  remoteSubmits = 0;
+  const world = await buildWorld();
+  const db = openSqliteDb(world.dbPath, { busyTimeoutMs: BUSY_MS });
+  const box = boxOf(world.secretsDoc).box;
+  saveLink(
+    { db, clock: world.clock, random, box },
+    { did: DID_A, service: 'listenbrainz', remoteUser: 'alice', credential: 'fixture-token' },
+  );
+  db.run('DELETE FROM operations');
+  const keys = await fixtureKeys();
+  const repo = new SignedRepo(DID_A, keys.alice, { clock: world.clock });
+  const collection = PREFIX + '.scrobble',
+    rkey = '3krestoreproof';
+  const record = {
+    $type: collection,
+    artist: 'Björk',
+    track: 'Jóga',
+    listenedAt: '2026-01-15T11:00:00Z',
+    createdAt: '2026-01-15T11:00:00Z',
+  };
+  const proof = async () =>
+    verifyRecordProof(await repo.getRecordCar(collection, rkey), {
+      did: DID_A,
+      collection,
+      rkey,
+      signingKey: repo.key.didKey,
+    });
+  await repo.put(collection, rkey, record);
+  const first = await proof();
+  const apply = (db: SqliteDb, p: any, live = false) =>
+    db.tx(() =>
+      applyRecordProof(db, p, {
+        prefix: PREFIX,
+        receiptNs: fromMs(world.clock.nowMs()),
+        nowNs: fromMs(world.clock.nowMs()),
+        ...(live ? { live: authorizedLiveOptions(db, p, random).live } : {}),
+      }),
+    );
+  apply(db, first, true);
+  let delivered = 0;
+  await runForward({
+    db,
+    clock: world.clock,
+    random,
+    log: { log() {} },
+    box,
+    pacing: new UpstreamPacing(world.clock),
+    lastfm: null,
+    listenbrainz: {
+      submit: async () => {
+        delivered++;
+        return { ok: true, value: null, rate: { remaining: 100, resetInS: 0 } };
+      },
+    },
+  } as any);
+  expect(delivered).toBe(1);
+  expect(
+    db.one(
+      "SELECT count(*) n FROM forward_outbox WHERE kind='scrobble' AND state='sent' AND link_id IN (SELECT id FROM linked_accounts WHERE service='listenbrainz')",
+    ),
+  ).toEqual({ n: 1 });
+  const backup = async () => {
+    const out = await createBackups({
+      db,
+      dir: join(world.state, 'backups'),
+      clock: world.clock,
+      log: captureLog().logger,
+      minFreeBytes: 0,
+    }).run('manual');
+    if (out.status !== 'ok') throw Error(JSON.stringify(out));
+    world.backupPath = out.path;
+  };
+  return { world, db, repo, proof, first, apply, backup, collection, rkey, uri: `at://${DID_A}/${collection}/${rkey}` };
+}
+async function realRestore(world: World) {
+  const base = world.clock.nowMs(),
+    wall = Date.now();
+  world.clock.nowMs = () => base + Date.now() - wall;
+  const systemd = new FakeSystemd(world, { servicePort: 0 });
+  systemd.units['atmusic.service'] = 'active';
+  systemd.units['atmusic.socket'] = 'active';
+  const result = await restoreCli(world, systemd, [...baseArgs(world), '--no-ready-check']);
+  expect(result.code, result.stderr).toBe(0);
+  expect(systemd.server).not.toBeNull();
+  return systemd;
+}
+it('D12 independent real restore startup and real host timers send positive signed pending removal without hints', async () => {
+  const x = await signedWorld();
+  await x.repo.delete(x.collection, x.rkey);
+  const gone = await x.proof();
+  x.apply(x.db, gone);
+  enqueueHints(x.db, [
+    {
+      did: DID_A,
+      collection: x.collection,
+      rkey: x.rkey,
+      source: 'jetstream',
+      hintRev: gone.commit.rev,
+      live: { operation: 'delete' },
+      receiptMs: x.world.clock.nowMs(),
+    },
+  ]);
+  expect(x.db.one('SELECT authorized_rev FROM live_pending_removals WHERE uri=?', x.uri)).toEqual({
+    authorized_rev: gone.commit.rev,
+  });
+  x.db.run('DELETE FROM hints');
+  x.db.run('DELETE FROM live_record_evidence');
+  x.db.run('DELETE FROM timers');
+  await x.backup();
+  x.db.close();
+  const systemd = await realRestore(x.world);
+  await expect.poll(() => remoteDeletes, { timeout: 18000, interval: 100 }).toBe(1);
+  expect(systemd.server!.server.db.one("SELECT count(*) n FROM listenbrainz_deletes WHERE state='sent'")).toEqual({
+    n: 1,
+  });
+  console.log('D12 actual timer remote deletes', remoteDeletes);
+}, 30000);
 
-let excludedAtStartup=false;
-it.each(['revoked-link','new-generation','signin-scope'] as const)('independent restored signed pending cannot escape %s',async(mode)=>{
- useRealTimers=true;excludedAtStartup=mode==='signin-scope';
- const x=await signedWorld();
- await x.repo.delete(x.collection,x.rkey);const gone=await x.proof();x.apply(x.db,gone);
- enqueueHints(x.db,[{did:DID_A,collection:x.collection,rkey:x.rkey,source:'jetstream',hintRev:gone.commit.rev,live:{operation:'delete'},receiptMs:x.world.clock.nowMs()}]);
- x.db.run('DELETE FROM hints');x.db.run('DELETE FROM live_record_evidence');x.db.run('DELETE FROM timers');
- await x.backup();
- const link=x.db.one<{id:string,generation:number}>("SELECT id,generation FROM linked_accounts WHERE did=? AND service='listenbrainz'",DID_A)!;
- if(mode==='revoked-link'){
-  const journal=new FileRevocations({path:revocationLogPath(x.world.state),clock:x.world.clock});
-  expect(deleteLink({db:x.db,revocations:journal},DID_A,link.id)).toBe(true);journal.close();
- }
- if(mode==='new-generation'){
-  const replacement=saveLink({db:x.db,clock:x.world.clock,random,box:boxOf(x.world.secretsDoc).box},{did:DID_A,service:'listenbrainz',remoteUser:'other-remote',credential:'different-token'});
-  expect(replacement.link.generation).toBeGreaterThan(link.generation);
- }
- x.db.close();const systemd=await realRestore(x.world);
- const db=systemd.server!.server.db;
- await expect.poll(()=>db.one<{n:number}>('SELECT count(*) n FROM live_pending_removals')!.n,{timeout:8000,interval:100}).toBe(0);
- await new Promise(r=>setTimeout(r,2300));
- expect(remoteDeletes).toBe(0);
- if(mode==='revoked-link')expect(db.one('SELECT 1 FROM linked_accounts WHERE id=?',link.id)).toBeNull();
- if(mode==='signin-scope')expect(db.one('SELECT status FROM linked_accounts WHERE id=?',link.id)).toEqual({status:'revoked'});
- excludedAtStartup=false;
-},15000);
-it('independent signed settings suppression clears only A retained work and restored B timers delete only for B',async()=>{
- useRealTimers=true;excludedAtStartup=false;
- const x=await signedWorld();
- const keys=await fixtureKeys(), other=new SignedRepo(DID_B,keys.bob,{clock:x.world.clock});
- const bobKey='3kbobpending', bobUri=`at://${DID_B}/${x.collection}/${bobKey}`;
- saveLink({db:x.db,clock:x.world.clock,random,box:boxOf(x.world.secretsDoc).box},{did:DID_B,service:'listenbrainz',remoteUser:'bob',credential:'bob-token'});
- await other.put(x.collection,bobKey,{$type:x.collection,artist:'Björk',track:'Jóga',listenedAt:'2026-01-15T11:00:00Z',createdAt:'2026-01-15T11:00:00Z'});
- const verifyBob=async()=>verifyRecordProof(await other.getRecordCar(x.collection,bobKey),{did:DID_B,collection:x.collection,rkey:bobKey,signingKey:other.key.didKey});
- x.apply(x.db,await verifyBob(),true);
- let delivered=0;
- await runForward({db:x.db,clock:x.world.clock,random,log:{log(){}},box:boxOf(x.world.secretsDoc).box,pacing:new UpstreamPacing(x.world.clock),lastfm:null,listenbrainz:{submit:async()=>{delivered++;return{ok:true,value:null,rate:{remaining:100,resetInS:0}}}}} as any);
- expect(delivered).toBe(1);
- await x.repo.delete(x.collection,x.rkey);const goneA=await x.proof();x.apply(x.db,goneA);
- await other.delete(x.collection,bobKey);const goneB=await verifyBob();x.apply(x.db,goneB);
- const removals:Array<[string,string,string]>=[[DID_A,x.rkey,goneA.commit.rev],[DID_B,bobKey,goneB.commit.rev]];
- for(const [did,rkey,rev] of removals)enqueueHints(x.db,[{did,collection:x.collection,rkey,source:'jetstream',hintRev:rev,live:{operation:'delete'},receiptMs:x.world.clock.nowMs()}]);
- expect(x.db.one('SELECT count(*) n FROM live_pending_removals')).toEqual({n:2});
- await x.repo.put(PREFIX+'.settings','self',{$type:PREFIX+'.settings',indexing:'disabled',createdAt:'2026-01-15T11:00:00Z'});
- const disabled=await verifyRecordProof(await x.repo.getRecordCar(PREFIX+'.settings','self'),{did:DID_A,collection:PREFIX+'.settings',rkey:'self',signingKey:x.repo.key.didKey});
- x.apply(x.db,disabled);
- expect(x.db.all('SELECT uri FROM live_pending_removals')).toEqual([{uri:bobUri}]);
- expect(x.db.one('SELECT count(*) n FROM live_pending_removal_events WHERE uri=?',x.uri)).toEqual({n:0});
- x.db.run('DELETE FROM hints');x.db.run('DELETE FROM live_record_evidence');x.db.run('DELETE FROM timers');
- await x.backup();x.db.close();const systemd=await realRestore(x.world);
- await expect.poll(()=>remoteDeletes,{timeout:18000,interval:100}).toBe(1);
- expect(systemd.server!.server.db.all("SELECT did FROM listenbrainz_deletes WHERE state='sent'")).toEqual([{did:DID_B}]);
-},30000);
+let useRealTimers = true;
+it('D10 independent real restore replays both direct and delayed signed deletion with one counted upstream delete', async () => {
+  useRealTimers = false;
+  const x = await signedWorld();
+  await x.backup();
+  await x.repo.delete(x.collection, x.rkey);
+  const gone = await x.proof();
+  x.apply(x.db, gone);
+  enqueueHints(x.db, [
+    {
+      did: DID_A,
+      collection: x.collection,
+      rkey: x.rkey,
+      source: 'jetstream',
+      hintRev: gone.commit.rev,
+      live: { operation: 'delete' },
+      receiptMs: x.world.clock.nowMs(),
+    },
+  ]);
+  expect(x.db.one('SELECT count(*) n FROM live_pending_removals WHERE uri=?', x.uri)).toEqual({ n: 1 });
+  x.db.close();
+  const systemd = await realRestore(x.world);
+  const db = systemd.server!.server.db;
+  expect(db.one('SELECT count(*) n FROM scrobbles WHERE uri=?', x.uri)).toEqual({ n: 1 });
+  expect(db.one('SELECT count(*) n FROM live_pending_removals WHERE uri=?', x.uri)).toEqual({ n: 1 });
+  let attempts = 0;
+  const traced = {
+    all: db.all.bind(db),
+    one: db.one.bind(db),
+    tx: db.tx.bind(db),
+    run(sql: string, ...args: any[]) {
+      if (sql.includes('INSERT OR IGNORE INTO listenbrainz_deletes')) attempts++;
+      return db.run(sql, ...args);
+    },
+  };
+  x.apply(traced as any, gone, true);
+  db.tx(() => executeAuthorizedRemovals(traced, { nowMs: x.world.clock.nowMs(), random, limit: 10 }));
+  // The application direct path and pending settle both attempt the same event key.
+  expect(attempts).toBe(2);
+  expect(db.one('SELECT count(*) n FROM listenbrainz_deletes')).toEqual({ n: 1 });
+  expect(db.one('SELECT count(*) n FROM live_pending_removals')).toEqual({ n: 0 });
+  let now = x.world.clock.nowMs(),
+    deletes = 0;
+  const clock = { nowMs: () => now };
+  const deps = {
+    db,
+    clock,
+    random,
+    box: boxOf(x.world.secretsDoc).box,
+    pacing: new UpstreamPacing(clock),
+    client: {
+      listWindowPage: async () => ({
+        ok: true,
+        rate: { remaining: 100, resetInS: 0 },
+        value: [
+          {
+            listenedAt: 1768474800,
+            artist: 'Björk',
+            track: 'Jóga',
+            recordingMsid: '00000000-0000-4000-8000-000000000001',
+          },
+        ],
+      }),
+      deleteListen: async () => {
+        deletes++;
+        return { ok: true, accepted: true, rate: { remaining: 100, resetInS: 0 } };
+      },
+    },
+  };
+  for (let i = 0; i < 6; i++) {
+    await runDeleteSlice(deps as any);
+    now += 1000;
+  }
+  expect(deletes).toBe(1);
+  copyFileSync(x.world.dbPath + '.pre-restore', x.world.dbPath + '.first-pre-restore');
+  rmSync(x.world.dbPath + '.pre-restore');
+  const secondRestore = await restoreCli(x.world, systemd, [...baseArgs(x.world), '--no-ready-check']);
+  expect(secondRestore.code, secondRestore.stderr).toBe(0);
+  const replayDb = systemd.server!.server.db;
+  expect(replayDb.one('SELECT count(*) n FROM scrobbles WHERE uri=?', x.uri)).toEqual({ n: 1 });
+  x.apply(replayDb, gone, false);
+  expect(replayDb.one('SELECT count(*) n FROM live_pending_removals WHERE uri=?', x.uri)).toEqual({ n: 1 });
+  replayDb.tx(() => executeAuthorizedRemovals(replayDb, { nowMs: x.world.clock.nowMs(), random, limit: 10 }));
+  for (let i = 0; i < 6; i++) {
+    await runDeleteSlice({ ...deps, db: replayDb } as any);
+    now += 1000;
+  }
+  expect(deletes).toBe(1);
+  expect(replayDb.one("SELECT count(*) n FROM listenbrainz_deletes WHERE state='sent'")).toEqual({ n: 1 });
+  console.log('D10 direct/delayed insert attempts', attempts, 'counted remote deletes after second restore', deletes);
+  useRealTimers = true;
+}, 30000);
+
+let excludedAtStartup = false;
+it.each(['revoked-link', 'new-generation', 'signin-scope'] as const)(
+  'independent restored signed pending cannot escape %s',
+  async (mode) => {
+    useRealTimers = true;
+    excludedAtStartup = mode === 'signin-scope';
+    const x = await signedWorld();
+    await x.repo.delete(x.collection, x.rkey);
+    const gone = await x.proof();
+    x.apply(x.db, gone);
+    enqueueHints(x.db, [
+      {
+        did: DID_A,
+        collection: x.collection,
+        rkey: x.rkey,
+        source: 'jetstream',
+        hintRev: gone.commit.rev,
+        live: { operation: 'delete' },
+        receiptMs: x.world.clock.nowMs(),
+      },
+    ]);
+    x.db.run('DELETE FROM hints');
+    x.db.run('DELETE FROM live_record_evidence');
+    x.db.run('DELETE FROM timers');
+    await x.backup();
+    const link = x.db.one<{ id: string; generation: number }>(
+      "SELECT id,generation FROM linked_accounts WHERE did=? AND service='listenbrainz'",
+      DID_A,
+    )!;
+    if (mode === 'revoked-link') {
+      const journal = new FileRevocations({ path: revocationLogPath(x.world.state), clock: x.world.clock });
+      expect(deleteLink({ db: x.db, revocations: journal }, DID_A, link.id)).toBe(true);
+      journal.close();
+    }
+    if (mode === 'new-generation') {
+      const replacement = saveLink(
+        { db: x.db, clock: x.world.clock, random, box: boxOf(x.world.secretsDoc).box },
+        { did: DID_A, service: 'listenbrainz', remoteUser: 'other-remote', credential: 'different-token' },
+      );
+      expect(replacement.link.generation).toBeGreaterThan(link.generation);
+    }
+    x.db.close();
+    const systemd = await realRestore(x.world);
+    const db = systemd.server!.server.db;
+    await expect
+      .poll(() => db.one<{ n: number }>('SELECT count(*) n FROM live_pending_removals')!.n, {
+        timeout: 8000,
+        interval: 100,
+      })
+      .toBe(0);
+    await new Promise((r) => setTimeout(r, 2300));
+    expect(remoteDeletes).toBe(0);
+    if (mode === 'revoked-link') expect(db.one('SELECT 1 FROM linked_accounts WHERE id=?', link.id)).toBeNull();
+    if (mode === 'signin-scope')
+      expect(db.one('SELECT status FROM linked_accounts WHERE id=?', link.id)).toEqual({ status: 'revoked' });
+    excludedAtStartup = false;
+  },
+  15000,
+);
+it('independent signed settings suppression clears only A retained work and restored B timers delete only for B', async () => {
+  useRealTimers = true;
+  excludedAtStartup = false;
+  const x = await signedWorld();
+  const keys = await fixtureKeys(),
+    other = new SignedRepo(DID_B, keys.bob, { clock: x.world.clock });
+  const bobKey = '3kbobpending',
+    bobUri = `at://${DID_B}/${x.collection}/${bobKey}`;
+  saveLink(
+    { db: x.db, clock: x.world.clock, random, box: boxOf(x.world.secretsDoc).box },
+    { did: DID_B, service: 'listenbrainz', remoteUser: 'bob', credential: 'bob-token' },
+  );
+  await other.put(x.collection, bobKey, {
+    $type: x.collection,
+    artist: 'Björk',
+    track: 'Jóga',
+    listenedAt: '2026-01-15T11:00:00Z',
+    createdAt: '2026-01-15T11:00:00Z',
+  });
+  const verifyBob = async () =>
+    verifyRecordProof(await other.getRecordCar(x.collection, bobKey), {
+      did: DID_B,
+      collection: x.collection,
+      rkey: bobKey,
+      signingKey: other.key.didKey,
+    });
+  x.apply(x.db, await verifyBob(), true);
+  let delivered = 0;
+  await runForward({
+    db: x.db,
+    clock: x.world.clock,
+    random,
+    log: { log() {} },
+    box: boxOf(x.world.secretsDoc).box,
+    pacing: new UpstreamPacing(x.world.clock),
+    lastfm: null,
+    listenbrainz: {
+      submit: async () => {
+        delivered++;
+        return { ok: true, value: null, rate: { remaining: 100, resetInS: 0 } };
+      },
+    },
+  } as any);
+  expect(delivered).toBe(1);
+  await x.repo.delete(x.collection, x.rkey);
+  const goneA = await x.proof();
+  x.apply(x.db, goneA);
+  await other.delete(x.collection, bobKey);
+  const goneB = await verifyBob();
+  x.apply(x.db, goneB);
+  const removals: Array<[string, string, string]> = [
+    [DID_A, x.rkey, goneA.commit.rev],
+    [DID_B, bobKey, goneB.commit.rev],
+  ];
+  for (const [did, rkey, rev] of removals)
+    enqueueHints(x.db, [
+      {
+        did,
+        collection: x.collection,
+        rkey,
+        source: 'jetstream',
+        hintRev: rev,
+        live: { operation: 'delete' },
+        receiptMs: x.world.clock.nowMs(),
+      },
+    ]);
+  expect(x.db.one('SELECT count(*) n FROM live_pending_removals')).toEqual({ n: 2 });
+  await x.repo.put(PREFIX + '.settings', 'self', {
+    $type: PREFIX + '.settings',
+    indexing: 'disabled',
+    createdAt: '2026-01-15T11:00:00Z',
+  });
+  const disabled = await verifyRecordProof(await x.repo.getRecordCar(PREFIX + '.settings', 'self'), {
+    did: DID_A,
+    collection: PREFIX + '.settings',
+    rkey: 'self',
+    signingKey: x.repo.key.didKey,
+  });
+  x.apply(x.db, disabled);
+  expect(x.db.all('SELECT uri FROM live_pending_removals')).toEqual([{ uri: bobUri }]);
+  expect(x.db.one('SELECT count(*) n FROM live_pending_removal_events WHERE uri=?', x.uri)).toEqual({ n: 0 });
+  x.db.run('DELETE FROM hints');
+  x.db.run('DELETE FROM live_record_evidence');
+  x.db.run('DELETE FROM timers');
+  await x.backup();
+  x.db.close();
+  const systemd = await realRestore(x.world);
+  await expect.poll(() => remoteDeletes, { timeout: 18000, interval: 100 }).toBe(1);
+  expect(systemd.server!.server.db.all("SELECT did FROM listenbrainz_deletes WHERE state='sent'")).toEqual([
+    { did: DID_B },
+  ]);
+}, 30000);

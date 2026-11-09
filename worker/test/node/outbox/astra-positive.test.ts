@@ -39,8 +39,7 @@ const record = scrobble({ artist: 'Björk', track: 'Jóga' });
 const second = Date.parse(record.listenedAt as string) / 1000;
 const [artistKey, musicTrackKey] = trackKey('Björk', 'Jóga');
 const identity = projectionListenKey(ALICE, record.listenedAt as string, artistKey, musicTrackKey);
-const live = (db: Db, proof: Awaited<ReturnType<typeof putProof>>) =>
-  authorizedLiveOptions(db, proof, rng);
+const live = (db: Db, proof: Awaited<ReturnType<typeof putProof>>) => authorizedLiveOptions(db, proof, rng);
 function seedLink(db: Db) {
   seedUser(db, ALICE);
   const accountDeps: Pick<CredentialDeps, 'db' | 'clock'> = { db, clock: { nowMs: () => NOW_MS } };
@@ -130,42 +129,135 @@ async function drain(db: Db) {
   return { deletes, lookups };
 }
 
-import { authorizePendingRemovals, executeAuthorizedRemovals, recordPendingRemoval } from '../../../src/do/ingest/live-pending-removals';
-import { LIVE_EVIDENCE_TTL_MS, readLiveEvidence } from '../../../src/do/ingest/live-evidence';
 import { enqueueHints } from '../../../src/do/ingest/hints';
-const rng = seededRandom(888);
-const sweep = (db: Db, nowMs=NOW_MS) => db.tx(()=>executeAuthorizedRemovals(db,{nowMs,random:rng,limit:10}));
+import { LIVE_EVIDENCE_TTL_MS, readLiveEvidence } from '../../../src/do/ingest/live-evidence';
+import {
+  authorizePendingRemovals,
+  executeAuthorizedRemovals,
+  recordPendingRemoval,
+} from '../../../src/do/ingest/live-pending-removals';
 
-it('fresh positive: genuine 10000 duplicate-key batch absence runs one real delete',async()=>{
- const alphabet='234567abcdefghijklmnopqrstuvwxyz';
- const ids=Array.from({length:10000},(_,i)=>{let n=i,s='';do{s=alphabet[n%32]+s;n=Math.floor(n/32)}while(n);return s.padStart(13,'2')});
- const repo=await repoFor('alice');const first=await putProof(repo,BATCH,'b',batchRecord(ids));const gone=await deleteProof(repo,BATCH,'b');
- await withMigratedDb(async db=>{seedLink(db);db.tx(()=>applyRecordProof(db,first,live(db,first)));delivered(db);
- expect(db.one('SELECT count(*) n FROM scrobbles')).toEqual({n:10000});
- db.tx(()=>applyRecordProof(db,gone,OPTS));expect(db.one('SELECT count(*) n FROM live_pending_removals')).toEqual({n:10000});
- enqueueHints(db,[{did:ALICE,collection:BATCH,rkey:'b',source:'jetstream',hintRev:gone.commit.rev,live:{operation:'delete'},receiptMs:NOW_MS}]);sweep(db);
- expect(db.one('SELECT count(*) n FROM live_pending_removals')).toEqual({n:0});expect((await drain(db)).deletes).toBe(1);
- });
+const rng = seededRandom(888);
+const sweep = (db: Db, nowMs = NOW_MS) => db.tx(() => executeAuthorizedRemovals(db, { nowMs, random: rng, limit: 10 }));
+
+it('fresh positive: genuine 10000 duplicate-key batch absence runs one real delete', async () => {
+  const alphabet = '234567abcdefghijklmnopqrstuvwxyz';
+  const ids = Array.from({ length: 10000 }, (_, i) => {
+    let n = i,
+      s = '';
+    do {
+      s = alphabet[n % 32] + s;
+      n = Math.floor(n / 32);
+    } while (n);
+    return s.padStart(13, '2');
+  });
+  const repo = await repoFor('alice');
+  const first = await putProof(repo, BATCH, 'b', batchRecord(ids));
+  const gone = await deleteProof(repo, BATCH, 'b');
+  await withMigratedDb(async (db) => {
+    seedLink(db);
+    db.tx(() => applyRecordProof(db, first, live(db, first)));
+    delivered(db);
+    expect(db.one('SELECT count(*) n FROM scrobbles')).toEqual({ n: 10000 });
+    db.tx(() => applyRecordProof(db, gone, OPTS));
+    expect(db.one('SELECT count(*) n FROM live_pending_removals')).toEqual({ n: 10000 });
+    enqueueHints(db, [
+      {
+        did: ALICE,
+        collection: BATCH,
+        rkey: 'b',
+        source: 'jetstream',
+        hintRev: gone.commit.rev,
+        live: { operation: 'delete' },
+        receiptMs: NOW_MS,
+      },
+    ]);
+    sweep(db);
+    expect(db.one('SELECT count(*) n FROM live_pending_removals')).toEqual({ n: 0 });
+    expect((await drain(db)).deletes).toBe(1);
+  });
 });
-it.each([0,1])('fresh positive: exact expiration boundary cannot execute offset=%s',async offset=>{
- const repo=await repoFor('alice');const first=await putProof(repo,SCROBBLE,'a',record);const gone=await deleteProof(repo,SCROBBLE,'a');
- await withMigratedDb(async db=>{seedLink(db);db.tx(()=>applyRecordProof(db,first,live(db,first)));delivered(db);db.tx(()=>applyRecordProof(db,gone,OPTS));
- enqueueHints(db,[{did:ALICE,collection:SCROBBLE,rkey:'a',source:'jetstream',hintRev:gone.commit.rev,live:{operation:'delete'},receiptMs:NOW_MS+LIVE_EVIDENCE_TTL_MS-1}]);
- sweep(db,NOW_MS+LIVE_EVIDENCE_TTL_MS+offset);expect((await drain(db)).deletes).toBe(0);expect(db.one('SELECT count(*) n FROM live_pending_removals')).toEqual({n:0});
- });
+it.each([0, 1])('fresh positive: exact expiration boundary cannot execute offset=%s', async (offset) => {
+  const repo = await repoFor('alice');
+  const first = await putProof(repo, SCROBBLE, 'a', record);
+  const gone = await deleteProof(repo, SCROBBLE, 'a');
+  await withMigratedDb(async (db) => {
+    seedLink(db);
+    db.tx(() => applyRecordProof(db, first, live(db, first)));
+    delivered(db);
+    db.tx(() => applyRecordProof(db, gone, OPTS));
+    enqueueHints(db, [
+      {
+        did: ALICE,
+        collection: SCROBBLE,
+        rkey: 'a',
+        source: 'jetstream',
+        hintRev: gone.commit.rev,
+        live: { operation: 'delete' },
+        receiptMs: NOW_MS + LIVE_EVIDENCE_TTL_MS - 1,
+      },
+    ]);
+    sweep(db, NOW_MS + LIVE_EVIDENCE_TTL_MS + offset);
+    expect((await drain(db)).deletes).toBe(0);
+    expect(db.one('SELECT count(*) n FROM live_pending_removals')).toEqual({ n: 0 });
+  });
 });
-it('fresh positive: same CID recreation has no tombstone and remains visible',async()=>{
- const repo=await repoFor('alice');const first=await putProof(repo,SCROBBLE,'a',record);const gone=await deleteProof(repo,SCROBBLE,'a');const again=await putProof(repo,SCROBBLE,'a',record);
- await withMigratedDb(async db=>{seedLink(db);db.tx(()=>applyRecordProof(db,first,live(db,first)));delivered(db);db.tx(()=>applyRecordProof(db,gone,OPTS));db.tx(()=>applyRecordProof(db,again,live(db,again)));
- enqueueHints(db,[{did:ALICE,collection:SCROBBLE,rkey:'a',source:'jetstream',hintRev:gone.commit.rev,live:{operation:'delete'},receiptMs:NOW_MS}]);sweep(db);
- expect(db.one('SELECT count(*) n FROM linked_pull_tombstones')).toEqual({n:0});expect(db.one(`SELECT count(*) n FROM ${visibleScrobblesFrom()}`)).toEqual({n:1});expect((await drain(db)).deletes).toBe(0);
- });
+it('fresh positive: same CID recreation has no tombstone and remains visible', async () => {
+  const repo = await repoFor('alice');
+  const first = await putProof(repo, SCROBBLE, 'a', record);
+  const gone = await deleteProof(repo, SCROBBLE, 'a');
+  const again = await putProof(repo, SCROBBLE, 'a', record);
+  await withMigratedDb(async (db) => {
+    seedLink(db);
+    db.tx(() => applyRecordProof(db, first, live(db, first)));
+    delivered(db);
+    db.tx(() => applyRecordProof(db, gone, OPTS));
+    db.tx(() => applyRecordProof(db, again, live(db, again)));
+    enqueueHints(db, [
+      {
+        did: ALICE,
+        collection: SCROBBLE,
+        rkey: 'a',
+        source: 'jetstream',
+        hintRev: gone.commit.rev,
+        live: { operation: 'delete' },
+        receiptMs: NOW_MS,
+      },
+    ]);
+    sweep(db);
+    expect(db.one('SELECT count(*) n FROM linked_pull_tombstones')).toEqual({ n: 0 });
+    expect(db.one(`SELECT count(*) n FROM ${visibleScrobblesFrom()}`)).toEqual({ n: 1 });
+    expect((await drain(db)).deletes).toBe(0);
+  });
 });
-it('fresh positive: newer canonical love at different URI protects against old unlove',async()=>{
- const LOVE='com.example.atmusic.love';const key='2222222222222';const other='3333333333333';const loved={$type:LOVE,artist:'Björk',track:'Jóga',createdAt:'2026-01-15T11:00:00Z'};
- const repo=await repoFor('alice');const first=await putProof(repo,LOVE,key,loved);const gone=await deleteProof(repo,LOVE,key);const again=await putProof(repo,LOVE,other,loved);
- await withMigratedDb(db=>{seedLink(db);db.tx(()=>applyRecordProof(db,first,live(db,first)));db.run("UPDATE forward_outbox SET state='sent'");db.tx(()=>applyRecordProof(db,gone,OPTS));db.tx(()=>applyRecordProof(db,again,live(db,again)));
- enqueueHints(db,[{did:ALICE,collection:LOVE,rkey:key,source:'jetstream',hintRev:gone.commit.rev,live:{operation:'delete'},receiptMs:NOW_MS}]);sweep(db);
- expect(db.one("SELECT count(*) n FROM forward_outbox WHERE kind='unlove'")).toEqual({n:0});expect(db.one('SELECT count(*) n FROM linked_pull_tombstones')).toEqual({n:0});
- });
+it('fresh positive: newer canonical love at different URI protects against old unlove', async () => {
+  const LOVE = 'com.example.atmusic.love';
+  const key = '2222222222222';
+  const other = '3333333333333';
+  const loved = { $type: LOVE, artist: 'Björk', track: 'Jóga', createdAt: '2026-01-15T11:00:00Z' };
+  const repo = await repoFor('alice');
+  const first = await putProof(repo, LOVE, key, loved);
+  const gone = await deleteProof(repo, LOVE, key);
+  const again = await putProof(repo, LOVE, other, loved);
+  await withMigratedDb((db) => {
+    seedLink(db);
+    db.tx(() => applyRecordProof(db, first, live(db, first)));
+    db.run("UPDATE forward_outbox SET state='sent'");
+    db.tx(() => applyRecordProof(db, gone, OPTS));
+    db.tx(() => applyRecordProof(db, again, live(db, again)));
+    enqueueHints(db, [
+      {
+        did: ALICE,
+        collection: LOVE,
+        rkey: key,
+        source: 'jetstream',
+        hintRev: gone.commit.rev,
+        live: { operation: 'delete' },
+        receiptMs: NOW_MS,
+      },
+    ]);
+    sweep(db);
+    expect(db.one("SELECT count(*) n FROM forward_outbox WHERE kind='unlove'")).toEqual({ n: 0 });
+    expect(db.one('SELECT count(*) n FROM linked_pull_tombstones')).toEqual({ n: 0 });
+  });
 });

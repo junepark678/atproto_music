@@ -181,8 +181,8 @@ export function enqueueForwards(db: Db, args: EnqueueForwardsArgs): number {
           loveTrackKey,
           ...(args.priority === undefined ? [] : [args.priority]),
           loveArtistKey === null || item.kind === 'scrobble' || item.kind === 'nowplaying' ? null : 1,
-          item.kind === 'unlove' ? item.authorization?.uri ?? null : null,
-          item.kind === 'unlove' ? item.authorization?.rev ?? null : null,
+          item.kind === 'unlove' ? (item.authorization?.uri ?? null) : null,
+          item.kind === 'unlove' ? (item.authorization?.rev ?? null) : null,
         ];
         const inserted = db.run(insertSql, ...params).rowsWritten;
         created += inserted;
