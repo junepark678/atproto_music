@@ -70,7 +70,7 @@ export function nowPlayingKey(did: string, startedAtMs: number, artist: string, 
 export type ForwardItem =
   | { kind: 'scrobble'; listenKey: string; payload: unknown }
   | { kind: 'nowplaying'; startedAtMs: number; artist: string; track: string; payload: unknown }
-  | { kind: 'love' | 'unlove'; operationId: string; payload: unknown };
+  | { kind: 'love' | 'unlove'; operationId: string; payload: unknown; authorization?: { uri: string; rev: string } };
 
 function dedupeKey(did: string, item: ForwardItem): string {
   switch (item.kind) {
@@ -159,12 +159,12 @@ export function enqueueForwards(db: Db, args: EnqueueForwardsArgs): number {
         const insertSql =
           args.priority === undefined
             ? `INSERT INTO forward_outbox(id,link_id,generation,did,kind,dedupe_key,payload_json,state,attempts,due_at,
-               created_at_ms, updated_at_ms, love_artist_key, love_track_key, love_lane)
-             VALUES (?,?,?,?,?,?,?,'queued',0,?,?,?,?,?,?)
+               created_at_ms, updated_at_ms, love_artist_key, love_track_key, love_lane,authorization_uri,authorization_rev)
+             VALUES (?,?,?,?,?,?,?,'queued',0,?,?,?,?,?,?,?,?)
              ON CONFLICT(link_id,kind,dedupe_key) DO NOTHING`
             : `INSERT INTO forward_outbox(id,link_id,generation,did,kind,dedupe_key,payload_json,state,attempts,due_at,
-               created_at_ms, updated_at_ms, love_artist_key, love_track_key,priority,love_lane)
-             VALUES (?,?,?,?,?,?,?,'queued',0,?,?,?,?,?,?,?)
+               created_at_ms, updated_at_ms, love_artist_key, love_track_key,priority,love_lane,authorization_uri,authorization_rev)
+             VALUES (?,?,?,?,?,?,?,'queued',0,?,?,?,?,?,?,?,?,?)
              ON CONFLICT(link_id,kind,dedupe_key) DO NOTHING`;
         const params = [
           id,
@@ -181,6 +181,8 @@ export function enqueueForwards(db: Db, args: EnqueueForwardsArgs): number {
           loveTrackKey,
           ...(args.priority === undefined ? [] : [args.priority]),
           loveArtistKey === null || item.kind === 'scrobble' || item.kind === 'nowplaying' ? null : 1,
+          item.kind === 'unlove' ? item.authorization?.uri ?? null : null,
+          item.kind === 'unlove' ? item.authorization?.rev ?? null : null,
         ];
         const inserted = db.run(insertSql, ...params).rowsWritten;
         created += inserted;

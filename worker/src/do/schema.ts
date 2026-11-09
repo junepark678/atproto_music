@@ -1561,6 +1561,27 @@ const MIGRATION_LIVE_PENDING_REMOVAL_BOUNDS: Migration = {
   ],
 };
 
+// A2 repair: bind queued live unlove effects to their immutable authorization.
+const MIGRATION_A2_AUTHORIZATION_BINDING: Migration = {
+  version: 52,
+  name: 'a2_authorization_binding',
+  statements: [
+    'ALTER TABLE forward_outbox ADD COLUMN authorization_uri TEXT',
+    'ALTER TABLE forward_outbox ADD COLUMN authorization_rev TEXT',
+    'ALTER TABLE forward_outbox ADD COLUMN authorization_conflicted INTEGER NOT NULL DEFAULT 0',
+    'CREATE INDEX forward_outbox_authorization ON forward_outbox(authorization_uri,authorization_rev,state)',
+    'CREATE INDEX live_pending_removal_events_uri_ready_order ON live_pending_removal_events(uri,scan_complete,created_at_ms,rev)',
+    'ALTER TABLE live_pending_removal_events ADD COLUMN cleanup_cursor_window_hi TEXT NOT NULL DEFAULT ""',
+    'ALTER TABLE live_pending_removal_events ADD COLUMN cleanup_cursor_window_lo TEXT NOT NULL DEFAULT ""',
+    'ALTER TABLE live_pending_removal_events ADD COLUMN cleanup_cursor_replaced_by_cid TEXT NOT NULL DEFAULT ""',
+    'ALTER TABLE live_pending_removal_events ADD COLUMN cleanup_cursor_kind TEXT NOT NULL DEFAULT ""',
+    'ALTER TABLE live_pending_removal_events ADD COLUMN cleanup_cursor_member_uri TEXT NOT NULL DEFAULT ""',
+    'ALTER TABLE live_pending_removal_events ADD COLUMN cleanup_cursor_removed_cid TEXT NOT NULL DEFAULT ""',
+    'ALTER TABLE live_pending_removal_events ADD COLUMN cleanup_scan_complete INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE live_pending_removal_events ADD COLUMN cleanup_has_match INTEGER NOT NULL DEFAULT 0',
+  ],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
   MIGRATION_2,
@@ -1613,6 +1634,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_LIVE_PENDING_REMOVALS,
   MIGRATION_LIVE_PENDING_REMOVAL_REPAIR,
   MIGRATION_LIVE_PENDING_REMOVAL_BOUNDS,
+  MIGRATION_A2_AUTHORIZATION_BINDING,
 ];
 
 /** The schema version this code expects. */

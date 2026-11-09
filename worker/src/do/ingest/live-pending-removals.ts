@@ -190,16 +190,20 @@ export const AUTHORIZATION_PAGE_SQL = `SELECT kind,window_lo,window_hi,replaced_
  ORDER BY window_hi,window_lo,replaced_by_cid,kind,member_uri,removed_cid LIMIT ?`;
 export const AUTHORIZATION_EVENT_HEAD_SQL = `SELECT * FROM live_pending_removal_events INDEXED BY live_pending_removal_events_ready_v2
  WHERE scan_complete=0 ORDER BY created_at_ms,uri,rev LIMIT 1`;
-export const AUTHORIZATION_EVENT_HEAD_URI_SQL = `SELECT * FROM live_pending_removal_events INDEXED BY live_pending_removal_events_uri_scan
+export const AUTHORIZATION_EVENT_HEAD_URI_SQL = `SELECT * FROM live_pending_removal_events INDEXED BY live_pending_removal_events_uri_ready_order
  WHERE uri=? AND scan_complete=0 ORDER BY created_at_ms,rev LIMIT 1`;
 export const PENDING_EVENT_CLEANUP_PAGE_SQL = `SELECT rowid,uri,rev,conflicted,expires_at_ms FROM live_pending_removal_events INDEXED BY live_pending_removal_events_cleanup
  WHERE cleanup_due_ms<=? ORDER BY cleanup_due_ms,uri,rev LIMIT ?`;
 export const PENDING_EXPIRY_PAGE_SQL = `SELECT rowid FROM live_pending_removals INDEXED BY live_pending_removals_expiry
  WHERE expires_at_ms<=? ORDER BY expires_at_ms,uri,window_hi LIMIT ?`;
-export const CONFLICT_PENDING_RETENTION_SQL = `SELECT 1 FROM live_pending_removals INDEXED BY live_pending_removals_authorize
- WHERE uri=? AND window_hi>=? AND window_lo<? LIMIT 1`;
 export const CONFLICT_QUEUED_EFFECT_RETENTION_SQL = `SELECT 1 FROM listenbrainz_deletes INDEXED BY listenbrainz_deletes_authorization
  WHERE authorization_uri=? AND authorization_rev=? AND state='queued' LIMIT 1`;
+export const CONFLICT_QUEUED_UNLOVE_RETENTION_SQL = `SELECT 1 FROM forward_outbox INDEXED BY forward_outbox_authorization
+ WHERE authorization_uri=? AND authorization_rev=? AND kind='unlove' AND state='queued' LIMIT 1`;
+export const CONFLICT_RETENTION_SCAN_SQL = `SELECT window_hi,window_lo,replaced_by_cid,kind,member_uri,removed_cid
+  FROM live_pending_removals INDEXED BY live_pending_removals_page
+ WHERE uri=? AND (window_hi,window_lo,replaced_by_cid,kind,member_uri,removed_cid)>(?,?,?,?,?,?)
+ ORDER BY window_hi,window_lo,replaced_by_cid,kind,member_uri,removed_cid LIMIT ?`;
 
 interface AuthorizationEvent {
   uri: string;
@@ -241,38 +245,53 @@ function processAuthorizationPage(db: Db, event: AuthorizationEvent): number {
     AUTHORIZATION_PAGE_SIZE,
   );
   let authorized = 0;
+  const groups = new Map<string, (typeof page)[number]>();
   for (const row of page) {
     const eligible =
       row.window_lo < event.rev &&
       event.rev <= row.window_hi &&
       (event.conflicted !== 0 || eventMatchesPending(event, row.replaced_by_cid));
     if (!eligible) continue;
+    const key = JSON.stringify([row.kind, row.window_lo, row.window_hi, row.replaced_by_cid]);
+    if (!groups.has(key)) groups.set(key, row);
+  }
+  for (const row of groups.values()) {
     if (event.conflicted) {
+      if (row.conflicted_auth_rev !== null && row.conflicted_auth_rev >= event.rev) continue;
+      db.run(
+        `UPDATE forward_outbox SET authorization_conflicted=1
+         WHERE authorization_uri=? AND authorization_rev=? AND kind='unlove' AND state='queued'`,
+        event.uri,
+        event.rev,
+      );
       authorized += db.run(
         `UPDATE live_pending_removals SET conflicted_auth_rev=?
-         WHERE uri=? AND kind=? AND window_lo=? AND window_hi=? AND replaced_by_cid=?`,
+         WHERE uri=? AND kind=? AND window_lo=? AND window_hi=? AND replaced_by_cid=?
+           AND (conflicted_auth_rev IS NULL OR conflicted_auth_rev<?)`,
         event.rev,
         event.uri,
         row.kind,
         row.window_lo,
         row.window_hi,
         row.replaced_by_cid,
+        event.rev,
       ).rowsWritten;
     } else if (
-      row.authorized_rev === null ||
-      row.authorized_rev === event.rev ||
-      row.authorized_rev === row.conflicted_auth_rev
+      (row.authorized_rev === null && (row.conflicted_auth_rev === null || event.rev > row.conflicted_auth_rev)) ||
+      (row.authorized_rev === row.conflicted_auth_rev && row.authorized_rev !== null && event.rev > row.authorized_rev)
     ) {
       authorized += db.run(
         `UPDATE live_pending_removals SET authorized_rev=?,conflict_invalidated=0
          WHERE uri=? AND kind=? AND window_lo=? AND window_hi=? AND replaced_by_cid=?
-           AND (authorized_rev IS NULL OR authorized_rev=? OR authorized_rev=conflicted_auth_rev)`,
+           AND ((authorized_rev IS NULL AND (conflicted_auth_rev IS NULL OR conflicted_auth_rev<?))
+             OR (authorized_rev=conflicted_auth_rev AND authorized_rev<?))`,
         event.rev,
         event.uri,
         row.kind,
         row.window_lo,
         row.window_hi,
         row.replaced_by_cid,
+        event.rev,
         event.rev,
       ).rowsWritten;
     }
@@ -332,6 +351,13 @@ export function authorizePendingRemovals(
     db.run('UPDATE live_pending_removal_events SET scan_complete=1 WHERE uri=? AND rev=?', event.uri, event.rev);
     return 0;
   }
+  if (conflict)
+    db.run(
+      `UPDATE forward_outbox SET authorization_conflicted=1
+       WHERE authorization_uri=? AND authorization_rev=? AND kind='unlove' AND state='queued'`,
+      event.uri,
+      event.rev,
+    );
   const scan = db.one<AuthorizationEvent>(
     'SELECT * FROM live_pending_removal_events WHERE uri=? AND rev=?',
     event.uri,
@@ -545,6 +571,7 @@ function processGroup(db: Db, group: PendingGroup, nowMs: number, random: Random
             recordingMbid: row.recording_mbid ?? undefined,
             origin: 'web',
           },
+          authorization: { uri: group.uri, rev: group.authorized_rev },
         },
       ],
       ...(sources.size ? { excludeSourceServices: [...sources] } : {}),
@@ -576,16 +603,75 @@ export function executeAuthorizedRemovals(
     rev: string;
     conflicted: number;
     expires_at_ms: number;
-  }>(PENDING_EVENT_CLEANUP_PAGE_SQL, args.nowMs, EVENT_CLEANUP_PAGE_SIZE);
+    cleanup_cursor_window_hi: string;
+    cleanup_cursor_window_lo: string;
+    cleanup_cursor_replaced_by_cid: string;
+    cleanup_cursor_kind: string;
+    cleanup_cursor_member_uri: string;
+    cleanup_cursor_removed_cid: string;
+    cleanup_scan_complete: number;
+    cleanup_has_match: number;
+  }>(PENDING_EVENT_CLEANUP_PAGE_SQL.replace('expires_at_ms FROM', 'expires_at_ms,cleanup_cursor_window_hi,cleanup_cursor_window_lo,cleanup_cursor_replaced_by_cid,cleanup_cursor_kind,cleanup_cursor_member_uri,cleanup_cursor_removed_cid,cleanup_scan_complete,cleanup_has_match FROM'), args.nowMs, EVENT_CLEANUP_PAGE_SIZE);
   let expiredEvents = 0;
   for (const event of cleanupEvents) {
     if (event.expires_at_ms > args.nowMs) {
       db.run('UPDATE live_pending_removal_events SET cleanup_due_ms=? WHERE rowid=?', event.expires_at_ms, event.rowid);
       continue;
     }
-    const retainedPending =
-      event.conflicted !== 0 && db.one(CONFLICT_PENDING_RETENTION_SQL, event.uri, event.rev, event.rev) !== null;
-    const retainedEffect = db.one(CONFLICT_QUEUED_EFFECT_RETENTION_SQL, event.uri, event.rev) !== null;
+    let retainedPending = false;
+    if (event.conflicted !== 0 && event.cleanup_scan_complete === 0) {
+      const page = db.all<{
+        window_hi: string;
+        window_lo: string;
+        replaced_by_cid: string;
+        kind: 'scrobble' | 'love';
+        member_uri: string;
+        removed_cid: string;
+      }>(
+        CONFLICT_RETENTION_SCAN_SQL,
+        event.uri,
+        event.cleanup_cursor_window_hi,
+        event.cleanup_cursor_window_lo,
+        event.cleanup_cursor_replaced_by_cid,
+        event.cleanup_cursor_kind,
+        event.cleanup_cursor_member_uri,
+        event.cleanup_cursor_removed_cid,
+        EVENT_CLEANUP_PAGE_SIZE,
+      );
+      const hasMatch = event.cleanup_has_match !== 0 || page.some((row) => row.window_lo < event.rev && row.window_hi >= event.rev);
+      const last = page.at(-1);
+      if (page.length === EVENT_CLEANUP_PAGE_SIZE && last) {
+        db.run(
+          `UPDATE live_pending_removal_events SET cleanup_cursor_window_hi=?,cleanup_cursor_window_lo=?,
+           cleanup_cursor_replaced_by_cid=?,cleanup_cursor_kind=?,cleanup_cursor_member_uri=?,cleanup_cursor_removed_cid=?,
+           cleanup_has_match=?,cleanup_due_ms=? WHERE rowid=?`,
+          last.window_hi,
+          last.window_lo,
+          last.replaced_by_cid,
+          last.kind,
+          last.member_uri,
+          last.removed_cid,
+          hasMatch ? 1 : 0,
+          args.nowMs + RETAINED_EVENT_RECHECK_MS,
+          event.rowid,
+        );
+        retainedPending = true;
+      } else if (hasMatch) {
+        db.run(
+          `UPDATE live_pending_removal_events SET cleanup_cursor_window_hi='',cleanup_cursor_window_lo='',
+           cleanup_cursor_replaced_by_cid='',cleanup_cursor_kind='',cleanup_cursor_member_uri='',cleanup_cursor_removed_cid='',
+           cleanup_has_match=0,cleanup_due_ms=? WHERE rowid=?`,
+          args.nowMs + RETAINED_EVENT_RECHECK_MS,
+          event.rowid,
+        );
+        retainedPending = true;
+      } else {
+        db.run('UPDATE live_pending_removal_events SET cleanup_scan_complete=1,cleanup_has_match=0 WHERE rowid=?', event.rowid);
+      }
+    }
+    const retainedEffect =
+      db.one(CONFLICT_QUEUED_EFFECT_RETENTION_SQL, event.uri, event.rev) !== null ||
+      db.one(CONFLICT_QUEUED_UNLOVE_RETENTION_SQL, event.uri, event.rev) !== null;
     if (retainedPending || retainedEffect) {
       db.run(
         'UPDATE live_pending_removal_events SET cleanup_due_ms=? WHERE rowid=?',
@@ -620,7 +706,7 @@ export function executeAuthorizedRemovals(
       args.nowMs,
     );
   const eventIndex =
-    args.uri === undefined ? 'live_pending_removal_events_ready_v2' : 'live_pending_removal_events_uri_scan';
+    args.uri === undefined ? 'live_pending_removal_events_ready_v2' : 'live_pending_removal_events_uri_ready_order';
   const pendingEvent = db.one<AuthorizationEvent>(
     args.uri === undefined ? AUTHORIZATION_EVENT_HEAD_SQL : AUTHORIZATION_EVENT_HEAD_URI_SQL,
     ...(args.uri === undefined ? [] : [args.uri]),
