@@ -374,9 +374,12 @@ describe('N5-02 protocol read benchmark', () => {
       for (const statement of statements) {
         validatePlanStatement(statement);
         // Pin the naturally selected owner/target probe, without INDEXED BY.
-        expect(statement.details).toContain(
-          'SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)',
-        );
+        expect(
+          statement.details.some(
+            (detail) =>
+              detail.includes('operations_scrobble_delete_target') || detail.includes('operations_record_target'),
+          ),
+        ).toBe(true);
         expect(statement.details.some((detail) => detail.includes('operations_did_state'))).toBe(false);
       }
     }

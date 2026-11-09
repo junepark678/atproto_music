@@ -603,7 +603,7 @@ describe('worker/test/harness', () => {
     const versions = MIGRATIONS.map((m) => m.version);
     expect(versions.slice(0, 14)).toEqual(Array.from({ length: 14 }, (_, i) => i + 1));
     expect(versions.slice(-20)).toEqual([
-      27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46,
+      28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47,
     ]);
     expect(versions.every((version, index) => index === 0 || version > (versions[index - 1] ?? 0))).toBe(true);
     expect(SCHEMA_VERSION).toBe(MIGRATIONS[MIGRATIONS.length - 1]?.version);
