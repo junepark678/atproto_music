@@ -517,3 +517,47 @@ it('DID suppression cleanup removes only that DID’s pending authorization and 
     expect(db.one('SELECT count(*) AS n FROM live_pending_removal_reconcile WHERE uri=?', otherUri)).toEqual({ n: 1 });
   });
 });
+
+it('a cancelled API re-love no longer vetoes the delayed unlove', async () => {
+  await withMigratedDb((db) => {
+    setup(db);
+    const uri = `at://${DID}/com.example.atmusic.love/cancelled-re-love`;
+    recordPendingRemoval(db, {
+      did: DID,
+      uri,
+      kind: 'love',
+      row: {
+        uri,
+        record_uri: null,
+        listen_id: null,
+        cid: 'love-cid',
+        listened_at: '',
+        artist_key: 'cancelled-artist',
+        track_key: 'cancelled-track',
+        artist: 'Cancelled Artist',
+        track: 'Cancelled Track',
+        recording_mbid: null,
+      },
+      identityKey: 'love:cancelled-api-re-love',
+      windowLo: '1111111111111',
+      windowHi: '2222222222222',
+      replacedByCid: null,
+      nowMs: NOW,
+    });
+    authorizePendingRemovals(db, { uri, rev: '2222222222222', action: 'delete' }, NOW);
+    db.run(
+      `INSERT INTO operations(id,did,kind,origin,priority,collection,rkey,record_json,digest,state,due_at,created_at_ms,updated_at_ms)
+       VALUES('cancelled-re-love',?,'love.put','web',1,'com.example.atmusic.love','cancelled-re-love',?,'digest','cancelled',?,?,?)`,
+      DID,
+      JSON.stringify({ artist: 'Cancelled Artist', track: 'Cancelled Track' }),
+      NOW,
+      NOW,
+      NOW,
+    );
+    executeAuthorizedRemovals(db, { uri, nowMs: NOW, random, limit: 1 });
+    expect(db.all("SELECT link_id,kind FROM forward_outbox WHERE kind='unlove'")).toEqual([
+      { link_id: 'pending-link', kind: 'unlove' },
+    ]);
+    expect(db.all('SELECT * FROM live_pending_removals WHERE uri=?', uri)).toHaveLength(0);
+  });
+});
