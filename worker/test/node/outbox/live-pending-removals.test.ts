@@ -14,9 +14,12 @@ import {
 } from '../../../src/do/ingest/live-pending-removals';
 import { applyRecordProof } from '../../../src/do/write/apply-record';
 import { executeListenRemovals } from '../../../src/forward/live-removal-effects';
-import { admitForwardIdentity, projectionListenKey } from '../../../src/forward/projection';
+import {
+  admitForwardIdentity,
+  cleanupForwardAdmissionsForSuppression,
+  projectionListenKey,
+} from '../../../src/forward/projection';
 import { enqueueForwards } from '../../../src/outbox/forward-enqueue';
-import { cleanupForwardAdmissionsForSuppression } from '../../../src/forward/projection';
 import {
   ALICE as DID,
   deleteProof,
