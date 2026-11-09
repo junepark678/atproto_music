@@ -155,17 +155,17 @@ function enrichedAlbumWhere(call: LastfmCall, mbid: string): Where | null {
   // Candidate artists identify groups; every visible group member can determine its current display.
   const displays = call.deps.db.all<ScrobbleRowV2>(
     `WITH mk AS (SELECT json_extract(value,'$.artistKey') AS ak,json_extract(value,'$.albumKey') AS xk FROM json_each(?)),
+       visible_listens AS MATERIALIZED (SELECT s.* FROM ${visibleScrobblesFrom('s', 'u')}),
        album_groups AS MATERIALIZED (
          SELECT DISTINCT coalesce(s.album_artist_key,s.artist_key) AS ak,s.album_key AS xk
-         FROM ${visibleScrobblesFrom('s', 'u')} JOIN mk ON mk.ak=s.artist_key AND mk.xk=s.album_key
-         WHERE s.album_key IS NOT NULL
+         FROM visible_listens s WHERE (s.artist_key,s.album_key) IN (SELECT ak,xk FROM mk)
        ),
        ranked AS (
          SELECT s.*, row_number() OVER (
            PARTITION BY coalesce(s.album_artist_key,s.artist_key),s.album_key
            ORDER BY s.listened_at DESC,s.uri DESC
          ) AS rn
-         FROM ${visibleScrobblesFrom('s', 'u')}
+         FROM visible_listens s
          WHERE (coalesce(s.album_artist_key,s.artist_key),s.album_key) IN (SELECT ak,xk FROM album_groups)
        ) SELECT * FROM ranked WHERE rn=1`,
     JSON.stringify(keys),

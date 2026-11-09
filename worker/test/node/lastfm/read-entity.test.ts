@@ -15,9 +15,9 @@ import { verifyRecordProof } from '@atmusic/atproto/verify/record-proof';
 import { artistKey, trackKey } from '@atmusic/core/music-key';
 import { fixedClock } from '@atmusic/core/test-support/clock';
 import { fromMs, toStorage } from '@atmusic/core/timestamp';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import fixture from '../../../../tests/fixtures/read_models.json' with { type: 'json' };
-import type { Db } from '../../../src/do/db';
+import type { Db, SqlParam } from '../../../src/do/db';
 import { type ApplyOptions, applyRecordProof } from '../../../src/do/write/apply-record';
 import { lastfmRoutes } from '../../../src/lastfm/routes';
 import { closeApps, startApp, type TestApp } from '../support/app';
@@ -611,4 +611,39 @@ describe('compilation MBID aliases use the newest visible group display', () => 
       expect(byId.body.album).toEqual(byName.body.album);
     },
   );
+});
+
+it('batches candidate albums sharing an artist without rescanning that artist per album', async () => {
+  const app = await compilation('same');
+  const base = app.db.one<Record<string, SqlParam>>("SELECT * FROM scrobbles WHERE rkey='probea'")!;
+  const columns = Object.keys(base);
+  const insert = `INSERT INTO scrobbles(${columns.join(',')}) VALUES(${columns.map(() => '?').join(',')})`;
+  app.db.tx(() => {
+    for (let i = 0; i < 200; i++) {
+      const row = {
+        ...base,
+        uri: `at://${ALICE}/${SCROBBLE}/candidate${i}`,
+        rkey: `candidate${i}`,
+        album_key: `candidate${i}`,
+      };
+      app.db.run(insert, ...columns.map((c) => row[c as keyof typeof row]));
+      app.db.run(
+        "INSERT INTO mb_tracks(artist_key,track_key,album_key,status,release_mbid,created_at_ms) VALUES(?,? ,?,'matched',?,1)",
+        base.artist_key!,
+        base.track_key!,
+        row.album_key,
+        M,
+      );
+    }
+  });
+  const spy = vi.spyOn(app.db, 'all');
+  const result = await get(app, { method: 'album.getInfo', mbid: M });
+  const queries = spy.mock.calls.filter(([sql]) => sql.includes('WITH mk AS'));
+  spy.mockRestore();
+  expect(result.status).toBe(200);
+  expect(result.body.album.playcount).toBe('2');
+  expect(queries).toHaveLength(1);
+  const [sql, ...params] = queries[0]!;
+  const plan = app.db.all<{ detail: string }>(`EXPLAIN QUERY PLAN ${sql}`, ...params);
+  expect(plan.some((row) => row.detail.includes('SEARCH s USING INDEX scrobbles_artist_global'))).toBe(false);
 });
