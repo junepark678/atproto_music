@@ -62,6 +62,7 @@ import {
   projectionListenKey,
   retainedForwardProvenance,
   retainedRecordProvenance,
+  type ForwardProvenance,
 } from '../../forward/projection';
 import { enqueueTrack } from '../../musicbrainz/store';
 import { enqueueForwards } from '../../outbox/forward-enqueue';
@@ -143,6 +144,60 @@ export interface TargetResult {
   reason?: string;
   /** A scrobble row was inserted, changed or deleted. */
   statsChanged: boolean;
+}
+
+type ProjectedListen = {
+  uri: string;
+  record_uri: string | null;
+  listen_id: string | null;
+  cid: string;
+  listened_at: string;
+  artist_key: string;
+  track_key: string;
+  artist: string;
+  track: string;
+  recording_mbid: string | null;
+};
+
+/** Indexed lookup for the single scrobble or batch members at one record URI. */
+export function projectedListensOfRecord(db: Db, did: string, uri: string): ProjectedListen[] {
+  return db.all<ProjectedListen>(
+    `SELECT uri,record_uri,listen_id,cid,listened_at,artist_key,track_key,artist,track,recording_mbid
+       FROM scrobbles WHERE uri=? AND did=?
+     UNION ALL
+     SELECT uri,record_uri,listen_id,cid,listened_at,artist_key,track_key,artist,track,recording_mbid
+       FROM scrobbles WHERE record_uri=? AND did=?`,
+    uri,
+    did,
+    uri,
+    did,
+  );
+}
+
+/** Preserve the legacy admission before an absence or exclusion removes a projection. */
+function seedRemovedListenAdmissions(
+  db: Db,
+  target: RecordTarget,
+  listens: readonly ProjectedListen[],
+  now: number,
+): void {
+  if (listens.length === 0) return;
+  const provenance: ForwardProvenance | null = retainedRecordProvenance(
+    db,
+    target.did,
+    target.collection,
+    target.rkey,
+  );
+  for (const listen of listens) {
+    admitProjectedIdentity(db, {
+      did: target.did,
+      identityKey: projectionListenKey(target.did, listen.listened_at, listen.artist_key, listen.track_key),
+      provenance,
+      legacyPresent: true,
+      path: 'snapshot',
+      now,
+    });
+  }
 }
 
 const DELETE_PROJECTION: Readonly<Record<ProjectedKind, string>> = {
@@ -793,6 +848,10 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
     db.one<{ revision: string }>('SELECT revision FROM record_state WHERE uri = ?', t.uri)?.revision ?? null;
   let out: TargetResult;
   if (t.present === null) {
+    const now = Number(o.nowNs / 1_000_000n);
+    const removedListens =
+      t.kind === 'scrobble' || t.kind === 'scrobbleBatch' ? projectedListensOfRecord(db, t.did, t.uri) : [];
+    if (removedListens.length > 0) seedRemovedListenAdmissions(db, t, removedListens, now);
     const priorLove =
       t.kind === 'love'
         ? db.one<{ cid: string; artist: string; track: string; album: string | null; recording_mbid: string | null }>(
@@ -843,21 +902,7 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
           )
         : [];
     if (o.forwarding && (t.kind === 'scrobble' || t.kind === 'scrobbleBatch')) {
-      const listens = db.all<{
-        uri: string;
-        cid: string;
-        listened_at: string;
-        artist_key: string;
-        track_key: string;
-        artist: string;
-        track: string;
-      }>(
-        'SELECT uri,cid,listened_at,artist_key,track_key,artist,track FROM scrobbles WHERE did=? AND (uri=? OR record_uri=?)',
-        t.did,
-        t.uri,
-        t.uri,
-      );
-      for (const listen of listens)
+      for (const listen of removedListens)
         tombstoneListen(db, {
           did: t.did,
           identity: `live:${listen.uri}:${listen.cid}`,
@@ -866,7 +911,7 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
           trackKey: listen.track_key,
           nowMs: Number(o.nowNs / 1_000_000n),
         });
-      for (const listen of listens) {
+      for (const listen of removedListens) {
         const identityKey = projectionListenKey(t.did, listen.listened_at, listen.artist_key, listen.track_key);
         enqueueListenDelete(db, {
           did: t.did,
@@ -878,8 +923,8 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
           artist: listen.artist,
           track: listen.track,
           sourcePath: 'live',
-          now: Number(o.nowNs / 1_000_000n),
-          excluding: new Set(listens.map((entry) => entry.uri)),
+          now,
+          excluding: new Set(removedListens.map((entry) => entry.uri)),
         });
       }
     }
@@ -1057,6 +1102,9 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
           (t.kind === 'scrobble' || t.kind === 'scrobbleBatch') && (changed || revisionMayReveal(db, t, priorRevision)),
       };
     } else {
+      if (t.kind === 'scrobble' || t.kind === 'scrobbleBatch') {
+        seedRemovedListenAdmissions(db, t, projectedListensOfRecord(db, t.did, t.uri), Number(o.nowNs / 1_000_000n));
+      }
       const deleted = deleteProjection(db, t.kind, t.uri);
       writeRecordState(db, {
         uri: t.uri,
@@ -1094,25 +1142,7 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
 
 function archiveAcceptedListenTombstones(db: Db, did: string, uri: string, revision: string): void {
   if (!hasListenRemovalTombstones(db, did)) return;
-  const listens = db.all<{
-    uri: string;
-    record_uri: string | null;
-    listen_id: string | null;
-    cid: string;
-    listened_at: string;
-    artist_key: string;
-    track_key: string;
-  }>(
-    `SELECT uri,record_uri,listen_id,cid,listened_at,artist_key,track_key
-       FROM scrobbles WHERE uri=? AND did=?
-     UNION ALL
-     SELECT uri,record_uri,listen_id,cid,listened_at,artist_key,track_key
-       FROM scrobbles WHERE record_uri=? AND did=?`,
-    uri,
-    did,
-    uri,
-    did,
-  );
+  const listens = projectedListensOfRecord(db, did, uri);
   for (const listen of listens) {
     archiveMatchingLiveListenTombstones(db, {
       did,

@@ -1267,6 +1267,17 @@ const NEW_INDEXES: Record<string, [string, number, number, Array<[string, number
       ['state', 0],
     ],
   ],
+  operations_record_target: [
+    'operations',
+    0,
+    0,
+    [
+      ['did', 0],
+      ['collection', 0],
+      ['rkey', 0],
+      ['created_at_ms', 0],
+    ],
+  ],
   loves_owner_time: [
     'loves',
     0,
@@ -1952,6 +1963,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       "44|'forward_love_lanes'",
       "45|'forward_love_recording_history'",
       "46|'forward_love_recording_targets'",
+      "47|'operations_record_target'",
     ]);
     // The new scrobble columns exist and are NULL on every migrated row.
     expect(after.newColumns).toHaveLength(expectedScrobbles);
@@ -2005,6 +2017,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       { version: 44, name: 'forward_love_lanes' },
       { version: 45, name: 'forward_love_recording_history' },
       { version: 46, name: 'forward_love_recording_targets' },
+      { version: 47, name: 'operations_record_target' },
     ]);
     expect(after.compat).toEqual([{ singleton: 1, min_compatible_version: 2 }]);
     expect(after.newTablesEmpty).toEqual(['mb_cover_art_usage']);

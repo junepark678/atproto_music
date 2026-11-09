@@ -1460,6 +1460,13 @@ const MIGRATION_FORWARD_LOVE_RECORDING_TARGETS: Migration = {
   ],
 };
 
+// Keep repository-operation provenance reads bounded to the exact record.
+const MIGRATION_OPERATIONS_RECORD_TARGET: Migration = {
+  version: 47,
+  name: 'operations_record_target',
+  statements: ['CREATE INDEX operations_record_target ON operations(did,collection,rkey,created_at_ms)'],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
   MIGRATION_2,
@@ -1507,6 +1514,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_S4_FORWARD_LOVE_LANES,
   MIGRATION_FORWARD_LOVE_RECORDING_HISTORY,
   MIGRATION_FORWARD_LOVE_RECORDING_TARGETS,
+  MIGRATION_OPERATIONS_RECORD_TARGET,
 ];
 
 /** The schema version this code expects. */

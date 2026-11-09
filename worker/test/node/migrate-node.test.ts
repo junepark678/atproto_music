@@ -75,7 +75,7 @@ describe('migrate over node:sqlite', () => {
   it('migration 30 creates durable per-generation pull state, staging and tombstone tables', () => {
     const db = freshDb();
     migrate(db);
-    expect(SCHEMA_VERSION).toBe(46);
+    expect(SCHEMA_VERSION).toBe(47);
     for (const table of ['linked_pull_state', 'linked_pull_items'] as const) {
       expect(TABLES).toContain(table);
       expect(db.one<{ name: string }>("SELECT name FROM sqlite_master WHERE type='table' AND name=?", table)).toEqual({
@@ -87,6 +87,9 @@ describe('migrate over node:sqlite', () => {
     ).toContain('love_boundary_ms');
     expect(TABLE_CLASS.linked_pull_state).toBe('non-derived');
     expect(TABLE_CLASS.linked_pull_items).toBe('non-derived');
+    expect(db.one<{ name: string }>("SELECT name FROM sqlite_master WHERE type='index' AND name='operations_record_target'")).toEqual({
+      name: 'operations_record_target',
+    });
     expect(TABLE_CLASS.linked_pull_receipt_seed).toBe('non-derived');
     expect(TABLE_CLASS.linked_pull_projection_scan).toBe('non-derived');
     expect(TABLES).toContain('listenbrainz_deletes');
