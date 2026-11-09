@@ -32,12 +32,25 @@ export interface PendingRemovalInput {
 export function recordPendingRemoval(db: Db, input: PendingRemovalInput): void {
   if (db.one('SELECT 1 FROM linked_accounts WHERE did=? LIMIT 1', input.did) === null) return;
   const second = Math.floor(Date.parse(input.row.listened_at) / 1000);
-  db.run(
+  const priorGroup = db.one<{
+    authorized_rev: string | null;
+    conflict_invalidated: number;
+    conflicted_auth_rev: string | null;
+  }>(
+    `SELECT authorized_rev,conflict_invalidated,conflicted_auth_rev FROM live_pending_removals
+     WHERE uri=? AND kind=? AND window_lo=? AND window_hi=? AND replaced_by_cid=? LIMIT 1`,
+    input.uri,
+    input.kind,
+    input.windowLo,
+    input.windowHi,
+    input.replacedByCid ?? '',
+  );
+  const inserted = db.run(
     `INSERT OR IGNORE INTO live_pending_removals
       (uri,member_uri,removed_cid,kind,window_lo,window_hi,replaced_by_cid,identity_key,listened_at,
        artist_key,track_key,artist,track,recording_mbid,love_source_service,love_import_sources,
-       authorized_rev,created_at_ms,expires_at_ms)
-     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,?,?)`,
+       authorized_rev,created_at_ms,expires_at_ms,conflict_invalidated,conflicted_auth_rev)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     input.uri,
     input.row.uri,
     input.row.cid,
@@ -54,32 +67,26 @@ export function recordPendingRemoval(db: Db, input: PendingRemovalInput): void {
     input.row.recording_mbid,
     input.loveSourceService ?? null,
     input.loveImportSources?.length ? JSON.stringify([...new Set(input.loveImportSources)].sort()) : null,
+    priorGroup?.authorized_rev ?? null,
     input.nowMs,
     input.nowMs + LIVE_EVIDENCE_TTL_MS,
+    priorGroup?.conflict_invalidated ?? 0,
+    priorGroup?.conflicted_auth_rev ?? null,
   );
-  const authorized = db.one<{ rev: string; action: LiveAction; cid: string; conflicted: number }>(
-    `SELECT rev,action,cid,conflicted FROM live_pending_removal_events INDEXED BY live_pending_removal_events_by_uri
-     WHERE uri=? AND rev>? AND rev<=? AND expires_at_ms>? ORDER BY rev LIMIT 1`,
-    input.uri,
-    input.windowLo,
-    input.windowHi,
-    input.nowMs,
-  );
-  if (authorized && eventMatchesPending(authorized, input.replacedByCid ?? '')) {
+  if (inserted.rowsWritten > 0) {
     db.run(
-      `UPDATE live_pending_removals SET conflict_invalidated=CASE WHEN ? THEN 1 ELSE conflict_invalidated END,
-       authorized_rev=CASE WHEN ? THEN authorized_rev ELSE ? END
-       WHERE uri=? AND member_uri=? AND removed_cid=? AND window_lo=? AND window_hi=? AND replaced_by_cid=?`,
-      authorized.conflicted,
-      authorized.conflicted,
-      authorized.rev,
+      `INSERT OR IGNORE INTO live_pending_removal_reconcile
+        (uri,window_lo,window_hi,replaced_by_cid,cursor_rev,next_due_ms,created_at_ms)
+       VALUES(?,?,?,?,?,?,?)`,
       input.uri,
-      input.row.uri,
-      input.row.cid,
       input.windowLo,
       input.windowHi,
       input.replacedByCid ?? '',
+      input.windowLo,
+      input.nowMs,
+      input.nowMs,
     );
+    reconcilePendingWindowPage(db, input.uri, input.windowLo, input.windowHi, input.replacedByCid ?? '', input.nowMs);
   }
   countLiveAdmission(db, 'pending_recorded');
 }
@@ -90,7 +97,109 @@ function eventMatchesPending(event: { action: LiveAction; cid: string }, replace
   );
 }
 
+function reconcilePendingWindowPage(
+  db: Db,
+  uri: string,
+  windowLo: string,
+  windowHi: string,
+  replacedByCid: string,
+  nowMs: number,
+): void {
+  const frontier = db.one<{ cursor_rev: string }>(
+    `SELECT cursor_rev FROM live_pending_removal_reconcile
+     WHERE uri=? AND window_lo=? AND window_hi=? AND replaced_by_cid=?`,
+    uri,
+    windowLo,
+    windowHi,
+    replacedByCid,
+  );
+  if (frontier === null) return;
+  const events = db.all<{
+    rev: string;
+    action: LiveAction;
+    cid: string;
+    conflicted: number;
+    expires_at_ms: number;
+  }>(
+    `SELECT rev,action,cid,conflicted,expires_at_ms FROM live_pending_removal_events INDEXED BY live_pending_removal_events_by_uri
+     WHERE uri=? AND rev>? AND rev<=? AND rev>? ORDER BY rev LIMIT ?`,
+    uri,
+    windowLo,
+    windowHi,
+    frontier.cursor_rev,
+    RECONCILE_PAGE_SIZE,
+  );
+  for (const event of events) {
+    if (event.expires_at_ms <= nowMs) continue;
+    if (event.conflicted !== 0) {
+      db.run(
+        `UPDATE live_pending_removals SET conflicted_auth_rev=?
+         WHERE uri=? AND window_lo=? AND window_hi=? AND replaced_by_cid=?`,
+        event.rev,
+        uri,
+        windowLo,
+        windowHi,
+        replacedByCid,
+      );
+    } else if (eventMatchesPending(event, replacedByCid)) {
+      db.run(
+        `UPDATE live_pending_removals SET authorized_rev=?,conflict_invalidated=0
+         WHERE uri=? AND window_lo=? AND window_hi=? AND replaced_by_cid=?
+           AND (authorized_rev IS NULL OR authorized_rev=conflicted_auth_rev)`,
+        event.rev,
+        uri,
+        windowLo,
+        windowHi,
+        replacedByCid,
+      );
+    }
+  }
+  const last = events.at(-1);
+  if (events.length < RECONCILE_PAGE_SIZE) {
+    db.run(
+      `DELETE FROM live_pending_removal_reconcile
+       WHERE uri=? AND window_lo=? AND window_hi=? AND replaced_by_cid=?`,
+      uri,
+      windowLo,
+      windowHi,
+      replacedByCid,
+    );
+  } else if (last) {
+    db.run(
+      `UPDATE live_pending_removal_reconcile SET cursor_rev=?,next_due_ms=?
+       WHERE uri=? AND window_lo=? AND window_hi=? AND replaced_by_cid=?`,
+      last.rev,
+      nowMs,
+      uri,
+      windowLo,
+      windowHi,
+      replacedByCid,
+    );
+  }
+}
+
 const AUTHORIZATION_PAGE_SIZE = 128;
+const EVENT_CLEANUP_PAGE_SIZE = 128;
+const RECONCILE_PAGE_SIZE = 128;
+const RETAINED_EVENT_RECHECK_MS = 60_000;
+
+/** Production statements shared with the actual-SQL bounds regressions. */
+export const AUTHORIZATION_PAGE_SQL = `SELECT kind,window_lo,window_hi,replaced_by_cid,member_uri,removed_cid,authorized_rev,conflict_invalidated,conflicted_auth_rev
+  FROM live_pending_removals INDEXED BY live_pending_removals_page
+ WHERE uri=? AND (window_hi,window_lo,replaced_by_cid,kind,member_uri,removed_cid)>(?,?,?,?,?,?)
+ ORDER BY window_hi,window_lo,replaced_by_cid,kind,member_uri,removed_cid LIMIT ?`;
+export const AUTHORIZATION_EVENT_HEAD_SQL = `SELECT * FROM live_pending_removal_events INDEXED BY live_pending_removal_events_ready_v2
+ WHERE scan_complete=0 ORDER BY created_at_ms,uri,rev LIMIT 1`;
+export const AUTHORIZATION_EVENT_HEAD_URI_SQL = `SELECT * FROM live_pending_removal_events INDEXED BY live_pending_removal_events_uri_scan
+ WHERE uri=? AND scan_complete=0 ORDER BY created_at_ms,rev LIMIT 1`;
+export const PENDING_EVENT_CLEANUP_PAGE_SQL = `SELECT rowid,uri,rev,conflicted,expires_at_ms FROM live_pending_removal_events INDEXED BY live_pending_removal_events_cleanup
+ WHERE cleanup_due_ms<=? ORDER BY cleanup_due_ms,uri,rev LIMIT ?`;
+export const PENDING_EXPIRY_PAGE_SQL = `SELECT rowid FROM live_pending_removals INDEXED BY live_pending_removals_expiry
+ WHERE expires_at_ms<=? ORDER BY expires_at_ms,uri,window_hi LIMIT ?`;
+export const CONFLICT_PENDING_RETENTION_SQL = `SELECT 1 FROM live_pending_removals INDEXED BY live_pending_removals_authorize
+ WHERE uri=? AND window_hi>=? AND window_lo<? LIMIT 1`;
+export const CONFLICT_QUEUED_EFFECT_RETENTION_SQL = `SELECT 1 FROM listenbrainz_deletes INDEXED BY listenbrainz_deletes_authorization
+ WHERE authorization_uri=? AND authorization_rev=? AND state='queued' LIMIT 1`;
 
 interface AuthorizationEvent {
   uri: string;
@@ -105,6 +214,7 @@ interface AuthorizationEvent {
   cursor_member_uri: string;
   cursor_removed_cid: string;
   scan_complete: number;
+  expires_at_ms: number;
 }
 
 /** Read and decide one bounded page of potentially intersecting windows. */
@@ -118,21 +228,16 @@ function processAuthorizationPage(db: Db, event: AuthorizationEvent): number {
     removed_cid: string;
     authorized_rev: string | null;
     conflict_invalidated: number;
+    conflicted_auth_rev: string | null;
   }>(
-    `SELECT kind,window_lo,window_hi,replaced_by_cid,member_uri,removed_cid,authorized_rev,conflict_invalidated
-       FROM live_pending_removals INDEXED BY live_pending_removals_page
-      WHERE uri=? AND window_hi>=?
-        AND (window_hi,window_lo,replaced_by_cid,kind,member_uri,removed_cid)>
-            (?,?,?,?,?,?)
-      ORDER BY window_hi,window_lo,replaced_by_cid,kind,member_uri,removed_cid LIMIT ?`,
+    AUTHORIZATION_PAGE_SQL,
     event.uri,
-    event.rev,
-    event.cursor_window_hi,
-    event.cursor_window_lo,
-    event.cursor_replaced_by_cid,
-    event.cursor_kind,
-    event.cursor_member_uri,
-    event.cursor_removed_cid,
+    event.cursor_window_hi < event.rev ? event.rev : event.cursor_window_hi,
+    event.cursor_window_hi < event.rev ? '' : event.cursor_window_lo,
+    event.cursor_window_hi < event.rev ? '' : event.cursor_replaced_by_cid,
+    event.cursor_window_hi < event.rev ? '' : event.cursor_kind,
+    event.cursor_window_hi < event.rev ? '' : event.cursor_member_uri,
+    event.cursor_window_hi < event.rev ? '' : event.cursor_removed_cid,
     AUTHORIZATION_PAGE_SIZE,
   );
   let authorized = 0;
@@ -144,24 +249,31 @@ function processAuthorizationPage(db: Db, event: AuthorizationEvent): number {
     if (!eligible) continue;
     if (event.conflicted) {
       authorized += db.run(
-        `UPDATE live_pending_removals SET conflict_invalidated=1
+        `UPDATE live_pending_removals SET conflicted_auth_rev=?
          WHERE uri=? AND kind=? AND window_lo=? AND window_hi=? AND replaced_by_cid=?`,
-        event.uri,
-        row.kind,
-        row.window_lo,
-        row.window_hi,
-        row.replaced_by_cid,
-      ).rowsWritten;
-    } else if (row.authorized_rev === null && row.conflict_invalidated === 0) {
-      authorized += db.run(
-        `UPDATE live_pending_removals SET authorized_rev=?
-         WHERE uri=? AND kind=? AND window_lo=? AND window_hi=? AND replaced_by_cid=? AND authorized_rev IS NULL AND conflict_invalidated=0`,
         event.rev,
         event.uri,
         row.kind,
         row.window_lo,
         row.window_hi,
         row.replaced_by_cid,
+      ).rowsWritten;
+    } else if (
+      row.authorized_rev === null ||
+      row.authorized_rev === event.rev ||
+      row.authorized_rev === row.conflicted_auth_rev
+    ) {
+      authorized += db.run(
+        `UPDATE live_pending_removals SET authorized_rev=?,conflict_invalidated=0
+         WHERE uri=? AND kind=? AND window_lo=? AND window_hi=? AND replaced_by_cid=?
+           AND (authorized_rev IS NULL OR authorized_rev=? OR authorized_rev=conflicted_auth_rev)`,
+        event.rev,
+        event.uri,
+        row.kind,
+        row.window_lo,
+        row.window_hi,
+        row.replaced_by_cid,
+        event.rev,
       ).rowsWritten;
     }
   }
@@ -196,20 +308,10 @@ export function authorizePendingRemovals(
     event.rev,
   );
   const different = Boolean(previous && (previous.action !== event.action || previous.cid !== cid));
-  const conflict = Boolean(event.conflicted || previous?.conflicted);
-  if (different && !conflict)
-    db.run(
-      `UPDATE live_pending_removal_events SET action=?,cid=?,cursor_window_hi='',cursor_window_lo='',
-       cursor_replaced_by_cid='',cursor_kind='',cursor_member_uri='',cursor_removed_cid='',scan_complete=0
-       WHERE uri=? AND rev=?`,
-      event.action,
-      cid,
-      event.uri,
-      event.rev,
-    );
+  const conflict = Boolean(event.conflicted || previous?.conflicted || different);
   db.run(
     `INSERT OR IGNORE INTO live_pending_removal_events(uri,rev,action,cid,conflicted,created_at_ms,expires_at_ms)
-     VALUES(?,?,?,?,?,?,?)`,
+    VALUES(?,?,?,?,?,?,?)`,
     event.uri,
     event.rev,
     event.action,
@@ -269,6 +371,7 @@ interface PendingGroup {
   replaced_by_cid: string;
   authorized_rev: string;
   conflict_invalidated: number;
+  conflicted_auth_rev: string | null;
 }
 
 function deleteGroup(db: Db, group: PendingGroup): void {
@@ -298,6 +401,7 @@ function processGroup(db: Db, group: PendingGroup, nowMs: number, random: Random
   if (
     invalidatedEvent !== null ||
     group.conflict_invalidated !== 0 ||
+    group.conflicted_auth_rev === group.authorized_rev ||
     evidence?.conflict_rev === group.authorized_rev
   ) {
     deleteGroup(db, group);
@@ -355,6 +459,7 @@ function processGroup(db: Db, group: PendingGroup, nowMs: number, random: Random
         recording_mbid: row.recording_mbid,
       })),
       authRev: group.authorized_rev,
+      authUri: group.uri,
       now: nowMs,
       identity: (row) => projectionListenKey(did, row.listened_at, row.artist_key, row.track_key),
       tombstoneIdentity: (row) =>
@@ -456,44 +561,87 @@ export function executeAuthorizedRemovals(
   db: Db,
   args: { nowMs: number; random: Random; uri?: string; limit: number },
 ): { groups: number; expired: number; effects: number } {
-  const expired = db.run(
-    `DELETE FROM live_pending_removals WHERE rowid IN
-       (SELECT rowid FROM live_pending_removals WHERE expires_at_ms<=? ORDER BY expires_at_ms,uri,window_hi LIMIT ?)`,
-    args.nowMs,
-    LIVE_SWEEP_LIMIT,
-  ).rowsWritten;
+  const expiredRows = db.all<{ rowid: number }>(PENDING_EXPIRY_PAGE_SQL, args.nowMs, LIVE_SWEEP_LIMIT);
+  let expired = 0;
+  for (const row of expiredRows)
+    expired += db.run(
+      'DELETE FROM live_pending_removals WHERE rowid=? AND expires_at_ms<=?',
+      row.rowid,
+      args.nowMs,
+    ).rowsWritten;
   countLiveAdmission(db, 'pending_expired', expired);
-  const expiredEvents = db.run(
-    `DELETE FROM live_pending_removal_events WHERE rowid IN
-       (SELECT e.rowid FROM live_pending_removal_events e WHERE e.expires_at_ms<=?
-        AND (e.conflicted=0 OR NOT EXISTS (
-          SELECT 1 FROM live_pending_removals p INDEXED BY live_pending_removals_authorize
-          WHERE p.uri=e.uri AND p.window_hi>=e.rev AND p.window_lo<e.rev
-        )) ORDER BY e.expires_at_ms,e.uri,e.rev LIMIT ?)`,
-    args.nowMs,
-    LIVE_SWEEP_LIMIT,
-  ).rowsWritten;
+  const cleanupEvents = db.all<{
+    rowid: number;
+    uri: string;
+    rev: string;
+    conflicted: number;
+    expires_at_ms: number;
+  }>(PENDING_EVENT_CLEANUP_PAGE_SQL, args.nowMs, EVENT_CLEANUP_PAGE_SIZE);
+  let expiredEvents = 0;
+  for (const event of cleanupEvents) {
+    if (event.expires_at_ms > args.nowMs) {
+      db.run('UPDATE live_pending_removal_events SET cleanup_due_ms=? WHERE rowid=?', event.expires_at_ms, event.rowid);
+      continue;
+    }
+    const retainedPending =
+      event.conflicted !== 0 && db.one(CONFLICT_PENDING_RETENTION_SQL, event.uri, event.rev, event.rev) !== null;
+    const retainedEffect = db.one(CONFLICT_QUEUED_EFFECT_RETENTION_SQL, event.uri, event.rev) !== null;
+    if (retainedPending || retainedEffect) {
+      db.run(
+        'UPDATE live_pending_removal_events SET cleanup_due_ms=? WHERE rowid=?',
+        args.nowMs + RETAINED_EVENT_RECHECK_MS,
+        event.rowid,
+      );
+    } else {
+      expiredEvents += db.run('DELETE FROM live_pending_removal_events WHERE rowid=?', event.rowid).rowsWritten;
+    }
+  }
   countLiveAdmission(db, 'pending_event_expired', expiredEvents);
   // If the bounded expiry page filled, leave remaining expired rows for the next slice.
   // This prevents the eligibility seek from walking an unbounded expired prefix.
   if (expired >= LIVE_SWEEP_LIMIT) return { groups: 0, expired, effects: 0 };
-  const eventIndex =
-    args.uri === undefined ? 'live_pending_removal_events_scan' : 'live_pending_removal_events_uri_scan';
-  const pendingEvent = db.one<AuthorizationEvent>(
-    `SELECT * FROM live_pending_removal_events INDEXED BY ${eventIndex}
-     WHERE scan_complete=0 AND expires_at_ms>? ${args.uri === undefined ? '' : 'AND uri=?'}
-     ORDER BY created_at_ms,uri,rev LIMIT 1`,
-    ...(args.uri === undefined ? [args.nowMs] : [args.nowMs, args.uri]),
+  const reconcileHead = db.one<{
+    uri: string;
+    window_lo: string;
+    window_hi: string;
+    replaced_by_cid: string;
+  }>(
+    `SELECT uri,window_lo,window_hi,replaced_by_cid FROM live_pending_removal_reconcile
+     WHERE next_due_ms<=? ORDER BY next_due_ms,created_at_ms,uri,window_lo,window_hi,replaced_by_cid LIMIT 1`,
+    args.nowMs,
   );
-  if (pendingEvent) processAuthorizationPage(db, pendingEvent);
+  if (reconcileHead)
+    reconcilePendingWindowPage(
+      db,
+      reconcileHead.uri,
+      reconcileHead.window_lo,
+      reconcileHead.window_hi,
+      reconcileHead.replaced_by_cid,
+      args.nowMs,
+    );
+  const eventIndex =
+    args.uri === undefined ? 'live_pending_removal_events_ready_v2' : 'live_pending_removal_events_uri_scan';
+  const pendingEvent = db.one<AuthorizationEvent>(
+    args.uri === undefined ? AUTHORIZATION_EVENT_HEAD_SQL : AUTHORIZATION_EVENT_HEAD_URI_SQL,
+    ...(args.uri === undefined ? [] : [args.uri]),
+  );
+  if (pendingEvent) {
+    if (pendingEvent.expires_at_ms <= args.nowMs)
+      db.run(
+        'UPDATE live_pending_removal_events SET scan_complete=1 WHERE uri=? AND rev=?',
+        pendingEvent.uri,
+        pendingEvent.rev,
+      );
+    else processAuthorizationPage(db, pendingEvent);
+  }
   if (
     db.one(
       `SELECT 1 FROM live_pending_removal_events INDEXED BY ${eventIndex}
-       WHERE scan_complete=0 AND expires_at_ms>? ${args.uri === undefined ? '' : 'AND uri=?'} LIMIT 1`,
-      ...(args.uri === undefined ? [args.nowMs] : [args.nowMs, args.uri]),
+       WHERE scan_complete=0 ${args.uri === undefined ? '' : 'AND uri=?'} LIMIT 1`,
+      ...(args.uri === undefined ? [] : [args.uri]),
     ) !== null
   )
-    schedule(db, 'drain', args.nowMs);
+    schedule(db, 'drain', args.nowMs + 2_000);
   const groups: PendingGroup[] = [];
   const predicate = args.uri === undefined ? 'authorized_rev IS NOT NULL' : 'uri=? AND authorized_rev IS NOT NULL';
   const index = args.uri === undefined ? 'live_pending_removals_ready' : 'live_pending_removals_uri_ready';
@@ -501,7 +649,7 @@ export function executeAuthorizedRemovals(
   let effects = 0;
   for (let i = 0; i < args.limit; i++) {
     const head = db.one<PendingGroup>(
-      `SELECT uri,kind,window_lo,window_hi,replaced_by_cid,authorized_rev,conflict_invalidated
+      `SELECT uri,kind,window_lo,window_hi,replaced_by_cid,authorized_rev,conflict_invalidated,conflicted_auth_rev
          FROM live_pending_removals INDEXED BY ${index} WHERE ${predicate} AND expires_at_ms>?
          ORDER BY authorized_rev,created_at_ms,uri,window_hi LIMIT 1`,
       ...headBind,
@@ -512,5 +660,56 @@ export function executeAuthorizedRemovals(
     effects += processGroup(db, head, args.nowMs, args.random);
   }
   countLiveAdmission(db, 'pending_groups_run', groups.length);
+  const nextPendingDue = nextPendingRemovalDue(db, args.nowMs);
+  if (nextPendingDue !== null) schedule(db, 'drain', Math.max(nextPendingDue, args.nowMs + 2_000));
   return { groups: groups.length, expired, effects };
+}
+
+/** Bounded existence probes used by drain scheduling and startup reconciliation. */
+export function hasPendingRemovalWork(db: Db, nowMs: number): boolean {
+  return nextPendingRemovalDue(db, nowMs) !== null;
+}
+
+/** The next immediate continuation or retained cleanup deadline. */
+export function nextPendingRemovalDue(db: Db, nowMs: number): number | null {
+  const immediate =
+    db.one(
+      `SELECT 1 FROM live_pending_removal_events INDEXED BY live_pending_removal_events_ready_v2
+       WHERE scan_complete=0 LIMIT 1`,
+    ) !== null ||
+    db.one(
+      `SELECT 1 FROM live_pending_removal_reconcile INDEXED BY live_pending_removal_reconcile_due
+       WHERE next_due_ms<=? LIMIT 1`,
+      nowMs,
+    ) !== null ||
+    db.one(
+      `SELECT 1 FROM live_pending_removals INDEXED BY live_pending_removals_ready
+       WHERE authorized_rev IS NOT NULL AND expires_at_ms>? LIMIT 1`,
+      nowMs,
+    ) !== null ||
+    db.one(
+      `SELECT 1 FROM live_pending_removals INDEXED BY live_pending_removals_expiry WHERE expires_at_ms<=? LIMIT 1`,
+      nowMs,
+    ) !== null ||
+    db.one(
+      `SELECT 1 FROM live_pending_removal_events INDEXED BY live_pending_removal_events_cleanup
+       WHERE cleanup_due_ms<=? LIMIT 1`,
+      nowMs,
+    ) !== null;
+  if (immediate) return nowMs;
+  const cleanup =
+    db.one<{ due: number | null }>(
+      `SELECT min(cleanup_due_ms) AS due FROM live_pending_removal_events INDEXED BY live_pending_removal_events_cleanup
+     WHERE cleanup_due_ms>?`,
+      nowMs,
+    )?.due ?? null;
+  const pendingExpiry =
+    db.one<{ due: number | null }>(
+      `SELECT min(expires_at_ms) AS due FROM live_pending_removals INDEXED BY live_pending_removals_expiry
+     WHERE expires_at_ms>?`,
+      nowMs,
+    )?.due ?? null;
+  if (cleanup === null) return pendingExpiry;
+  if (pendingExpiry === null) return cleanup;
+  return Math.min(cleanup, pendingExpiry);
 }

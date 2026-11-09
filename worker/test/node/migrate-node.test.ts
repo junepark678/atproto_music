@@ -75,8 +75,13 @@ describe('migrate over node:sqlite', () => {
   it('migration 30 creates durable per-generation pull state, staging and tombstone tables', () => {
     const db = freshDb();
     migrate(db);
-    expect(SCHEMA_VERSION).toBe(50);
-    for (const table of ['linked_pull_state', 'linked_pull_items', 'live_pending_removal_events'] as const) {
+    expect(SCHEMA_VERSION).toBe(51);
+    for (const table of [
+      'linked_pull_state',
+      'linked_pull_items',
+      'live_pending_removal_events',
+      'live_pending_removal_reconcile',
+    ] as const) {
       expect(TABLES).toContain(table);
       expect(db.one<{ name: string }>("SELECT name FROM sqlite_master WHERE type='table' AND name=?", table)).toEqual({
         name: table,
@@ -100,6 +105,7 @@ describe('migrate over node:sqlite', () => {
     expect(TABLE_CLASS.live_acceptance_candidates).toBe('non-derived');
     expect(TABLE_CLASS.live_pending_removals).toBe('non-derived');
     expect(TABLE_CLASS.live_pending_removal_events).toBe('non-derived');
+    expect(TABLE_CLASS.live_pending_removal_reconcile).toBe('non-derived');
     expect(
       db.one<{ name: string }>(
         "SELECT name FROM sqlite_master WHERE type='index' AND name='forward_outbox_love_heads'",

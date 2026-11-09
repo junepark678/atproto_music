@@ -10,6 +10,7 @@ export function dropLiveState(db: Db, uri: string): void {
   db.run('DELETE FROM live_acceptance_candidates WHERE uri=?', uri);
   db.run('DELETE FROM live_pending_removals WHERE uri=?', uri);
   db.run('DELETE FROM live_pending_removal_events WHERE uri=?', uri);
+  db.run('DELETE FROM live_pending_removal_reconcile WHERE uri=?', uri);
 }
 
 export function deleteLiveCandidates(db: Db, uri: string): void {

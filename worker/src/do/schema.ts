@@ -1538,6 +1538,29 @@ const MIGRATION_LIVE_PENDING_REMOVAL_REPAIR: Migration = {
   ],
 };
 
+// A2 follow-up repair: preserve conflicting authorization revisions, reconcile
+// newly recorded windows against retained events, and keep cleanup/index work
+// on durable bounded frontiers. Migrations 1–50 are already deployed.
+const MIGRATION_LIVE_PENDING_REMOVAL_BOUNDS: Migration = {
+  version: 51,
+  name: 'live_pending_removal_bounds',
+  statements: [
+    'ALTER TABLE live_pending_removals ADD COLUMN conflicted_auth_rev TEXT',
+    'ALTER TABLE live_pending_removal_events ADD COLUMN cleanup_due_ms INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE listenbrainz_deletes ADD COLUMN authorization_uri TEXT',
+    'ALTER TABLE listenbrainz_deletes ADD COLUMN authorization_rev TEXT',
+    `CREATE TABLE live_pending_removal_reconcile (
+      uri TEXT NOT NULL, window_lo TEXT NOT NULL, window_hi TEXT NOT NULL, replaced_by_cid TEXT NOT NULL,
+      cursor_rev TEXT NOT NULL, next_due_ms INTEGER NOT NULL, created_at_ms INTEGER NOT NULL,
+      PRIMARY KEY(uri,window_lo,window_hi,replaced_by_cid)
+    )`,
+    'CREATE INDEX live_pending_removal_reconcile_due ON live_pending_removal_reconcile(next_due_ms,created_at_ms,uri,window_lo,window_hi,replaced_by_cid)',
+    'CREATE INDEX live_pending_removal_events_ready_v2 ON live_pending_removal_events(scan_complete,created_at_ms,uri,rev)',
+    'CREATE INDEX live_pending_removal_events_cleanup ON live_pending_removal_events(cleanup_due_ms,uri,rev,expires_at_ms)',
+    'CREATE INDEX listenbrainz_deletes_authorization ON listenbrainz_deletes(authorization_uri,authorization_rev,state)',
+  ],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
   MIGRATION_2,
@@ -1589,6 +1612,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_LIVE_ADMISSION_EVIDENCE,
   MIGRATION_LIVE_PENDING_REMOVALS,
   MIGRATION_LIVE_PENDING_REMOVAL_REPAIR,
+  MIGRATION_LIVE_PENDING_REMOVAL_BOUNDS,
 ];
 
 /** The schema version this code expects. */
@@ -1624,6 +1648,7 @@ export const TABLES = [
   'live_acceptance_candidates',
   'live_pending_removals',
   'live_pending_removal_events',
+  'live_pending_removal_reconcile',
   // Migration 2.
   'accounts',
   'web_sessions',
@@ -1726,6 +1751,7 @@ export const TABLE_CLASS: Readonly<Record<TableName, TableClass>> = {
   live_acceptance_candidates: 'non-derived',
   live_pending_removals: 'non-derived',
   live_pending_removal_events: 'non-derived',
+  live_pending_removal_reconcile: 'non-derived',
   accounts: 'non-derived',
   web_sessions: 'non-derived',
   oauth_states: 'non-derived',

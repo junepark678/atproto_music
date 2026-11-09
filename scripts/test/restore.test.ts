@@ -599,6 +599,8 @@ describe('restore.ts', () => {
           'artist-key','track-key','Artist','Track',NULL,1,9999999999999)`,
         `INSERT INTO live_pending_removal_events(uri,rev,action,cid,created_at_ms,expires_at_ms)
          VALUES('${uri}','2222222222222','delete','',1,9999999999999)`,
+        `INSERT INTO live_pending_removal_reconcile(uri,window_lo,window_hi,replaced_by_cid,cursor_rev,next_due_ms,created_at_ms)
+         VALUES('${uri}','1111111111111','2222222222222','','1111111111111',1,1)`,
       ],
       liveSql: [
         `UPDATE live_record_evidence SET up_rev='3333333333333',up_action='update',up_cid='bafynew' WHERE uri='${uri}'`,
@@ -606,12 +608,14 @@ describe('restore.ts', () => {
         `UPDATE live_pending_removals SET authorized_rev='2222222222222',expires_at_ms=9999999999998 WHERE uri='${uri}'`,
         `UPDATE live_pending_removals SET conflict_invalidated=1 WHERE uri='${uri}'`,
         `UPDATE live_pending_removal_events SET conflicted=1,cursor_window_hi='2222222222222',scan_complete=0 WHERE uri='${uri}'`,
+        `UPDATE live_pending_removal_reconcile SET cursor_rev='2222222222222',next_due_ms=2 WHERE uri='${uri}'`,
       ],
     });
     expect(TABLE_CLASS.live_record_evidence).toBe('non-derived');
     expect(TABLE_CLASS.live_acceptance_candidates).toBe('non-derived');
     expect(TABLE_CLASS.live_pending_removals).toBe('non-derived');
     expect(TABLE_CLASS.live_pending_removal_events).toBe('non-derived');
+    expect(TABLE_CLASS.live_pending_removal_reconcile).toBe('non-derived');
     const systemd = new FakeSystemd(world, { servicePort: null });
     await systemd.boot();
     const result = await restoreCli(world, systemd, [...baseArgs(world), '--no-ready-check']);
@@ -647,6 +651,10 @@ describe('restore.ts', () => {
         conflicted: 1,
         cursor_window_hi: '2222222222222',
         scan_complete: 0,
+      });
+      expect(db.one('SELECT cursor_rev,next_due_ms FROM live_pending_removal_reconcile WHERE uri=?', uri)).toEqual({
+        cursor_rev: '2222222222222',
+        next_due_ms: 2,
       });
       expect(
         executeAuthorizedRemovals(db, { nowMs: world.clock.nowMs(), random: seededRandom(0xa2), limit: 1 }),

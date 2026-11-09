@@ -20,6 +20,7 @@ export function executeListenRemovals(
     did: string;
     rows: readonly LiveRemovedListen[];
     authRev: string;
+    authUri?: string;
     now: number;
     identity: (row: LiveRemovedListen) => string;
     tombstoneIdentity: (row: LiveRemovedListen) => string;
@@ -57,6 +58,8 @@ export function executeListenRemovals(
       artist: row.artist,
       track: row.track,
       sourcePath: 'live',
+      authorizationUri: args.authUri,
+      authorizationRev: args.authRev,
       now: args.now,
       excluding,
     });

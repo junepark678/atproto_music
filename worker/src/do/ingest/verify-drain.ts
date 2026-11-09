@@ -104,7 +104,7 @@ import {
 } from './hints';
 import { cachedIdentity, resolveIdentity } from './identity-cache';
 import { countLiveAdmission, isStale, LIVE_SWEEP_LIMIT, readLiveEvidence, sweepLiveAdmission } from './live-evidence';
-import { executeAuthorizedRemovals } from './live-pending-removals';
+import { executeAuthorizedRemovals, nextPendingRemovalDue } from './live-pending-removals';
 import {
   FetchLimiter,
   hostOf,
@@ -209,7 +209,9 @@ export function drainState(db: Db, budget: Pick<SliceBudget, 'concurrentFetches'
  * replaces whatever was stored), or cancel it when the queue is empty.
  */
 export function scheduleDrainTimer(db: Db, now: number): number | null {
-  const next = nextHintDue(db);
+  const hintDue = nextHintDue(db);
+  const pendingDue = nextPendingRemovalDue(db, now);
+  const next = hintDue === null ? pendingDue : pendingDue === null ? hintDue : Math.min(hintDue, pendingDue);
   if (next === null) {
     cancel(db, 'drain');
     return null;

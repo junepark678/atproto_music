@@ -132,6 +132,7 @@ const NEW_TABLES: Record<string, ExpectedTable> = {
       'created_at_ms',
       'expires_at_ms',
       'conflict_invalidated',
+      'conflicted_auth_rev',
     ],
     pk: ['uri', 'member_uri', 'removed_cid', 'window_lo', 'window_hi', 'replaced_by_cid'],
   },
@@ -151,8 +152,13 @@ const NEW_TABLES: Record<string, ExpectedTable> = {
       'scan_complete',
       'created_at_ms',
       'expires_at_ms',
+      'cleanup_due_ms',
     ],
     pk: ['uri', 'rev'],
+  },
+  live_pending_removal_reconcile: {
+    columns: ['uri', 'window_lo', 'window_hi', 'replaced_by_cid', 'cursor_rev', 'next_due_ms', 'created_at_ms'],
+    pk: ['uri', 'window_lo', 'window_hi', 'replaced_by_cid'],
   },
   listenbrainz_deletes: {
     columns: [
@@ -181,6 +187,8 @@ const NEW_TABLES: Record<string, ExpectedTable> = {
       'lookup_candidates',
       'lookup_last_earliest',
       'lookup_last_max',
+      'authorization_uri',
+      'authorization_rev',
     ],
     pk: ['id'],
     unique: [['link_id', 'generation', 'event_key']],
@@ -991,6 +999,41 @@ const NEW_INDEXES: Record<string, [string, number, number, Array<[string, number
       ['rev', 0],
     ],
   ],
+  live_pending_removal_events_ready_v2: [
+    'live_pending_removal_events',
+    0,
+    0,
+    [
+      ['scan_complete', 0],
+      ['created_at_ms', 0],
+      ['uri', 0],
+      ['rev', 0],
+    ],
+  ],
+  live_pending_removal_events_cleanup: [
+    'live_pending_removal_events',
+    0,
+    0,
+    [
+      ['cleanup_due_ms', 0],
+      ['uri', 0],
+      ['rev', 0],
+      ['expires_at_ms', 0],
+    ],
+  ],
+  live_pending_removal_reconcile_due: [
+    'live_pending_removal_reconcile',
+    0,
+    0,
+    [
+      ['next_due_ms', 0],
+      ['created_at_ms', 0],
+      ['uri', 0],
+      ['window_lo', 0],
+      ['window_hi', 0],
+      ['replaced_by_cid', 0],
+    ],
+  ],
   forward_love_lanes_due: [
     'forward_love_lanes',
     0,
@@ -1063,6 +1106,16 @@ const NEW_INDEXES: Record<string, [string, number, number, Array<[string, number
     [
       ['state', 0],
       ['due_at', 0],
+    ],
+  ],
+  listenbrainz_deletes_authorization: [
+    'listenbrainz_deletes',
+    0,
+    0,
+    [
+      ['authorization_uri', 0],
+      ['authorization_rev', 0],
+      ['state', 0],
     ],
   ],
   linked_love_intents_mbid: [
@@ -2175,6 +2228,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       "48|'live_admission_evidence'",
       "49|'live_pending_removals'",
       "50|'live_pending_removal_repair'",
+      "51|'live_pending_removal_bounds'",
     ]);
     // The new scrobble columns exist and are NULL on every migrated row.
     expect(after.newColumns).toHaveLength(expectedScrobbles);
@@ -2232,6 +2286,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       { version: 48, name: 'live_admission_evidence' },
       { version: 49, name: 'live_pending_removals' },
       { version: 50, name: 'live_pending_removal_repair' },
+      { version: 51, name: 'live_pending_removal_bounds' },
     ]);
     expect(after.compat).toEqual([{ singleton: 1, min_compatible_version: 2 }]);
     expect(after.newTablesEmpty).toEqual(['mb_cover_art_usage']);

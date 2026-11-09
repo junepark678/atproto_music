@@ -35,6 +35,7 @@ const TABLES = [
       'identity_key',
       'authorized_rev',
       'conflict_invalidated',
+      'conflicted_auth_rev',
     ],
     marker: true,
   },
@@ -54,7 +55,14 @@ const TABLES = [
       'cursor_member_uri',
       'cursor_removed_cid',
       'scan_complete',
+      'cleanup_due_ms',
     ],
+    marker: true,
+  },
+  {
+    key: 'live_pending_removal_reconcile',
+    primaryKey: ['uri', 'window_lo', 'window_hi', 'replaced_by_cid'],
+    columns: ['uri', 'window_lo', 'window_hi', 'replaced_by_cid', 'cursor_rev', 'next_due_ms'],
     marker: true,
   },
   {

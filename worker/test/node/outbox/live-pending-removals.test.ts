@@ -351,7 +351,10 @@ it('requires the matching replacement CID or an in-window real delete, and reche
     );
     executeAuthorizedRemovals(db, { uri: URI, nowMs: NOW, random, limit: 1 });
     expect(db.all('SELECT * FROM listenbrainz_deletes')).toHaveLength(0);
-    expect(db.all('SELECT * FROM live_pending_removals')).toHaveLength(0);
+    expect(db.one('SELECT authorized_rev,conflicted_auth_rev FROM live_pending_removals')).toEqual({
+      authorized_rev: null,
+      conflicted_auth_rev: '2222222222222',
+    });
   });
 });
 
@@ -483,6 +486,13 @@ it('DID suppression cleanup removes only that DID’s pending authorization and 
     recordPendingRemoval(db, row);
     authorizePendingRemovals(db, { uri: URI, rev: '2222222222222', action: 'delete' }, NOW);
     authorizePendingRemovals(db, { uri: otherUri, rev: '2222222222222', action: 'delete' }, NOW);
+    db.run(
+      `INSERT INTO live_pending_removal_reconcile(uri,window_lo,window_hi,replaced_by_cid,cursor_rev,next_due_ms,created_at_ms)
+       VALUES(?, '1111111111111','2222222222222','', '1111111111111',?,?)`,
+      otherUri,
+      NOW,
+      NOW,
+    );
 
     cleanupForwardAdmissionsForSuppression(db, DID);
 
@@ -497,5 +507,13 @@ it('DID suppression cleanup removes only that DID’s pending authorization and 
       ),
     ).toEqual({ n: 0 });
     expect(db.one('SELECT count(*) AS n FROM live_pending_removal_events WHERE uri=?', otherUri)).toEqual({ n: 1 });
+    expect(
+      db.one(
+        'SELECT count(*) AS n FROM live_pending_removal_reconcile WHERE uri>=? AND uri<?',
+        `at://${DID}/`,
+        `at://${DID}0`,
+      ),
+    ).toEqual({ n: 0 });
+    expect(db.one('SELECT count(*) AS n FROM live_pending_removal_reconcile WHERE uri=?', otherUri)).toEqual({ n: 1 });
   });
 });

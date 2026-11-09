@@ -99,6 +99,7 @@ import { deleteHint, nextHintDue } from '../do/ingest/hints';
 import { cachedIdentityResolver, pruneIdentityCache } from '../do/ingest/identity-cache';
 import { type IngestDeps, jetstreamWatchdog } from '../do/ingest/ingest-mode';
 import type { ConnectJetstream } from '../do/ingest/jetstream-socket';
+import { nextPendingRemovalDue } from '../do/ingest/live-pending-removals';
 import { notify, recordStatus } from '../do/ingest/notify';
 import { clearExpiredHostPauses } from '../do/ingest/pds-budget';
 import { maybeClearGap, SNAPSHOT_MIN_INTERVAL_MS, scheduleGapRecovery, snapshotStep } from '../do/ingest/snapshot-job';
@@ -461,8 +462,11 @@ export class IndexCore implements IndexRpc, AdminRpc {
     const { db } = this.deps;
     db.tx(() => {
       const hint = nextHintDue(db);
-      if (hint !== null) {
-        const target = this.lastDrainMs === null ? hint : Math.max(hint, this.lastDrainMs + DRAIN_MIN_INTERVAL_MS);
+      const pending = nextPendingRemovalDue(db, now);
+      const nextWork = hint === null ? pending : pending === null ? hint : Math.min(hint, pending);
+      if (nextWork !== null) {
+        const target =
+          this.lastDrainMs === null ? nextWork : Math.max(nextWork, this.lastDrainMs + DRAIN_MIN_INTERVAL_MS);
         if (dueAt(db, 'drain') !== target) schedule(db, 'drain', target, { force: true });
       }
       const job =

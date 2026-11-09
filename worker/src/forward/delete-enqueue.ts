@@ -71,6 +71,8 @@ export function enqueueListenDelete(
     artist: string;
     track: string;
     sourcePath: string;
+    authorizationUri?: string;
+    authorizationRev?: string;
     now: number;
     excluding?: ReadonlySet<string>;
   },
@@ -93,8 +95,8 @@ export function enqueueListenDelete(
     const state = link.service === 'listenbrainz' ? 'queued' : 'unsupported';
     const result = db.run(
       `INSERT OR IGNORE INTO listenbrainz_deletes
-      (id,event_key,link_id,generation,did,identity_key,listened_at,artist_key,track_key,artist,track,source_path,state,due_at,deadline_at,created_at_ms,updated_at_ms)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'${state}',?,?,?,?)`,
+      (id,event_key,link_id,generation,did,identity_key,listened_at,artist_key,track_key,artist,track,source_path,state,due_at,deadline_at,created_at_ms,updated_at_ms,authorization_uri,authorization_rev)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'${state}',?,?,?,?,?,?)`,
       `${link.id}:g${link.generation}:${args.eventKey}`,
       args.eventKey,
       link.id,
@@ -111,6 +113,8 @@ export function enqueueListenDelete(
       args.now + 7 * 86400000,
       args.now,
       args.now,
+      args.authorizationUri ?? null,
+      args.authorizationRev ?? null,
     );
     if (result.rowsWritten) queued++;
   }
