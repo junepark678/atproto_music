@@ -564,10 +564,23 @@ function processGroup(db: Db, group: PendingGroup, nowMs: number, random: Random
     countLiveAdmission(db, 'pending_conflict');
     return 0;
   }
-  const rows = db.all<PendingRow>(
-    `SELECT * FROM live_pending_removals INDEXED BY live_pending_removals_group
-     WHERE uri=? AND kind=? AND window_lo=? AND window_hi=?
-       AND replaced_by_cid=? AND authorized_rev=? AND expires_at_ms>? ORDER BY member_uri,removed_cid`,
+  const rows = db.all<
+    PendingRow & {
+      current_revision: string | null;
+      current_listened_at: string | null;
+      current_artist_key: string | null;
+      current_track_key: string | null;
+    }
+  >(
+    `SELECT pending.*, current.revision AS current_revision,
+       current.listened_at AS current_listened_at, current.artist_key AS current_artist_key,
+       current.track_key AS current_track_key
+     FROM live_pending_removals AS pending INDEXED BY live_pending_removals_group
+     LEFT JOIN scrobbles AS current ON current.uri=pending.member_uri AND current.did=?
+     WHERE pending.uri=? AND pending.kind=? AND pending.window_lo=? AND pending.window_hi=?
+       AND pending.replaced_by_cid=? AND pending.authorized_rev=? AND pending.expires_at_ms>?
+     ORDER BY pending.member_uri,pending.removed_cid`,
+    group.uri.slice(5).split('/', 1)[0]!,
     group.uri,
     group.kind,
     group.window_lo,
@@ -581,21 +594,15 @@ function processGroup(db: Db, group: PendingGroup, nowMs: number, random: Random
     if (rows.length > BATCH_MAX_LISTENS)
       throw new Error(`pending removal group exceeds validator bound: ${rows.length}`);
     const did = rows[0]!.uri.slice(5).split('/', 1)[0]!;
-    const currentDid = rows[0]!.uri.slice(5).split('/', 1)[0]!;
     // A projection re-created after the removed window is canonical current
     // state. Do not put its URI in the exclusion set or let the stale CID's
     // tombstone hide it at dispatch.
     const removedRows = rows.filter((row) => {
-      const current = db.one<{ revision: string; listened_at: string; artist_key: string; track_key: string }>(
-        'SELECT revision,listened_at,artist_key,track_key FROM scrobbles WHERE did=? AND uri=?',
-        currentDid,
-        row.member_uri,
-      );
-      if (current === null || current.revision <= group.authorized_rev) return true;
+      if (row.current_revision === null || row.current_revision <= group.authorized_rev) return true;
       return (
-        current.artist_key !== row.artist_key ||
-        current.track_key !== row.track_key ||
-        Math.floor(Date.parse(current.listened_at) / 1000) !== (row.listened_at ?? 0)
+        row.current_artist_key !== row.artist_key ||
+        row.current_track_key !== row.track_key ||
+        Math.floor(Date.parse(row.current_listened_at!) / 1000) !== (row.listened_at ?? 0)
       );
     });
     if (removedRows.length === 0) {
