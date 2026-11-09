@@ -457,9 +457,28 @@ const NEW_TABLES: Record<string, ExpectedTable> = {
       last_success_ms: true,
       last_failure_ms: true,
       consecutive_failures: true,
+      backfill_state: true,
+      backfill_cursor: true,
+      backfill_total: true,
+      backfill_done: true,
+      pull_enabled: true,
+      pull_watermark_ms: true,
+      last_pull_ms: true,
+      sync_remote_user: true,
+      backfill_failures: true,
+      backfill_next_attempt_ms: true,
+      backfill_run_revision: true,
+      backfill_discovery_cursor: true,
+      backfill_discovery_done: true,
+      backfill_last_serviced_seq: true,
+      backfill_last_error: true,
     }),
     pk: ['id'],
     unique: [['did', 'service']],
+  },
+  link_backfill_items: {
+    columns: ['link_id', 'generation', 'run_revision', 'ordinal', 'identity_key', 'uri', 'cid', 'kind', 'event_at'],
+    pk: ['link_id', 'generation', 'run_revision', 'identity_key'],
   },
   link_states: {
     columns: cols<LinkStateRow>({
@@ -488,6 +507,7 @@ const NEW_TABLES: Record<string, ExpectedTable> = {
       love_artist_key: true,
       love_track_key: true,
       generation: true,
+      priority: true,
     }),
     pk: ['id'],
     unique: [['link_id', 'kind', 'dedupe_key']],
@@ -645,6 +665,64 @@ const NEW_INDEXES: Record<string, [string, number, number, Array<[string, number
       ['generation', 0],
       ['state', 0],
       ['created_at_ms', 0],
+    ],
+  ],
+  linked_accounts_backfill_due: [
+    'linked_accounts',
+    0,
+    0,
+    [
+      ['backfill_state', 0],
+      ['backfill_next_attempt_ms', 0],
+      ['created_at_ms', 0],
+      ['id', 0],
+    ],
+  ],
+  forward_outbox_priority_due: [
+    'forward_outbox',
+    0,
+    0,
+    [
+      ['link_id', 0],
+      ['generation', 0],
+      ['priority', 0],
+      ['state', 0],
+      ['due_at', 0],
+      ['created_at_ms', 0],
+    ],
+  ],
+  forward_outbox_history_state: [
+    'forward_outbox',
+    0,
+    0,
+    [
+      ['priority', 0],
+      ['state', 0],
+    ],
+  ],
+  linked_accounts_backfill_fair: [
+    'linked_accounts',
+    0,
+    0,
+    [
+      ['status', 0],
+      ['forward_scrobbles', 0],
+      ['backfill_state', 0],
+      ['backfill_next_attempt_ms', 0],
+      ['backfill_last_serviced_seq', 0],
+      ['created_at_ms', 0],
+      ['id', 0],
+    ],
+  ],
+  link_backfill_items_pending: [
+    'link_backfill_items',
+    0,
+    0,
+    [
+      ['link_id', 0],
+      ['generation', 0],
+      ['run_revision', 0],
+      ['ordinal', 0],
     ],
   ],
   love_delete_bridges_pending: [
@@ -850,6 +928,7 @@ const NEW_INDEXES: Record<string, [string, number, number, Array<[string, number
 const NEW_FOREIGN_KEYS = [
   ['mb_forward_love_current', 'link_id', 'linked_accounts', 'id', 'CASCADE'],
   ['loves', 'did', 'users', 'did', 'CASCADE'],
+  ['link_backfill_items', 'link_id', 'linked_accounts', 'id', 'CASCADE'],
   ['forward_outbox', 'link_id', 'linked_accounts', 'id', 'CASCADE'],
 ];
 
@@ -1446,6 +1525,12 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       "21|'cover_art_cache_and_jobs'",
       "22|'forward_admissions_and_love_provenance'",
       "23|'forward_link_generations_and_health'",
+      "24|'linked_account_backfill_and_pull_state'",
+      "25|'forward_backfill_priority'",
+      "26|'forward_backfill_retry_state'",
+      "27|'linked_account_backfill_run_revision'",
+      "28|'bounded_link_backfill_progress_and_fairness'",
+      "29|'link_backfill_staged_membership'",
     ]);
     // The new scrobble columns exist and are NULL on every migrated row.
     expect(after.newColumns).toHaveLength(expectedScrobbles);
@@ -1476,6 +1561,12 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       { version: 21, name: 'cover_art_cache_and_jobs' },
       { version: 22, name: 'forward_admissions_and_love_provenance' },
       { version: 23, name: 'forward_link_generations_and_health' },
+      { version: 24, name: 'linked_account_backfill_and_pull_state' },
+      { version: 25, name: 'forward_backfill_priority' },
+      { version: 26, name: 'forward_backfill_retry_state' },
+      { version: 27, name: 'linked_account_backfill_run_revision' },
+      { version: 28, name: 'bounded_link_backfill_progress_and_fairness' },
+      { version: 29, name: 'link_backfill_staged_membership' },
     ]);
     expect(after.compat).toEqual([{ singleton: 1, min_compatible_version: 2 }]);
     expect(after.newTablesEmpty).toEqual(['mb_cover_art_usage']);

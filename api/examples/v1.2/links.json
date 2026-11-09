@@ -9,7 +9,18 @@
       "status": "active",
       "lastError": null,
       "createdAt": "2026-01-15T12:00:00Z",
-      "updatedAt": "2026-01-15T12:00:00Z"
+      "updatedAt": "2026-01-15T12:00:00Z",
+      "sync": {
+        "backfill": {
+          "state": "skipped",
+          "done": 0,
+          "total": 0,
+          "lastError": "retry_exhausted"
+        },
+        "pullEnabled": true,
+        "queued": 0,
+        "failed": 0
+      }
     },
     {
       "id": "lk2",
@@ -20,7 +31,17 @@
       "status": "revoked",
       "lastError": "session_revoked",
       "createdAt": "2026-01-15T12:00:00Z",
-      "updatedAt": "2026-01-15T12:00:00Z"
+      "updatedAt": "2026-01-15T12:00:00Z",
+      "sync": {
+        "backfill": {
+          "state": "pending",
+          "done": 0,
+          "total": 0
+        },
+        "pullEnabled": true,
+        "queued": 0,
+        "failed": 0
+      }
     }
   ]
 }

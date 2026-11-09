@@ -59,7 +59,21 @@ function iso(ms: number): string {
 }
 
 /** The contract's Link (api/openapi.yaml v1.2). Never carries the credential. */
-export function linkDto(row: LinkedAccountRow): Link {
+export function linkDto(row: LinkedAccountRow, db: Db): Link {
+  const queue = {
+    queued:
+      db.one<{ n: number }>(
+        "SELECT count(*) AS n FROM forward_outbox WHERE link_id=? AND generation=? AND state IN ('queued','held')",
+        row.id,
+        row.generation,
+      )?.n ?? 0,
+    failed:
+      db.one<{ n: number }>(
+        "SELECT count(*) AS n FROM forward_outbox WHERE link_id=? AND generation=? AND state='failed'",
+        row.id,
+        row.generation,
+      )?.n ?? 0,
+  };
   return {
     id: row.id,
     service: row.service,
@@ -70,7 +84,22 @@ export function linkDto(row: LinkedAccountRow): Link {
     lastError: row.last_error,
     createdAt: iso(row.created_at_ms),
     updatedAt: iso(row.updated_at_ms),
-  } as Link;
+    sync: {
+      backfill: {
+        state: row.backfill_state,
+        done: row.backfill_done,
+        total: row.backfill_total,
+        ...(row.backfill_last_error === 'retry_exhausted' ? { lastError: 'retry_exhausted' as const } : {}),
+      },
+      pullEnabled: row.pull_enabled === 1,
+      ...(row.last_success_ms === null ? {} : { lastSuccessAt: iso(row.last_success_ms) }),
+      ...(row.last_failure_ms === null ? {} : { lastFailureAt: iso(row.last_failure_ms) }),
+      ...(row.last_error === null ? {} : { lastError: row.last_error as Link['lastError'] }),
+      ...(row.last_pull_ms === null ? {} : { lastPulledAt: iso(row.last_pull_ms) }),
+      queued: queue.queued,
+      failed: queue.failed,
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -191,6 +220,7 @@ export function saveLink(deps: LinkDeps, input: SaveLinkInput): SaveLinkResult {
         ? (db.one<{ boundary: number }>('SELECT coalesce(max(admission_seq),0) AS boundary FROM forward_admissions')
             ?.boundary ?? 0)
         : existing.generation_start_seq;
+      if (changedRemote) db.run('DELETE FROM link_backfill_items WHERE link_id=?', existing.id);
       if (changedRemote)
         db.run(
           `UPDATE forward_outbox SET state='expired',last_error='account_changed',updated_at_ms=?
@@ -204,12 +234,38 @@ export function saveLink(deps: LinkDeps, input: SaveLinkInput): SaveLinkResult {
            last_error=NULL,consecutive_failures=0,
            last_success_ms=CASE WHEN ? THEN NULL ELSE last_success_ms END,
            last_failure_ms=CASE WHEN ? THEN NULL ELSE last_failure_ms END,
+           backfill_state=CASE WHEN ? THEN 'pending' ELSE backfill_state END,
+           backfill_cursor=CASE WHEN ? THEN NULL ELSE backfill_cursor END,
+           backfill_total=CASE WHEN ? THEN 0 ELSE backfill_total END,
+           backfill_done=CASE WHEN ? THEN 0 ELSE backfill_done END,
+           backfill_failures=CASE WHEN ? THEN 0 ELSE backfill_failures END,
+           backfill_next_attempt_ms=CASE WHEN ? THEN NULL ELSE backfill_next_attempt_ms END,
+           backfill_run_revision=backfill_run_revision+CASE WHEN ? THEN 1 ELSE 0 END,
+           backfill_discovery_cursor=CASE WHEN ? THEN NULL ELSE backfill_discovery_cursor END,
+           backfill_discovery_done=CASE WHEN ? THEN 0 ELSE backfill_discovery_done END,
+           backfill_last_error=CASE WHEN ? THEN NULL ELSE backfill_last_error END,
+           pull_watermark_ms=CASE WHEN ? THEN ? ELSE pull_watermark_ms END,
+           sync_remote_user=CASE WHEN ? THEN ? ELSE sync_remote_user END,
            generation=?,generation_start_seq=?,updated_at_ms=? WHERE id=?`,
         remoteUser,
         toBlob(sealed),
         box.currentKeyId,
         changedRemote ? 1 : 0,
         changedRemote ? 1 : 0,
+        changedRemote ? 1 : 0,
+        changedRemote ? 1 : 0,
+        changedRemote ? 1 : 0,
+        changedRemote ? 1 : 0,
+        changedRemote ? 1 : 0,
+        changedRemote ? 1 : 0,
+        changedRemote ? 1 : 0,
+        changedRemote ? 1 : 0,
+        changedRemote ? 1 : 0,
+        changedRemote ? 1 : 0,
+        changedRemote ? 1 : 0,
+        now,
+        changedRemote ? 1 : 0,
+        remoteUser,
         generation,
         generationStartSeq,
         now,
@@ -224,8 +280,9 @@ export function saveLink(deps: LinkDeps, input: SaveLinkInput): SaveLinkResult {
         ?.boundary ?? 0;
     db.run(
       `INSERT INTO linked_accounts(id, did, service, remote_user, credential_ciphertext, key_id, forward_scrobbles,
-         forward_now_playing, status, last_error, generation, generation_start_seq, created_at_ms, updated_at_ms)
-       VALUES (?, ?, ?, ?, ?, ?, 1, 1, 'active', NULL, 1, ?, ?, ?)`,
+         forward_now_playing, status, last_error, generation, generation_start_seq, created_at_ms, updated_at_ms,
+         backfill_state, pull_enabled, pull_watermark_ms, sync_remote_user)
+       VALUES (?, ?, ?, ?, ?, ?, 1, 1, 'active', NULL, 1, ?, ?, ?, 'pending', 1, ?, ?)`,
       id,
       input.did,
       input.service,
@@ -235,6 +292,8 @@ export function saveLink(deps: LinkDeps, input: SaveLinkInput): SaveLinkResult {
       generationStartSeq,
       now,
       now,
+      now,
+      remoteUser,
     );
     return { link: getLinkById(db, id) as LinkedAccountRow, created: true, resumed: 0 };
   });
@@ -252,6 +311,7 @@ export function openLinkCredential(box: Box, row: LinkedAccountRow): string {
 export interface LinkPatch {
   forwardScrobbles?: boolean;
   forwardNowPlaying?: boolean;
+  pullEnabled?: boolean;
 }
 
 /** Sets the forwarding flags of the DID's link `id`; null when it is not theirs. */
@@ -267,10 +327,38 @@ export function patchLink(
     if (row === null) return null;
     const scrobbles = patch.forwardScrobbles ?? row.forward_scrobbles === 1;
     const nowPlaying = patch.forwardNowPlaying ?? row.forward_now_playing === 1;
+    const pullEnabled = patch.pullEnabled ?? row.pull_enabled === 1;
+    const enableScrobbles = row.forward_scrobbles === 0 && scrobbles;
+    if (enableScrobbles) db.run('DELETE FROM link_backfill_items WHERE link_id=?', row.id);
     db.run(
-      'UPDATE linked_accounts SET forward_scrobbles = ?, forward_now_playing = ?, updated_at_ms = ? WHERE id = ?',
+      `UPDATE linked_accounts SET forward_scrobbles = ?, forward_now_playing = ?, pull_enabled = ?,
+       backfill_state=CASE WHEN ? THEN 'pending' ELSE backfill_state END,
+       backfill_cursor=CASE WHEN ? THEN NULL ELSE backfill_cursor END,
+       backfill_total=CASE WHEN ? THEN 0 ELSE backfill_total END,
+       backfill_done=CASE WHEN ? THEN 0 ELSE backfill_done END,
+       backfill_failures=CASE WHEN ? THEN 0 ELSE backfill_failures END,
+       backfill_next_attempt_ms=CASE WHEN ? THEN NULL ELSE backfill_next_attempt_ms END,
+       backfill_run_revision=backfill_run_revision+CASE WHEN ? THEN 1 ELSE 0 END,
+       backfill_discovery_cursor=CASE WHEN ? THEN NULL ELSE backfill_discovery_cursor END,
+       backfill_discovery_done=CASE WHEN ? THEN 0 ELSE backfill_discovery_done END,
+       backfill_last_error=CASE WHEN ? THEN NULL ELSE backfill_last_error END,
+       generation_start_seq=CASE WHEN ? THEN (SELECT coalesce(max(admission_seq),0) FROM forward_admissions)
+                                 ELSE generation_start_seq END,
+       updated_at_ms = ? WHERE id = ?`,
       scrobbles ? 1 : 0,
       nowPlaying ? 1 : 0,
+      pullEnabled ? 1 : 0,
+      enableScrobbles ? 1 : 0,
+      enableScrobbles ? 1 : 0,
+      enableScrobbles ? 1 : 0,
+      enableScrobbles ? 1 : 0,
+      enableScrobbles ? 1 : 0,
+      enableScrobbles ? 1 : 0,
+      enableScrobbles ? 1 : 0,
+      enableScrobbles ? 1 : 0,
+      enableScrobbles ? 1 : 0,
+      enableScrobbles ? 1 : 0,
+      enableScrobbles ? 1 : 0,
       deps.clock.nowMs(),
       id,
     );

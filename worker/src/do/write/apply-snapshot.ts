@@ -349,5 +349,20 @@ export function completeSnapshot(db: Db, c: CompleteSnapshotInput): CompleteResu
   );
   noteIndexed(db, c.did, c.nowNs);
   raiseFloors(db, c.did, c.headRev);
+  // A completed snapshot can add eligible repository history beyond a link's
+  // existing keyset cursor (or after it reached done). Schedule a fresh scan
+  // durably; the run revision fences any async page still in flight.
+  db.run(
+    `DELETE FROM link_backfill_items WHERE link_id IN
+       (SELECT id FROM linked_accounts WHERE did=? AND status='active' AND forward_scrobbles=1)`,
+    c.did,
+  );
+  db.run(
+    `UPDATE linked_accounts SET backfill_state='pending', backfill_cursor=NULL, backfill_total=0, backfill_done=0,
+       backfill_failures=0, backfill_next_attempt_ms=NULL, backfill_run_revision=backfill_run_revision+1,
+       backfill_discovery_cursor=NULL, backfill_discovery_done=0, backfill_last_error=NULL
+     WHERE did=? AND status='active' AND forward_scrobbles=1`,
+    c.did,
+  );
   return { outcome: 'complete', active: c.accountActive };
 }

@@ -1086,6 +1086,84 @@ const MIGRATION_S1_GENERATIONS: Migration = {
   ],
 };
 
+// S2 linked-service synchronization state. Additive only: preserve the S1
+// generation/admission history so backfill can partition live admissions.
+// As in migration 2, ADD COLUMN clauses intentionally omit CHECK constraints:
+// SQLite runs an internal pragma_quick_check when validating one, and the
+// Node authorizer rejects that pragma. Validate enum/count values in code.
+const MIGRATION_S2_SYNC: Migration = {
+  version: 24,
+  name: 'linked_account_backfill_and_pull_state',
+  statements: [
+    "ALTER TABLE linked_accounts ADD COLUMN backfill_state TEXT NOT NULL DEFAULT 'pending'",
+    'ALTER TABLE linked_accounts ADD COLUMN backfill_cursor TEXT',
+    'ALTER TABLE linked_accounts ADD COLUMN backfill_total INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE linked_accounts ADD COLUMN backfill_done INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE linked_accounts ADD COLUMN pull_enabled INTEGER NOT NULL DEFAULT 1',
+    'ALTER TABLE linked_accounts ADD COLUMN pull_watermark_ms INTEGER',
+    'ALTER TABLE linked_accounts ADD COLUMN last_pull_ms INTEGER',
+    'ALTER TABLE linked_accounts ADD COLUMN sync_remote_user TEXT',
+  ],
+};
+
+const MIGRATION_S2_BACKFILL_PRIORITY: Migration = {
+  version: 25,
+  name: 'forward_backfill_priority',
+  statements: [
+    'ALTER TABLE forward_outbox ADD COLUMN priority INTEGER NOT NULL DEFAULT 0',
+    'CREATE INDEX forward_outbox_priority_due ON forward_outbox(link_id,generation,priority,state,due_at,created_at_ms)',
+  ],
+};
+
+const MIGRATION_S2_BACKFILL_RETRY: Migration = {
+  version: 26,
+  name: 'forward_backfill_retry_state',
+  statements: [
+    'ALTER TABLE linked_accounts ADD COLUMN backfill_failures INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE linked_accounts ADD COLUMN backfill_next_attempt_ms INTEGER',
+    'CREATE INDEX linked_accounts_backfill_due ON linked_accounts(backfill_state,backfill_next_attempt_ms,created_at_ms,id)',
+  ],
+};
+
+const MIGRATION_S2_BACKFILL_RUN_REVISION: Migration = {
+  version: 27,
+  name: 'linked_account_backfill_run_revision',
+  statements: ['ALTER TABLE linked_accounts ADD COLUMN backfill_run_revision INTEGER NOT NULL DEFAULT 1'],
+};
+
+const MIGRATION_S2_BACKFILL_BUDGET: Migration = {
+  version: 28,
+  name: 'bounded_link_backfill_progress_and_fairness',
+  statements: [
+    'ALTER TABLE linked_accounts ADD COLUMN backfill_discovery_cursor TEXT',
+    'ALTER TABLE linked_accounts ADD COLUMN backfill_discovery_done INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE linked_accounts ADD COLUMN backfill_last_serviced_seq INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE linked_accounts ADD COLUMN backfill_last_error TEXT',
+    'CREATE INDEX linked_accounts_backfill_fair ON linked_accounts(status,forward_scrobbles,backfill_state,backfill_next_attempt_ms,backfill_last_serviced_seq,created_at_ms,id)',
+    'CREATE INDEX forward_outbox_history_state ON forward_outbox(priority,state)',
+  ],
+};
+
+const MIGRATION_S2_BACKFILL_MEMBERSHIP: Migration = {
+  version: 29,
+  name: 'link_backfill_staged_membership',
+  statements: [
+    `CREATE TABLE link_backfill_items (
+      link_id TEXT NOT NULL REFERENCES linked_accounts(id) ON DELETE CASCADE,
+      generation INTEGER NOT NULL,
+      run_revision INTEGER NOT NULL,
+      ordinal INTEGER NOT NULL,
+      identity_key TEXT NOT NULL,
+      uri TEXT NOT NULL,
+      cid TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      event_at TEXT NOT NULL,
+      PRIMARY KEY(link_id,generation,run_revision,identity_key)
+    )`,
+    'CREATE INDEX link_backfill_items_pending ON link_backfill_items(link_id,generation,run_revision,ordinal)',
+  ],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
   MIGRATION_2,
@@ -1110,6 +1188,12 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_21,
   MIGRATION_S1_ADMISSIONS,
   MIGRATION_S1_GENERATIONS,
+  MIGRATION_S2_SYNC,
+  MIGRATION_S2_BACKFILL_PRIORITY,
+  MIGRATION_S2_BACKFILL_RETRY,
+  MIGRATION_S2_BACKFILL_RUN_REVISION,
+  MIGRATION_S2_BACKFILL_BUDGET,
+  MIGRATION_S2_BACKFILL_MEMBERSHIP,
 ];
 
 /** The schema version this code expects. */
@@ -1160,6 +1244,7 @@ export const TABLES = [
   'linked_accounts',
   'link_states',
   'forward_outbox',
+  'link_backfill_items',
   'forward_admissions',
   'forward_admission_clock',
   'love_incarnations',
@@ -1239,6 +1324,7 @@ export const TABLE_CLASS: Readonly<Record<TableName, TableClass>> = {
   linked_accounts: 'non-derived',
   link_states: 'non-derived',
   forward_outbox: 'non-derived',
+  link_backfill_items: 'non-derived',
   forward_admissions: 'non-derived',
   forward_admission_clock: 'non-derived',
   love_incarnations: 'non-derived',

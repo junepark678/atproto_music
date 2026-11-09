@@ -1273,3 +1273,31 @@ describe('Last.fm forwarding', () => {
     ).rejects.toThrow(/LASTFM_API_ROOT/);
   });
 });
+
+it('historical love must precede newer live unlove for the same track', async () => {
+  const w = await world();
+  w.linkLastfm(ALICE, 'alice');
+  enqueueForwards(w.app.db, {
+    did: ALICE,
+    now: w.clock.nowMs(),
+    random: seededRandom(801),
+    priority: 1,
+    items: [{ kind: 'love', operationId: 'history-love', payload: { artist: 'A', track: 'T' } }],
+  });
+  w.clock.advance(1);
+  enqueueForwards(w.app.db, {
+    did: ALICE,
+    now: w.clock.nowMs(),
+    random: seededRandom(802),
+    items: [{ kind: 'unlove', operationId: 'live-unlove', payload: { artist: 'A', track: 'T' } }],
+  });
+  await w.run();
+  w.clock.advance(1000);
+  await w.run();
+  expect(
+    w.lastfm.calls
+      .filter({})
+      .map((c) => c.params.method?.[0])
+      .filter((m) => m === 'track.love' || m === 'track.unlove'),
+  ).toEqual(['track.love', 'track.unlove']);
+});

@@ -7682,6 +7682,16 @@
           "forwardNowPlaying": {
             "type": "boolean"
           },
+          "sync": {
+            "type": "object", "additionalProperties": false,
+            "required": ["backfill", "pullEnabled", "queued", "failed"],
+            "properties": {
+              "backfill": {"type": "object", "description": "done counts eligible indexed-history items settled by enqueue or skip; total counts eligible candidate work discovered so far (including duplicate skips) and can grow while state is running. These are queue-work progress counts, not upstream deliveries.", "additionalProperties": false, "required": ["state", "done", "total"], "properties": {"state": {"enum": ["pending", "running", "done", "skipped"]}, "done": {"type": "integer", "minimum": 0}, "total": {"type": "integer", "minimum": 0}, "lastError": {"enum": ["retry_exhausted"]}}},
+              "pullEnabled": {"type": "boolean"}, "lastSuccessAt": {"$ref": "#/components/schemas/Timestamp"},
+              "lastFailureAt": {"$ref": "#/components/schemas/Timestamp"}, "lastError": {"type": ["string", "null"], "pattern": "^[a-z0-9_]{1,64}$"},
+              "lastPulledAt": {"$ref": "#/components/schemas/Timestamp"}, "queued": {"type": "integer", "minimum": 0}, "failed": {"type": "integer", "minimum": 0}
+            }
+          },
           "status": {
             "enum": [
               "active",
@@ -7755,7 +7765,8 @@
           },
           "forwardNowPlaying": {
             "type": "boolean"
-          }
+          },
+          "pullEnabled": {"type": "boolean"}
         }
       },
       "ImportJob": {

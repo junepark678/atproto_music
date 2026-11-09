@@ -15,8 +15,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as sqlite from 'node:sqlite';
 import { routerTransport } from '@atmusic/atproto/test-support/router-transport';
+import { listenKey } from '@atmusic/core/listen-key';
+import { albumKey, trackKey } from '@atmusic/core/music-key';
 import { type FixedClock, fixedClock } from '@atmusic/core/test-support/clock';
 import { seededRandom } from '@atmusic/core/test-support/random';
+import { parseRfc3339 } from '@atmusic/core/timestamp';
 import { afterEach, describe, expect, it } from 'vitest';
 import { MemoryRevocations } from '../../../src/app/revocations';
 import type { LinkedAccountRow } from '../../../src/app/rows';
@@ -24,7 +27,17 @@ import { csrfToken } from '../../../src/bff/csrf';
 import { createWebSessions, SESSION_COOKIE, type WebSessions } from '../../../src/bff/sessions';
 import { ensureAccount } from '../../../src/credentials/accounts';
 import { type Box, BoxError, createBox, linkedAad } from '../../../src/crypto/box';
-import { LINK_STATE_TTL_MS, saveLink, sweepExpiredLinkStates } from '../../../src/forward/links';
+import type { SqlParam } from '../../../src/do/db';
+import { completeSnapshot } from '../../../src/do/write/apply-snapshot';
+import {
+  BACKFILL_HISTORY_QUEUE_HIGH_WATER,
+  BACKFILL_MAX_FAILURES,
+  recordBackfillFailure,
+  runLinkBackfill,
+} from '../../../src/forward/backfill';
+import { dueRows } from '../../../src/forward/forward-outbox';
+import { LINK_STATE_TTL_MS, patchLink, saveLink, sweepExpiredLinkStates } from '../../../src/forward/links';
+import { admitForwardIdentity, projectionListenKey } from '../../../src/forward/projection';
 import { linksFeature } from '../../../src/http/links';
 import { parseSecrets } from '../../../src/node/secrets';
 import { openSqliteDb } from '../../../src/node/sqlite-db';
@@ -114,6 +127,28 @@ async function call(w: World, method: string, path: string, init: { token: strin
   return { res, body };
 }
 
+function seedBackfillScrobble(w: World, i: number, did = ALICE): void {
+  const at = `2026-01-10T00:00:0${i}.000000000Z`;
+  const [artistKey, trackValue] = trackKey('A', `T${i}`);
+  w.app.db.run('INSERT OR IGNORE INTO users(did,joined_at) VALUES(?,?)', did, at);
+  w.app.db.run(
+    `INSERT INTO scrobbles(uri,cid,did,rkey,revision,artist,track,listened_at,created_at,indexed_at,artist_key,track_key)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+    `at://${did}/com.example.atmusic.scrobble/r${i}`,
+    `cid-${i}`,
+    did,
+    `r${i}`,
+    `rev-${i}`,
+    'A',
+    `T${i}`,
+    at,
+    at,
+    at,
+    artistKey,
+    trackValue,
+  );
+}
+
 function links(w: World): LinkedAccountRow[] {
   return w.app.db.all<LinkedAccountRow>('SELECT * FROM linked_accounts ORDER BY created_at_ms, id');
 }
@@ -145,6 +180,681 @@ async function startLastfm(w: World, token: string): Promise<{ state: string; au
 }
 
 describe('link routes', () => {
+  it('uses two indexed bounded keyset scans and merges them without a global sort', async () => {
+    const w = await world();
+    const linked = saveLink(
+      { db: w.app.db, clock: w.clock, random: seededRandom(201), box: w.box },
+      { did: ALICE, service: 'listenbrainz', remoteUser: 'alice_lb', credential: 'lb-token' },
+    );
+    w.app.db.run('INSERT OR IGNORE INTO users(did,joined_at) VALUES(?,?)', ALICE, '2026-01-01T00:00:00.000000000Z');
+    w.app.db.run("UPDATE users SET indexing_state='current' WHERE did=?", ALICE);
+    seedBackfillScrobble(w, 1);
+    seedBackfillScrobble(w, 2);
+    const plans: Array<{ sql: string; params: SqlParam[]; detail: string[] }> = [];
+    const originalAll = w.app.db.all.bind(w.app.db);
+    w.app.db.all = <T>(sql: string, ...params: SqlParam[]): T[] => {
+      if (sql.includes("SELECT 'scrobble' AS kind") || sql.includes("SELECT 'love' AS kind")) {
+        const plan = originalAll<{ detail: string }>(`EXPLAIN QUERY PLAN ${sql}`, ...params);
+        plans.push({ sql, params, detail: plan.map((entry) => entry.detail) });
+      }
+      return originalAll<T>(sql, ...params);
+    };
+
+    expect(await runLinkBackfill(w.app.db, seededRandom(202), w.clock.nowMs(), 1)).toBe(1);
+    expect(await runLinkBackfill(w.app.db, seededRandom(203), w.clock.nowMs(), 1)).toBe(1);
+    expect(await runLinkBackfill(w.app.db, seededRandom(215), w.clock.nowMs(), 1)).toBe(1);
+    expect(plans.length).toBeGreaterThanOrEqual(4);
+    for (const query of plans) {
+      expect(query.sql).not.toMatch(/\bUNION\b|\bOFFSET\b|\bOR\b/i);
+      expect(query.params.at(-1)).toBeGreaterThan(0);
+      expect(query.params.at(-1)).toBeLessThanOrEqual(500);
+      expect(query.detail.join(' ')).not.toMatch(/TEMP B-TREE|SCAN \(subquery/i);
+      expect(query.detail.join(' ')).toMatch(
+        query.sql.includes('scrobbles s') ? /scrobbles_owner_time/ : /loves_owner_time/,
+      );
+    }
+    expect(w.app.db.one('SELECT id FROM linked_accounts WHERE id=?', linked.link.id)).toEqual({ id: linked.link.id });
+  });
+
+  it('does not enqueue a historical love after deletion while identity resolution is pending', async () => {
+    const w = await world();
+    const linked = saveLink(
+      { db: w.app.db, clock: w.clock, random: seededRandom(204), box: w.box },
+      { did: ALICE, service: 'listenbrainz', remoteUser: 'alice_lb', credential: 'lb-token' },
+    );
+    w.app.db.run('INSERT OR IGNORE INTO users(did,joined_at) VALUES(?,?)', ALICE, '2026-01-01T00:00:00.000000000Z');
+    w.app.db.run("UPDATE users SET indexing_state='current' WHERE did=?", ALICE);
+    const uri = `at://${ALICE}/com.example.atmusic.love/history-deletion-race`;
+    const mbid = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    w.app.db.run(
+      `INSERT INTO loves(uri,did,rkey,cid,artist,track,artist_key,track_key,recording_mbid,created_at,indexed_at)
+       VALUES(?,?,'history-deletion-race','cid-old','Artist','Track','artist-key','track-key',?,?,?)`,
+      uri,
+      ALICE,
+      mbid,
+      '2026-01-10T00:00:00.000000000Z',
+      '2026-01-10T00:00:00.000000000Z',
+    );
+    w.app.db.run(
+      `INSERT INTO love_incarnations(uri,incarnation_key,state,path,source_service,updated_at_ms)
+       VALUES(?,'love:old','present','snapshot',NULL,?)`,
+      uri,
+      w.clock.nowMs(),
+    );
+    const pending = runLinkBackfill(w.app.db, seededRandom(206), w.clock.nowMs());
+    w.app.db.run('DELETE FROM loves WHERE uri=?', uri);
+    w.app.db.run("UPDATE love_incarnations SET state='deleted' WHERE uri=?", uri);
+    enqueueForwards(w.app.db, {
+      did: ALICE,
+      now: w.clock.nowMs(),
+      random: seededRandom(207),
+      items: [
+        {
+          kind: 'unlove',
+          operationId: 'delete-old',
+          payload: { artist: 'Artist', track: 'Track', recordingMbid: mbid },
+        },
+      ],
+    });
+
+    expect(await pending).toBe(1);
+    expect(w.app.db.all<{ kind: string }>('SELECT kind FROM forward_outbox ORDER BY rowid')).toEqual([
+      { kind: 'unlove' },
+    ]);
+    expect(w.app.db.one('SELECT id FROM linked_accounts WHERE id=?', linked.link.id)).toEqual({ id: linked.link.id });
+  });
+
+  it('does not enqueue an old historical love after the record is replaced during identity resolution', async () => {
+    const w = await world();
+    saveLink(
+      { db: w.app.db, clock: w.clock, random: seededRandom(208), box: w.box },
+      { did: ALICE, service: 'listenbrainz', remoteUser: 'alice_lb', credential: 'lb-token' },
+    );
+    w.app.db.run('INSERT OR IGNORE INTO users(did,joined_at) VALUES(?,?)', ALICE, '2026-01-01T00:00:00.000000000Z');
+    w.app.db.run("UPDATE users SET indexing_state='current' WHERE did=?", ALICE);
+    const uri = `at://${ALICE}/com.example.atmusic.love/history-replacement-race`;
+    const oldMbid = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const newMbid = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+    w.app.db.run(
+      `INSERT INTO loves(uri,did,rkey,cid,artist,track,artist_key,track_key,recording_mbid,created_at,indexed_at)
+       VALUES(?,?,'history-replacement-race','cid-old','Old Artist','Old Track','artist-old','track-old',?,?,?)`,
+      uri,
+      ALICE,
+      oldMbid,
+      '2026-01-10T00:00:00.000000000Z',
+      '2026-01-10T00:00:00.000000000Z',
+    );
+    w.app.db.run(
+      `INSERT INTO love_incarnations(uri,incarnation_key,state,path,source_service,updated_at_ms)
+       VALUES(?,'love:old','present','snapshot',NULL,?)`,
+      uri,
+      w.clock.nowMs(),
+    );
+    const pending = runLinkBackfill(w.app.db, seededRandom(210), w.clock.nowMs());
+    w.app.db.run(
+      `UPDATE loves SET cid='cid-new',artist='New Artist',track='New Track',artist_key='artist-new',track_key='track-new',
+         recording_mbid=?,created_at='2026-01-11T00:00:00.000000000Z' WHERE uri=?`,
+      newMbid,
+      uri,
+    );
+    w.app.db.run("UPDATE love_incarnations SET incarnation_key='love:new',state='present' WHERE uri=?", uri);
+    enqueueForwards(w.app.db, {
+      did: ALICE,
+      now: w.clock.nowMs(),
+      random: seededRandom(211),
+      items: [
+        {
+          kind: 'love',
+          operationId: 'love:new',
+          payload: { artist: 'New Artist', track: 'New Track', recordingMbid: newMbid },
+        },
+      ],
+    });
+
+    expect(await pending).toBe(1);
+    expect(
+      w.app.db.all<{ kind: string; dedupe_key: string }>('SELECT kind,dedupe_key FROM forward_outbox ORDER BY rowid'),
+    ).toEqual([{ kind: 'love', dedupe_key: 'love:new' }]);
+  });
+
+  it('settles a staged deleted candidate and keeps backfill progress internally consistent', async () => {
+    const w = await world();
+    const linked = saveLink(
+      { db: w.app.db, clock: w.clock, random: seededRandom(212), box: w.box },
+      { did: ALICE, service: 'listenbrainz', remoteUser: 'alice_lb', credential: 'lb-token' },
+    );
+    w.app.db.run('INSERT OR IGNORE INTO users(did,joined_at) VALUES(?,?)', ALICE, '2026-01-01T00:00:00.000000000Z');
+    w.app.db.run("UPDATE users SET indexing_state='current' WHERE did=?", ALICE);
+    const uri = `at://${ALICE}/com.example.atmusic.love/progress-deletion`;
+    w.app.db.run(
+      `INSERT INTO loves(uri,did,rkey,cid,artist,track,artist_key,track_key,recording_mbid,created_at,indexed_at)
+       VALUES(?,?,'progress-deletion','cid-progress','Artist','Track','artist-key','track-key',?, ?, ?)`,
+      uri,
+      ALICE,
+      'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      '2026-01-10T00:00:00.000000000Z',
+      '2026-01-10T00:00:00.000000000Z',
+    );
+    w.app.db.run(
+      `INSERT INTO love_incarnations(uri,incarnation_key,state,path,source_service,updated_at_ms)
+       VALUES(?,'love:progress','present','snapshot',NULL,?)`,
+      uri,
+      w.clock.nowMs(),
+    );
+    expect(await runLinkBackfill(w.app.db, seededRandom(213), w.clock.nowMs())).toBe(1);
+    expect(w.app.db.one('SELECT backfill_done,backfill_total FROM linked_accounts WHERE id=?', linked.link.id)).toEqual(
+      {
+        backfill_done: 0,
+        backfill_total: 1,
+      },
+    );
+    w.app.db.run('DELETE FROM loves WHERE uri=?', uri);
+    w.app.db.run("UPDATE love_incarnations SET state='deleted' WHERE uri=?", uri);
+    expect(await runLinkBackfill(w.app.db, seededRandom(214), w.clock.nowMs())).toBe(1);
+    expect(
+      w.app.db.one(
+        'SELECT backfill_state,backfill_done,backfill_total FROM linked_accounts WHERE id=?',
+        linked.link.id,
+      ),
+    ).toEqual({ backfill_state: 'done', backfill_done: 1, backfill_total: 1 });
+    expect(w.app.db.one('SELECT count(*) AS n FROM link_backfill_items WHERE link_id=?', linked.link.id)).toEqual({
+      n: 0,
+    });
+    expect(w.app.db.one('SELECT count(*) AS n FROM forward_outbox WHERE link_id=?', linked.link.id)).toEqual({ n: 0 });
+  });
+
+  it('backfill scans indexed history newest-first in bounded resumable chunks without upstream calls', async () => {
+    const w = await world();
+    const linked = saveLink(
+      { db: w.app.db, clock: w.clock, random: seededRandom(101), box: w.box },
+      { did: ALICE, service: 'listenbrainz', remoteUser: 'alice_lb', credential: 'lb-token' },
+    );
+    w.app.db.run('INSERT OR IGNORE INTO users(did,joined_at) VALUES(?,?)', ALICE, '2026-01-01T00:00:00.000000000Z');
+    w.app.db.run("UPDATE users SET indexing_state='current' WHERE did=?", ALICE);
+    expect(w.app.db.one('SELECT indexing_state FROM users WHERE did=?', ALICE)).toEqual({ indexing_state: 'current' });
+    expect(
+      w.app.db.one(
+        'SELECT status,forward_scrobbles,backfill_state,backfill_run_revision FROM linked_accounts WHERE id=?',
+        linked.link.id,
+      ),
+    ).toMatchObject({
+      status: 'active',
+      forward_scrobbles: 1,
+      backfill_state: 'pending',
+      backfill_run_revision: 1,
+    });
+    w.app.db.run('INSERT OR IGNORE INTO users(did,joined_at) VALUES(?,?)', ALICE, '2026-01-01T00:00:00.000000000Z');
+    const batch = 501;
+    for (let i = 1; i <= batch; i++) {
+      const artist = `Backfill Artist ${i}`;
+      const track = `Backfill Track ${i}`;
+      const listenedAt = new Date(Date.parse('2026-01-10T00:00:00Z') + i * 1000).toISOString();
+      const ns = parseRfc3339(listenedAt);
+      const [artistKey, trackValue] = trackKey(artist, track);
+      const key = await listenKey({ did: ALICE, listenedAtNs: ns as bigint, artist, track });
+      w.app.db.run(
+        `INSERT INTO scrobbles(uri,cid,did,rkey,revision,artist,track,album,listened_at,created_at,duration_seconds,
+          recording_mbid,indexed_at,artist_key,track_key,album_key) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        `at://${ALICE}/com.example.atmusic.scrobble/r${i}`,
+        `cid-${i}`,
+        ALICE,
+        `r${i}`,
+        `rev-${i}`,
+        artist,
+        track,
+        null,
+        listenedAt.replace(/\.\d{3}Z$/, '.000000000Z'),
+        listenedAt.replace(/\.\d{3}Z$/, '.000000000Z'),
+        null,
+        null,
+        listenedAt.replace(/\.\d{3}Z$/, '.000000000Z'),
+        artistKey,
+        trackValue,
+        null,
+      );
+      if (i <= 2) {
+        w.app.db.run(
+          'INSERT INTO forward_admissions(did,identity_key,path,source_service,created_at_ms,admission_seq) VALUES(?,?,?,?,?,?)',
+          ALICE,
+          key,
+          i === 1 ? 'live' : 'snapshot',
+          null,
+          w.clock.nowMs(),
+          i,
+        );
+      }
+      expect(key).toHaveLength(64);
+    }
+    expect(await runLinkBackfill(w.app.db, seededRandom(102), w.clock.nowMs())).toBe(500);
+    expect(
+      w.app.db.one(
+        'SELECT backfill_state,backfill_done,backfill_total FROM linked_accounts WHERE id=?',
+        linked.link.id,
+      ),
+    ).toEqual({ backfill_state: 'running', backfill_done: 0, backfill_total: 500 });
+    expect(w.app.db.one('SELECT count(*) AS n FROM forward_outbox WHERE link_id=?', linked.link.id)).toEqual({ n: 0 });
+    expect(await runLinkBackfill(w.app.db, seededRandom(107), w.clock.nowMs())).toBe(500);
+    expect(w.app.db.one('SELECT backfill_done,backfill_total FROM linked_accounts WHERE id=?', linked.link.id)).toEqual(
+      {
+        backfill_done: 500,
+        backfill_total: batch - 1,
+      },
+    );
+    expect(await runLinkBackfill(w.app.db, seededRandom(108), w.clock.nowMs())).toBe(1);
+    expect(w.app.db.one('SELECT count(*) AS n FROM forward_outbox WHERE link_id=?', linked.link.id)).toEqual({
+      n: 500,
+    });
+    expect(
+      w.app.db.one('SELECT priority FROM forward_outbox WHERE link_id=? ORDER BY rowid LIMIT 1', linked.link.id),
+    ).toEqual({ priority: 1 });
+    const first = JSON.parse(
+      w.app.db.one<{ payload_json: string }>(
+        'SELECT payload_json FROM forward_outbox WHERE link_id=? ORDER BY rowid LIMIT 1',
+        linked.link.id,
+      )?.payload_json ?? '{}',
+    ) as { listen?: { track?: string } };
+    expect(first.listen?.track).toBe('Backfill Track 501');
+    enqueueForwards(w.app.db, {
+      did: ALICE,
+      now: w.clock.nowMs(),
+      random: seededRandom(106),
+      items: [
+        {
+          kind: 'scrobble',
+          listenKey: 'live-priority-key',
+          payload: { listen: { artist: 'Live', track: 'Now', timestamp: 1 } },
+        },
+      ],
+    });
+    const due = dueRows(w.app.db, linked.link.id, linked.link.generation, 'scrobble', w.clock.nowMs(), 10);
+    expect(due[0]).toMatchObject({ priority: 0, dedupe_key: 'live-priority-key' });
+    expect(await runLinkBackfill(w.app.db, seededRandom(103), w.clock.nowMs())).toBe(0);
+    expect(
+      w.app.db.one(
+        'SELECT backfill_state,backfill_done,backfill_total FROM linked_accounts WHERE id=?',
+        linked.link.id,
+      ),
+    ).toEqual({ backfill_state: 'done', backfill_done: 500, backfill_total: batch - 1 });
+    const liveKey = await listenKey({
+      did: ALICE,
+      listenedAtNs: parseRfc3339('2026-01-10T00:00:01.000Z') as bigint,
+      artist: 'Backfill Artist 1',
+      track: 'Backfill Track 1',
+    });
+    expect(
+      w.app.db.one('SELECT 1 AS yes FROM forward_outbox WHERE link_id=? AND dedupe_key=?', linked.link.id, liveKey),
+    ).toBeNull();
+    expect(w.lb.calls.count()).toBe(0);
+  });
+
+  it('ListenBrainz backfill imports only known indexed loves with a submitted or matched MBID', async () => {
+    const w = await world();
+    const linked = saveLink(
+      { db: w.app.db, clock: w.clock, random: seededRandom(104), box: w.box },
+      { did: ALICE, service: 'listenbrainz', remoteUser: 'alice_lb', credential: 'lb-token' },
+    );
+    w.app.db.run('INSERT OR IGNORE INTO users(did,joined_at) VALUES(?,?)', ALICE, '2026-01-01T00:00:00.000000000Z');
+    w.app.db.run("UPDATE users SET indexing_state='current' WHERE did=?", ALICE);
+    const [artistKey, trackKeyValue] = trackKey('Matched Artist', 'Matched Song');
+    const [, matchedAlbumKey] = albumKey('Matched Artist', 'Album') as [string, string];
+    const incarnationKey = 'love:matched-incarnation';
+    const loveUri = `at://${ALICE}/com.example.atmusic.love/love-matched`;
+    w.app.db.run(
+      `INSERT INTO loves(uri,did,rkey,cid,artist,track,album,artist_key,track_key,recording_mbid,created_at,indexed_at)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+      loveUri,
+      ALICE,
+      'love-matched',
+      'cid-love',
+      'Matched Artist',
+      'Matched Song',
+      'Album',
+      artistKey,
+      trackKeyValue,
+      null,
+      '2026-01-14T00:00:00.000000000Z',
+      '2026-01-15T12:00:00.000000000Z',
+    );
+    w.app.db.run(
+      `INSERT INTO love_incarnations(uri,incarnation_key,state,path,source_service,updated_at_ms)
+       VALUES(?,?,'present','snapshot',NULL,?)`,
+      loveUri,
+      incarnationKey,
+      w.clock.nowMs(),
+    );
+    w.app.db.run(
+      'INSERT INTO forward_admissions(did,identity_key,path,source_service,created_at_ms,admission_seq) VALUES(?,?,?,?,?,?)',
+      ALICE,
+      incarnationKey,
+      'snapshot',
+      null,
+      w.clock.nowMs(),
+      1,
+    );
+    w.app.db.run(
+      `INSERT INTO mb_tracks(artist_key,track_key,album_key,status,recording_mbid,created_at_ms)
+       VALUES(?,?,?,'matched','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',?)`,
+      artistKey,
+      trackKeyValue,
+      matchedAlbumKey,
+      w.clock.nowMs(),
+    );
+    const importedUri = `at://${ALICE}/com.example.atmusic.love/love-imported-unknown`;
+    w.app.db.run(
+      `INSERT INTO loves(uri,did,rkey,cid,artist,track,album,artist_key,track_key,recording_mbid,created_at,indexed_at)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+      importedUri,
+      ALICE,
+      'love-imported-unknown',
+      'cid-imported',
+      'Unknown Artist',
+      'Unknown Song',
+      null,
+      'unknown-artist',
+      'unknown-track',
+      null,
+      '2026-01-14T00:00:00.000000000Z',
+      '2026-01-15T12:00:00.000000000Z',
+    );
+    w.app.db.run(
+      `INSERT INTO love_incarnations(uri,incarnation_key,state,path,source_service,updated_at_ms)
+       VALUES(?,?,'present','import',NULL,?)`,
+      importedUri,
+      'love:unknown-import',
+      w.clock.nowMs(),
+    );
+
+    expect(await runLinkBackfill(w.app.db, seededRandom(105), w.clock.nowMs())).toBe(2);
+    expect(await runLinkBackfill(w.app.db, seededRandom(110), w.clock.nowMs())).toBe(1);
+    const rows = w.app.db.all<{ kind: string; payload_json: string }>(
+      'SELECT kind,payload_json FROM forward_outbox WHERE link_id=?',
+      linked.link.id,
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.kind).toBe('love');
+    expect(JSON.parse(rows[0]?.payload_json ?? '{}')).toMatchObject({
+      artist: 'Matched Artist',
+      track: 'Matched Song',
+      recordingMbid: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    });
+    expect(w.lb.calls.count()).toBe(0);
+  });
+
+  it('Last.fm backfill keeps the 13-day listen window while retaining older loves', async () => {
+    const w = await world();
+    const sk = w.lastfm.addSession('alice_fm');
+    const linked = saveLink(
+      { db: w.app.db, clock: w.clock, random: seededRandom(107), box: w.box },
+      { did: ALICE, service: 'lastfm', remoteUser: 'alice_fm', credential: sk },
+    );
+    w.app.db.run('INSERT OR IGNORE INTO users(did,joined_at) VALUES(?,?)', ALICE, '2026-01-01T00:00:00.000000000Z');
+    w.app.db.run("UPDATE users SET indexing_state='current' WHERE did=?", ALICE);
+    for (const [suffix, listenedAt] of [
+      ['old', '2025-12-31T00:00:00.000Z'],
+      ['recent', '2026-01-10T00:00:00.000Z'],
+    ] as const) {
+      const artist = `Age ${suffix}`;
+      const track = `Song ${suffix}`;
+      const [artistKey, trackValue] = trackKey(artist, track);
+      const storageTime = listenedAt.replace(/\.\d{3}Z$/, '.000000000Z');
+      w.app.db.run(
+        `INSERT INTO scrobbles(uri,cid,did,rkey,revision,artist,track,album,listened_at,created_at,duration_seconds,
+          recording_mbid,indexed_at,artist_key,track_key,album_key) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        `at://${ALICE}/com.example.atmusic.scrobble/${suffix}`,
+        `cid-${suffix}`,
+        ALICE,
+        suffix,
+        `rev-${suffix}`,
+        artist,
+        track,
+        null,
+        storageTime,
+        storageTime,
+        null,
+        null,
+        storageTime,
+        artistKey,
+        trackValue,
+        null,
+      );
+    }
+    const [artistKey, trackValue] = trackKey('Older Love', 'Loved Track');
+    const loveUri = `at://${ALICE}/com.example.atmusic.love/old-love`;
+    w.app.db.run(
+      `INSERT INTO loves(uri,did,rkey,cid,artist,track,album,artist_key,track_key,recording_mbid,created_at,indexed_at)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+      loveUri,
+      ALICE,
+      'old-love',
+      'cid-love',
+      'Older Love',
+      'Loved Track',
+      null,
+      artistKey,
+      trackValue,
+      null,
+      '2020-01-01T00:00:00.000000000Z',
+      '2026-01-15T12:00:00.000000000Z',
+    );
+    w.app.db.run(
+      `INSERT INTO love_incarnations(uri,incarnation_key,state,path,source_service,updated_at_ms)
+       VALUES(?,?,'present','snapshot',NULL,?)`,
+      loveUri,
+      'love:old-love',
+      w.clock.nowMs(),
+    );
+    expect(await runLinkBackfill(w.app.db, seededRandom(108), w.clock.nowMs())).toBe(2);
+    expect(await runLinkBackfill(w.app.db, seededRandom(111), w.clock.nowMs())).toBe(2);
+    const rows = w.app.db.all<{ kind: string; payload_json: string }>(
+      'SELECT kind,payload_json FROM forward_outbox WHERE link_id=?',
+      linked.link.id,
+    );
+    expect(rows.map((row) => row.kind).sort()).toEqual(['love', 'scrobble']);
+    expect(rows.map((row) => row.payload_json).join('\n')).not.toContain('Song old');
+    expect(w.lastfm.calls.count()).toBe(0);
+  });
+
+  it('waits for initial indexing and rescans after a completed later snapshot', async () => {
+    const w = await world();
+    const linked = saveLink(
+      { db: w.app.db, clock: w.clock, random: seededRandom(301), box: w.box },
+      { did: ALICE, service: 'listenbrainz', remoteUser: 'late_snapshot', credential: 'lb-token' },
+    ).link;
+    expect(await runLinkBackfill(w.app.db, seededRandom(302), w.clock.nowMs())).toBe(0);
+    expect(
+      w.app.db.one<{ backfill_state: string }>('SELECT backfill_state FROM linked_accounts WHERE id=?', linked.id),
+    ).toEqual({ backfill_state: 'pending' });
+
+    const addSnapshotRecord = async (i: number, rev: string) => {
+      seedBackfillScrobble(w, i);
+      const at = `2026-01-10T00:00:0${i}.000000000Z`;
+      const key = projectionListenKey(ALICE, at, 'a', `t${i}`);
+      admitForwardIdentity(w.app.db, { did: ALICE, identityKey: key, path: 'snapshot', now: w.clock.nowMs() });
+      const generation = w.app.db.one<{ generation: number }>(
+        'SELECT generation FROM users WHERE did=?',
+        ALICE,
+      )!.generation;
+      w.app.db.run(
+        `INSERT INTO repo_jobs(did,kind,generation,head_rev,due_at,updated_at_ms)
+         VALUES(?,'snapshot',?,?,?,?) ON CONFLICT(did,kind) DO UPDATE SET generation=excluded.generation,
+         head_rev=excluded.head_rev,due_at=excluded.due_at,updated_at_ms=excluded.updated_at_ms`,
+        ALICE,
+        generation,
+        rev,
+        w.clock.nowMs(),
+        w.clock.nowMs(),
+      );
+      expect(
+        completeSnapshot(w.app.db, {
+          did: ALICE,
+          generation,
+          headRev: rev,
+          accountActive: true,
+          nowNs: BigInt(w.clock.nowMs()) * 1_000_000n,
+        }).outcome,
+      ).toBe('complete');
+    };
+
+    await addSnapshotRecord(1, 'rev1');
+    expect(await runLinkBackfill(w.app.db, seededRandom(303), w.clock.nowMs())).toBe(1);
+    expect(await runLinkBackfill(w.app.db, seededRandom(305), w.clock.nowMs())).toBe(1);
+    expect(w.app.db.one('SELECT backfill_state FROM linked_accounts WHERE id=?', linked.id)).toEqual({
+      backfill_state: 'done',
+    });
+
+    await addSnapshotRecord(2, 'rev2');
+    expect(w.app.db.one('SELECT backfill_state,backfill_cursor FROM linked_accounts WHERE id=?', linked.id)).toEqual({
+      backfill_state: 'pending',
+      backfill_cursor: null,
+    });
+    expect(await runLinkBackfill(w.app.db, seededRandom(304), w.clock.nowMs())).toBe(2);
+    expect(await runLinkBackfill(w.app.db, seededRandom(306), w.clock.nowMs())).toBe(2);
+    expect(w.app.db.one('SELECT count(*) AS n FROM forward_outbox WHERE link_id=?', linked.id)).toEqual({ n: 2 });
+  });
+
+  it('an async page cannot enqueue or overwrite cursor after an off/on reset in the same generation', async () => {
+    const w = await world();
+    w.app.db.run('INSERT OR IGNORE INTO users(did,joined_at) VALUES(?,?)', ALICE, '2026-01-01T00:00:00.000000000Z');
+    w.app.db.run("UPDATE users SET indexing_state='current' WHERE did=?", ALICE);
+    const linked = saveLink(
+      { db: w.app.db, clock: w.clock, random: seededRandom(311), box: w.box },
+      { did: ALICE, service: 'listenbrainz', remoteUser: 'reset_race', credential: 'lb-token' },
+    ).link;
+    seedBackfillScrobble(w, 1);
+    seedBackfillScrobble(w, 2);
+    const oldPage = runLinkBackfill(w.app.db, seededRandom(312), w.clock.nowMs(), 1);
+    expect(patchLink({ db: w.app.db, clock: w.clock }, ALICE, linked.id, { forwardScrobbles: false })).not.toBeNull();
+    expect(patchLink({ db: w.app.db, clock: w.clock }, ALICE, linked.id, { forwardScrobbles: true })).not.toBeNull();
+    seedBackfillScrobble(w, 3);
+    await oldPage;
+    expect(w.app.db.one('SELECT count(*) AS n FROM forward_outbox WHERE link_id=?', linked.id)).toEqual({ n: 0 });
+    expect(w.app.db.one('SELECT backfill_state,backfill_cursor FROM linked_accounts WHERE id=?', linked.id)).toEqual({
+      backfill_state: 'pending',
+      backfill_cursor: null,
+    });
+    expect(await runLinkBackfill(w.app.db, seededRandom(313), w.clock.nowMs(), 10)).toBe(3);
+    expect(await runLinkBackfill(w.app.db, seededRandom(314), w.clock.nowMs(), 10)).toBe(3);
+    expect(w.app.db.one('SELECT count(*) AS n FROM forward_outbox WHERE link_id=?', linked.id)).toEqual({ n: 3 });
+  });
+
+  it('rotates bounded discovery across links and pauses history admission at its queue high-water mark', async () => {
+    const w = await world();
+    w.app.db.run('INSERT OR IGNORE INTO users(did,joined_at) VALUES(?,?)', ALICE, '2026-01-01T00:00:00.000000000Z');
+    w.app.db.run('INSERT OR IGNORE INTO users(did,joined_at) VALUES(?,?)', BOB, '2026-01-01T00:00:00.000000000Z');
+    w.app.db.run("UPDATE users SET indexing_state='current' WHERE did IN (?,?)", ALICE, BOB);
+    const alice = saveLink(
+      { db: w.app.db, clock: w.clock, random: seededRandom(331), box: w.box },
+      { did: ALICE, service: 'listenbrainz', remoteUser: 'alice_fair', credential: 'lb-token' },
+    ).link;
+    const bob = saveLink(
+      { db: w.app.db, clock: w.clock, random: seededRandom(332), box: w.box },
+      { did: BOB, service: 'listenbrainz', remoteUser: 'bob_fair', credential: 'lb-token' },
+    ).link;
+    seedBackfillScrobble(w, 1, ALICE);
+    seedBackfillScrobble(w, 1, BOB);
+    const first = alice.id < bob.id ? alice : bob;
+    const second = first.id === alice.id ? bob : alice;
+    expect(await runLinkBackfill(w.app.db, seededRandom(333), w.clock.nowMs())).toBe(1);
+    expect(w.app.db.one('SELECT backfill_total FROM linked_accounts WHERE id=?', first.id)).toEqual({
+      backfill_total: 1,
+    });
+    expect(w.app.db.one('SELECT backfill_total FROM linked_accounts WHERE id=?', second.id)).toEqual({
+      backfill_total: 0,
+    });
+    expect(await runLinkBackfill(w.app.db, seededRandom(334), w.clock.nowMs())).toBe(1);
+    expect(w.app.db.one('SELECT backfill_total FROM linked_accounts WHERE id=?', second.id)).toEqual({
+      backfill_total: 1,
+    });
+
+    w.app.db.run(
+      `WITH RECURSIVE seq(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM seq WHERE i<=?)
+       INSERT INTO forward_outbox(id,link_id,did,kind,dedupe_key,payload_json,state,attempts,due_at,last_error,
+         created_at_ms,updated_at_ms,priority)
+       SELECT 'history-'||i,?,?, 'scrobble','queue-key-'||i,'{}','queued',0,?,NULL,?,?,1 FROM seq`,
+      BACKFILL_HISTORY_QUEUE_HIGH_WATER,
+      first.id,
+      first.did,
+      w.clock.nowMs(),
+      w.clock.nowMs(),
+      w.clock.nowMs(),
+    );
+    expect(await runLinkBackfill(w.app.db, seededRandom(335), w.clock.nowMs())).toBe(0);
+    expect(
+      w.app.db.one('SELECT backfill_state,backfill_cursor,backfill_done FROM linked_accounts WHERE id=?', first.id),
+    ).toEqual({
+      backfill_state: 'running',
+      backfill_cursor: null,
+      backfill_done: 0,
+    });
+    expect(w.app.db.one('SELECT count(*) AS n FROM forward_outbox WHERE link_id=? AND priority=1', first.id)).toEqual({
+      n: BACKFILL_HISTORY_QUEUE_HIGH_WATER + 1,
+    });
+  });
+
+  it('backs off a bounded number of times, exposes a safe terminal error, and toggle resets retry state', async () => {
+    const w = await world();
+    const linked = saveLink(
+      { db: w.app.db, clock: w.clock, random: seededRandom(321), box: w.box },
+      { did: ALICE, service: 'listenbrainz', remoteUser: 'retry_limit', credential: 'lb-token' },
+    ).link;
+    const revision = linked.backfill_run_revision;
+    w.app.db.run("UPDATE linked_accounts SET backfill_state='running' WHERE id=?", linked.id);
+    let now = w.clock.nowMs();
+    for (let n = 1; n < BACKFILL_MAX_FAILURES; n++) {
+      const retry = recordBackfillFailure(
+        w.app.db,
+        { id: linked.id, generation: linked.generation, backfill_run_revision: revision },
+        now,
+      );
+      expect(retry).toMatchObject({ failures: n, exhausted: false });
+      expect(retry?.retryAt).toBeGreaterThan(now);
+      now = retry?.retryAt ?? now;
+    }
+    expect(
+      recordBackfillFailure(
+        w.app.db,
+        { id: linked.id, generation: linked.generation, backfill_run_revision: revision },
+        now,
+      ),
+    ).toEqual({ failures: BACKFILL_MAX_FAILURES, retryAt: null, exhausted: true });
+    expect(
+      w.app.db.one(
+        'SELECT backfill_state,backfill_last_error,backfill_next_attempt_ms FROM linked_accounts WHERE id=?',
+        linked.id,
+      ),
+    ).toEqual({
+      backfill_state: 'skipped',
+      backfill_last_error: 'retry_exhausted',
+      backfill_next_attempt_ms: null,
+    });
+    const token = w.signIn(ALICE);
+    const response = await call(w, 'GET', '/api/v1/links', { token });
+    expect(response.res.status).toBe(200);
+    expect(response.body?.items).toMatchObject([
+      { id: linked.id, sync: { backfill: { state: 'skipped', lastError: 'retry_exhausted' } } },
+    ]);
+
+    expect(patchLink({ db: w.app.db, clock: w.clock }, ALICE, linked.id, { forwardScrobbles: false })).not.toBeNull();
+    expect(patchLink({ db: w.app.db, clock: w.clock }, ALICE, linked.id, { forwardScrobbles: true })).not.toBeNull();
+    expect(
+      recordBackfillFailure(
+        w.app.db,
+        { id: linked.id, generation: linked.generation, backfill_run_revision: revision },
+        now,
+      ),
+    ).toBeNull();
+    expect(
+      w.app.db.one(
+        'SELECT backfill_state,backfill_last_error,backfill_failures FROM linked_accounts WHERE id=?',
+        linked.id,
+      ),
+    ).toEqual({
+      backfill_state: 'pending',
+      backfill_last_error: null,
+      backfill_failures: 0,
+    });
+  });
+
   it.each(['logout', 'logout-all', 'disconnect', 'expiry'] as const)(
     'Last.fm callback cannot relink after %s while auth.getSession is in flight, even with a new same-DID cookie',
     async (revocation) => {
@@ -358,6 +1068,7 @@ describe('link routes', () => {
           forwardNowPlaying: true,
           status: 'active',
           lastError: null,
+          sync: { backfill: { state: 'pending', done: 0, total: 0 }, pullEnabled: true, queued: 0, failed: 0 },
           createdAt: '2026-01-15T12:00:00.000Z',
           updatedAt: '2026-01-15T12:00:00.000Z',
         },
@@ -398,6 +1109,7 @@ describe('link routes', () => {
       status: 'active',
       forwardScrobbles: true,
       forwardNowPlaying: true,
+      sync: { backfill: { state: 'pending', done: 0, total: 0 }, pullEnabled: true, queued: 0, failed: 0 },
     });
     expect(w.lb.calls.filter({ path: '/1/validate-token' }).map((c) => c.status)).toEqual([200, 200]);
 
@@ -432,6 +1144,7 @@ describe('link routes', () => {
     w.lb.addToken('alice', 'lb-token-1');
     const created = await call(w, 'POST', '/api/v1/links/listenbrainz', { token, body: { token: 'lb-token-1' } });
     const id = created.body?.id as string;
+    expect(created.body).toMatchObject({ sync: { backfill: { state: 'pending' }, pullEnabled: true } });
 
     const patched = await call(w, 'PATCH', `/api/v1/links/${id}`, { token, body: { forwardScrobbles: false } });
     expect(patched.res.status).toBe(200);
@@ -440,6 +1153,40 @@ describe('link routes', () => {
     ).toBe('valid');
     expect(patched.body).toMatchObject({ id, forwardScrobbles: false, forwardNowPlaying: true });
     expect(links(w)[0]).toMatchObject({ forward_scrobbles: 0, forward_now_playing: 1 });
+    w.app.db.run(
+      "UPDATE linked_accounts SET backfill_state='running',backfill_cursor='cursor-x',backfill_done=12,backfill_total=30 WHERE id=?",
+      id,
+    );
+    const togglePull = await call(w, 'PATCH', `/api/v1/links/${id}`, { token, body: { pullEnabled: false } });
+    expect(togglePull.res.status).toBe(200);
+    expect(togglePull.body).toMatchObject({
+      forwardScrobbles: false,
+      forwardNowPlaying: true,
+      sync: { pullEnabled: false, backfill: { state: 'running', done: 12, total: 30 } },
+    });
+    const sameRemote = saveLink(
+      { db: w.app.db, clock: w.clock, random: seededRandom(11), box: w.box },
+      { did: ALICE, service: 'listenbrainz', remoteUser: 'alice', credential: 'lb-token-2' },
+    );
+    expect(sameRemote.link).toMatchObject({
+      backfill_state: 'running',
+      backfill_cursor: 'cursor-x',
+      backfill_done: 12,
+      backfill_total: 30,
+      pull_enabled: 0,
+    });
+    const newRemote = saveLink(
+      { db: w.app.db, clock: w.clock, random: seededRandom(12), box: w.box },
+      { did: ALICE, service: 'listenbrainz', remoteUser: 'alice2', credential: 'lb-token-3' },
+    );
+    expect(newRemote.link).toMatchObject({
+      backfill_state: 'pending',
+      backfill_cursor: null,
+      backfill_done: 0,
+      backfill_total: 0,
+      pull_watermark_ms: w.clock.nowMs(),
+      sync_remote_user: 'alice2',
+    });
 
     // The flags decide which rows enqueueForwards (N2-05) creates.
     const random = seededRandom(5);
@@ -463,6 +1210,29 @@ describe('link routes', () => {
     expect(restored.body).toMatchObject({ forwardScrobbles: true, forwardNowPlaying: true });
     expect(enqueueForwards(w.app.db, { did: ALICE, items: [scrobble], now, random })).toBe(1);
     expect(w.app.db.one<{ n: number }>('SELECT count(*) AS n FROM forward_outbox WHERE link_id = ?', id)?.n).toBe(2);
+    w.app.db.run(
+      "UPDATE linked_accounts SET backfill_state='running',backfill_cursor='cursor-y',backfill_done=7,backfill_total=20 WHERE id=?",
+      id,
+    );
+    await call(w, 'PATCH', `/api/v1/links/${id}`, { token, body: { forwardScrobbles: false } });
+    w.app.db.run(
+      'INSERT INTO forward_admissions(did,identity_key,path,source_service,created_at_ms,admission_seq) VALUES(?,?,?,?,?,?)',
+      ALICE,
+      'listen-admitted-while-disabled',
+      'live',
+      null,
+      w.clock.nowMs(),
+      42,
+    );
+    const enabledAgain = await call(w, 'PATCH', `/api/v1/links/${id}`, {
+      token,
+      body: { forwardScrobbles: true },
+    });
+    expect(enabledAgain.body).toMatchObject({
+      sync: { backfill: { state: 'pending', done: 0, total: 0 } },
+    });
+    expect(links(w)[0]).toMatchObject({ backfill_state: 'pending', backfill_cursor: null });
+    expect(links(w)[0]?.generation_start_seq).toBe(42);
 
     // Invalid patches and other owners' links.
     expect(

@@ -429,6 +429,24 @@ export interface Link {
   lastError: ErrorSlug | null;
   createdAt: Timestamp;
   updatedAt: Timestamp;
+  /** Best-effort synchronization status; absent on older servers. */
+  sync?: {
+    backfill: {
+      state: 'pending' | 'running' | 'done' | 'skipped';
+      /** Eligible indexed-history items settled by enqueue or skip; not upstream deliveries. */
+      done: number;
+      /** Eligible candidate work discovered so far, including duplicate skips; grows during a running backfill. */
+      total: number;
+      lastError?: 'retry_exhausted';
+    };
+    pullEnabled: boolean;
+    lastSuccessAt?: Timestamp;
+    lastFailureAt?: Timestamp;
+    lastError?: ErrorSlug | null;
+    lastPulledAt?: Timestamp;
+    queued: number;
+    failed: number;
+  };
 }
 
 export type ImportSource = 'lastfm_api' | 'lastfm_json' | 'listenbrainz_api' | 'listenbrainz_zip';

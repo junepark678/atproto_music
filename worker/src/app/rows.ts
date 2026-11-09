@@ -372,6 +372,22 @@ export interface LinkedAccountRow {
   last_success_ms: number | null;
   last_failure_ms: number | null;
   consecutive_failures: number;
+  backfill_state: 'pending' | 'running' | 'done' | 'skipped';
+  backfill_cursor: string | null;
+  backfill_total: number;
+  backfill_done: number;
+  pull_enabled: Flag;
+  pull_watermark_ms: number | null;
+  last_pull_ms: number | null;
+  sync_remote_user: string | null;
+  backfill_failures: number;
+  backfill_next_attempt_ms: number | null;
+  /** Fences any async scan page from a reset/re-schedule of this generation. */
+  backfill_run_revision: number;
+  backfill_discovery_cursor: string | null;
+  backfill_discovery_done: 0 | 1;
+  backfill_last_serviced_seq: number;
+  backfill_last_error: string | null;
 }
 
 export interface LinkStateRow {
@@ -400,6 +416,8 @@ export interface ForwardOutboxRow {
   love_track_key: string | null;
   /** Destination generation captured when this forward was admitted. */
   generation: number;
+  /** 0 live; 1 historical backfill. */
+  priority: number;
 }
 
 export interface ImportJobRow {

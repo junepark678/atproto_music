@@ -293,7 +293,9 @@ function queuedLoveHeads(db: Db, linkId: string, generation: number): QueuedRow[
     seen.add(key);
     heads.push(row);
   }
-  return heads;
+  // Priority selects among independent tracks, never among transitions of
+  // the same track: a live unlove must wait for its earlier historical love.
+  return heads.sort((a, b) => a.priority - b.priority || a.created_at_ms - b.created_at_ms || a.seq - b.seq);
 }
 
 function loveJob(rt: ForwardRuntime, link: LinkRow, now: number): Job | null {
@@ -431,14 +433,18 @@ function knownRecordingMbid(db: Db, unlove: QueuedRow, track: ForwardTrack): str
   );
 }
 
-const seqOf = (job: Job): [number, number] => [job.rows[0].created_at_ms, job.rows[0].seq];
+const seqOf = (job: Job): [number, number, number] => [
+  job.rows[0].priority,
+  job.rows[0].created_at_ms,
+  job.rows[0].seq,
+];
 
 function older(a: Job | null, b: Job | null): Job | null {
   if (a === null) return b;
   if (b === null) return a;
   const [ac, as] = seqOf(a);
   const [bc, bs] = seqOf(b);
-  return ac < bc || (ac === bc && as <= bs) ? a : b;
+  return ac < bc || (ac === bc && (as < bs || (as === bs && seqOf(a)[2] <= seqOf(b)[2]))) ? a : b;
 }
 
 /** The next job to send at `now`, or null. */
@@ -447,7 +453,7 @@ function pickJob(rt: ForwardRuntime, now: number): Job | null {
     `SELECT l.*, min(f.created_at_ms) AS oldest FROM linked_accounts l
      JOIN forward_outbox f ON f.link_id = l.id
      WHERE l.status='active' AND f.generation=l.generation AND f.state='queued' AND f.due_at<=?
-     GROUP BY l.id ORDER BY oldest, l.id`,
+     GROUP BY l.id ORDER BY min(f.priority),oldest, l.id`,
     now,
   );
   for (const link of candidates) {
