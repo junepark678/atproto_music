@@ -415,6 +415,8 @@ export interface ForwardOutboxRow {
   updated_at_ms: number;
   love_artist_key: string | null;
   love_track_key: string | null;
+  /** 1 after the durable love lane has indexed this queued row. */
+  love_lane: number | null;
   /** Destination generation captured when this forward was admitted. */
   generation: number;
   /** 0 live; 1 historical backfill. */

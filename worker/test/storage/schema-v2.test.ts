@@ -641,9 +641,53 @@ const NEW_TABLES: Record<string, ExpectedTable> = {
       love_track_key: true,
       generation: true,
       priority: true,
+      love_lane: true,
     }),
     pk: ['id'],
     unique: [['link_id', 'kind', 'dedupe_key']],
+  },
+  forward_love_lanes: {
+    columns: ['link_id', 'generation', 'love_artist_key', 'love_track_key', 'priority', 'due_at', 'head_created_at_ms'],
+    pk: ['link_id', 'generation', 'love_artist_key', 'love_track_key'],
+  },
+  forward_love_recording_history: {
+    columns: ['did', 'artist_key', 'track_key', 'operation_rowid', 'recording_mbid'],
+    pk: ['did', 'artist_key', 'track_key', 'operation_rowid'],
+  },
+  forward_love_recording_history_state: {
+    columns: ['singleton', 'cursor_rowid', 'complete'],
+    pk: ['singleton'],
+  },
+  forward_love_recording_targets: {
+    columns: [
+      'target_id',
+      'forward_rowid',
+      'link_id',
+      'generation',
+      'artist_key',
+      'track_key',
+      'created_at_ms',
+      'recording_mbid',
+    ],
+    pk: ['target_id'],
+    unique: [['forward_rowid']],
+  },
+  forward_love_recording_targets_state: {
+    columns: ['singleton', 'cursor_rowid', 'complete'],
+    pk: ['singleton'],
+  },
+  forward_love_operation_targets: {
+    columns: ['target_id', 'operation_rowid', 'did', 'artist_key', 'track_key', 'created_at_ms', 'recording_mbid'],
+    pk: ['target_id'],
+    unique: [['operation_rowid']],
+  },
+  forward_love_operation_targets_state: {
+    columns: ['singleton', 'cursor_rowid', 'complete'],
+    pk: ['singleton'],
+  },
+  forward_unlove_lookup_progress: {
+    columns: ['unlove_rowid', 'cursor_created_at_ms', 'cursor_operation_rowid'],
+    pk: ['unlove_rowid'],
   },
   import_jobs: {
     columns: cols<ImportJobRow>({
@@ -749,6 +793,71 @@ const NEW_SCROBBLE_COLUMNS = cols<ScrobbleV2Columns>({
 
 /** New named indexes: table, unique, partial, [column, desc] in key order. */
 const NEW_INDEXES: Record<string, [string, number, number, Array<[string, number]>]> = {
+  forward_love_lanes_due: [
+    'forward_love_lanes',
+    0,
+    0,
+    [
+      ['link_id', 0],
+      ['generation', 0],
+      ['priority', 0],
+      ['due_at', 0],
+    ],
+  ],
+  forward_outbox_love_unkeyed: [
+    'forward_outbox',
+    0,
+    1,
+    [
+      ['link_id', 0],
+      ['generation', 0],
+      ['kind', 0],
+      ['created_at_ms', 0],
+    ],
+  ],
+  forward_outbox_love_unframed: [
+    'forward_outbox',
+    0,
+    1,
+    [
+      ['link_id', 0],
+      ['generation', 0],
+      ['kind', 0],
+      ['created_at_ms', 0],
+    ],
+  ],
+  forward_outbox_kind_due: [
+    'forward_outbox',
+    0,
+    0,
+    [
+      ['link_id', 0],
+      ['generation', 0],
+      ['kind', 0],
+      ['state', 0],
+      ['due_at', 0],
+    ],
+  ],
+  forward_outbox_link_expiry: [
+    'forward_outbox',
+    0,
+    0,
+    [
+      ['link_id', 0],
+      ['state', 0],
+      ['kind', 0],
+      ['created_at_ms', 0],
+    ],
+  ],
+  forward_outbox_held_expiry: [
+    'forward_outbox',
+    0,
+    0,
+    [
+      ['state', 0],
+      ['updated_at_ms', 0],
+    ],
+  ],
   listenbrainz_deletes_due: [
     'listenbrainz_deletes',
     0,
@@ -897,6 +1006,67 @@ const NEW_INDEXES: Record<string, [string, number, number, Array<[string, number
       ['generation', 0],
       ['state', 0],
       ['created_at_ms', 0],
+    ],
+  ],
+  forward_outbox_love_heads: [
+    'forward_outbox',
+    0,
+    0,
+    [
+      ['link_id', 0],
+      ['generation', 0],
+      ['state', 0],
+      ['love_artist_key', 0],
+      ['love_track_key', 0],
+      ['created_at_ms', 0],
+    ],
+  ],
+  forward_love_recording_history_latest: [
+    'forward_love_recording_history',
+    0,
+    0,
+    [
+      ['did', 0],
+      ['artist_key', 0],
+      ['track_key', 0],
+      ['operation_rowid', 1],
+    ],
+  ],
+  forward_outbox_love_recording_lookup: [
+    'forward_outbox',
+    0,
+    0,
+    [
+      ['link_id', 0],
+      ['generation', 0],
+      ['love_artist_key', 0],
+      ['love_track_key', 0],
+      ['created_at_ms', 0],
+    ],
+  ],
+  forward_love_recording_targets_latest: [
+    'forward_love_recording_targets',
+    0,
+    0,
+    [
+      ['link_id', 0],
+      ['generation', 0],
+      ['artist_key', 0],
+      ['track_key', 0],
+      ['created_at_ms', 1],
+      ['forward_rowid', 1],
+    ],
+  ],
+  forward_love_operation_targets_latest: [
+    'forward_love_operation_targets',
+    0,
+    0,
+    [
+      ['did', 0],
+      ['artist_key', 0],
+      ['track_key', 0],
+      ['created_at_ms', 1],
+      ['operation_rowid', 1],
     ],
   ],
   linked_accounts_backfill_due: [
@@ -1163,6 +1333,7 @@ const NEW_FOREIGN_KEYS = [
   ['loves', 'did', 'users', 'did', 'CASCADE'],
   ['link_backfill_items', 'link_id', 'linked_accounts', 'id', 'CASCADE'],
   ['forward_outbox', 'link_id', 'linked_accounts', 'id', 'CASCADE'],
+  ['forward_love_lanes', 'link_id', 'linked_accounts', 'id', 'CASCADE'],
 ];
 
 // ---------------------------------------------------------------------------
@@ -1777,6 +1948,10 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       "40|'listenbrainz_delete_lookup_progress'",
       "41|'listenbrainz_delete_lookup_tie_fence'",
       "42|'listenbrainz_delete_lookup_page_boundary'",
+      "43|'forward_love_key_heads'",
+      "44|'forward_love_lanes'",
+      "45|'forward_love_recording_history'",
+      "46|'forward_love_recording_targets'",
     ]);
     // The new scrobble columns exist and are NULL on every migrated row.
     expect(after.newColumns).toHaveLength(expectedScrobbles);
@@ -1826,6 +2001,10 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       { version: 40, name: 'listenbrainz_delete_lookup_progress' },
       { version: 41, name: 'listenbrainz_delete_lookup_tie_fence' },
       { version: 42, name: 'listenbrainz_delete_lookup_page_boundary' },
+      { version: 43, name: 'forward_love_key_heads' },
+      { version: 44, name: 'forward_love_lanes' },
+      { version: 45, name: 'forward_love_recording_history' },
+      { version: 46, name: 'forward_love_recording_targets' },
     ]);
     expect(after.compat).toEqual([{ singleton: 1, min_compatible_version: 2 }]);
     expect(after.newTablesEmpty).toEqual(['mb_cover_art_usage']);

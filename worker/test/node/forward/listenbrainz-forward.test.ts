@@ -21,11 +21,31 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { MemoryRevocations } from '../../../src/app/revocations';
 import type { ForwardOutboxRow } from '../../../src/app/rows';
 import { ensureAccount } from '../../../src/credentials/accounts';
+import type { SqlParam } from '../../../src/do/db';
 import { migrate } from '../../../src/do/migrate';
 import { runDeleteSlice } from '../../../src/forward/delete-forwarder';
-import { LASTFM_EXPIRY_MS, LISTENBRAINZ_EXPIRY_MS } from '../../../src/forward/forward-outbox';
-import { type ForwardRuntime, runForward } from '../../../src/forward/forwarder';
-import { saveLink } from '../../../src/forward/links';
+import {
+  EXPIRY_PROBE_SQL,
+  EXPIRY_SELECT_SQL,
+  HELD_EXPIRY_PROBE_SQL,
+  HELD_EXPIRY_SELECT_SQL,
+  LASTFM_EXPIRY_MS,
+  LISTENBRAINZ_EXPIRY_MS,
+  MAX_EXPIRY_TRANSITIONS_PER_RUN,
+  STALE_NOWPLAYING_PROBE_SQL,
+} from '../../../src/forward/forward-outbox';
+import {
+  type ForwardRuntime,
+  KIND_CANDIDATE_SQL,
+  KIND_MIN_DUE_SQL,
+  LANE_FIRST_DUE_SQL,
+  LANE_MIN_DUE_SQL,
+  MAX_LOCAL_WORK_PER_RUN,
+  nextForwardDue,
+  runForward,
+} from '../../../src/forward/forwarder';
+import { deleteLink, saveLink } from '../../../src/forward/links';
+import { HEAD_SQL, LANE_PICK_SQL, UNFRAMED_SQL, UNKEYED_SQL } from '../../../src/forward/love-lanes';
 import { UpstreamPacing } from '../../../src/forward/upstream-pacing';
 import { type LinksService, linksFeature } from '../../../src/http/links';
 import { parseSecrets } from '../../../src/node/secrets';
@@ -39,6 +59,7 @@ import { FakeListenBrainz, type LbSubmission } from '../support/fake-listenbrain
 const API_KEY = '0123456789abcdef0123456789abcdef';
 const SECRET = 'owner-shared-secret-for-tests';
 const ALICE = 'did:plc:alicealicealicealicealic';
+const BOB = 'did:plc:bobbobbobbobbobbob';
 const TOKEN = '5c7f3a3e-2f1d-4c1b-9a77-0d1e2f3a4b5c';
 const MBID = '8f3471b5-7e6a-48da-86a9-c1c07a0f47ae';
 const SECOND = 1_000;
@@ -165,6 +186,248 @@ function queueDelete(w: World, linkId: string, id: string, listenedAt: number, a
 }
 
 describe('ListenBrainz forwarding', () => {
+  it('pins every love lane, kind and expiry query to its bounded index plan', async () => {
+    const w = await world();
+    const linkId = w.link();
+    const plans: Array<[string, readonly SqlParam[], string]> = [
+      [LANE_PICK_SQL, [linkId, 1, 0, w.clock.nowMs(), 32], 'forward_love_lanes_due'],
+      [HEAD_SQL, [linkId, 1, 'artist', 'track'], 'forward_outbox_love_heads'],
+      [UNKEYED_SQL, [linkId, 1, 'love', 1], 'forward_outbox_love_unkeyed'],
+      [UNFRAMED_SQL, [linkId, 1, 'love', 64], 'forward_outbox_love_unframed'],
+      [LANE_FIRST_DUE_SQL, [linkId, 1, 0, w.clock.nowMs()], 'forward_love_lanes_due'],
+      [LANE_MIN_DUE_SQL, [linkId, 1, 0], 'forward_love_lanes_due'],
+      [KIND_CANDIDATE_SQL, [linkId, 1, 'scrobble', w.clock.nowMs()], 'forward_outbox_kind_due'],
+      [KIND_MIN_DUE_SQL, [linkId, 1, 'scrobble'], 'forward_outbox_kind_due'],
+      [EXPIRY_SELECT_SQL, [linkId, 'love', w.clock.nowMs(), 128], 'forward_outbox_link_expiry'],
+      [HELD_EXPIRY_SELECT_SQL, [w.clock.nowMs(), 128], 'forward_outbox_held_expiry'],
+      [EXPIRY_PROBE_SQL, [linkId, 'love', w.clock.nowMs()], 'forward_outbox_link_expiry'],
+      [STALE_NOWPLAYING_PROBE_SQL, [linkId, w.clock.nowMs()], 'forward_outbox_link_expiry'],
+      [HELD_EXPIRY_PROBE_SQL, [w.clock.nowMs()], 'forward_outbox_held_expiry'],
+    ];
+    for (const [sql, params, index] of plans) {
+      const detail = w.app.db
+        .all<{ detail: string }>(`EXPLAIN QUERY PLAN ${sql}`, ...params)
+        .map((row) => row.detail)
+        .join(' | ');
+      expect(detail, sql).toContain(index);
+      expect(detail, sql).not.toContain('SCAN forward_outbox');
+      expect(detail, sql).not.toContain('USE TEMP B-TREE');
+    }
+  });
+
+  it('keeps statement and returned-row work flat from 200 to 2,000 love keys with a fixed scrobble backlog', async () => {
+    const measure = async (loveCount: number) => {
+      const w = await world();
+      const linkId = w.link();
+      const generation = w.app.db.one<{ generation: number }>(
+        'SELECT generation FROM linked_accounts WHERE id=?',
+        linkId,
+      )!.generation;
+      w.scrobbles(1_000, `flat-${loveCount}`);
+      for (let i = 0; i < loveCount; i++) {
+        const artist = `Flat Artist ${i}`;
+        const track = `Flat Track ${i}`;
+        const [artistKey, trackKeyValue] = trackKey(artist, track);
+        w.app.db.run(
+          `INSERT INTO forward_outbox(id,link_id,generation,did,kind,dedupe_key,payload_json,state,attempts,due_at,created_at_ms,updated_at_ms,love_artist_key,love_track_key)
+           VALUES(?,?,?,?,'love',?,?,'queued',0,0,?,?,?,?)`,
+          `flat-love-${loveCount}-${i}`,
+          linkId,
+          generation,
+          ALICE,
+          `flat-love-${loveCount}-${i}`,
+          JSON.stringify({ artist, track }),
+          w.clock.nowMs(),
+          w.clock.nowMs(),
+          artistKey,
+          trackKeyValue,
+        );
+      }
+      const db = w.app.db;
+      const originalAll = db.all.bind(db);
+      const originalOne = db.one.bind(db);
+      const originalRun = db.run.bind(db);
+      let statements = 0;
+      let returnedRows = 0;
+      let framingRows = 0;
+      let laneRows = 0;
+      db.all = ((sql: string, ...params: SqlParam[]) => {
+        statements++;
+        const rows = originalAll(sql, ...params);
+        returnedRows += rows.length;
+        if (sql.includes(UNFRAMED_SQL) && params[3] !== 1) framingRows += rows.length;
+        if (sql.includes(LANE_PICK_SQL)) laneRows += rows.length;
+        return rows;
+      }) as typeof db.all;
+      db.one = ((sql: string, ...params: SqlParam[]) => {
+        statements++;
+        const row = originalOne(sql, ...params);
+        if (row !== null) returnedRows++;
+        return row;
+      }) as typeof db.one;
+      db.run = ((sql: string, ...params: SqlParam[]) => {
+        statements++;
+        return originalRun(sql, ...params);
+      }) as typeof db.run;
+      try {
+        await runForward({ ...w.rt, db }, w.clock.nowMs());
+        return { statements, returnedRows, framingRows, laneRows };
+      } finally {
+        db.all = originalAll;
+        db.one = originalOne;
+        db.run = originalRun;
+      }
+    };
+    const small = await measure(200);
+    const large = await measure(2_000);
+    expect(large).toEqual(small);
+    expect(large.framingRows).toBeLessThanOrEqual(64);
+    expect(large.laneRows).toBeLessThanOrEqual(MAX_LOCAL_WORK_PER_RUN);
+  });
+
+  it('returns a deferred same-key head deadline with the same scheduler probes at 100 and 10,000 rows', async () => {
+    const measure = async (count: number) => {
+      const w = await world();
+      const linkId = w.link();
+      const generation = w.app.db.one<{ generation: number }>(
+        'SELECT generation FROM linked_accounts WHERE id=?',
+        linkId,
+      )!.generation;
+      const now = w.clock.nowMs();
+      const [artistKey, trackKeyValue] = trackKey('Blocked Artist', 'Blocked Track');
+      for (let i = 0; i < count; i++) {
+        w.app.db.run(
+          `INSERT INTO forward_outbox(id,link_id,generation,did,kind,dedupe_key,payload_json,state,attempts,due_at,created_at_ms,updated_at_ms,love_artist_key,love_track_key,love_lane)
+           VALUES(?,?,?,?,'love',?,?,'queued',0,?,?,?,?,?,1)`,
+          `blocked-${count}-${i}`,
+          linkId,
+          generation,
+          ALICE,
+          `blocked-${count}-${i}`,
+          JSON.stringify({ artist: 'Blocked Artist', track: 'Blocked Track' }),
+          i === 0 ? now + 60_000 : now,
+          now,
+          now,
+          artistKey,
+          trackKeyValue,
+        );
+      }
+      w.app.db.run(
+        `INSERT INTO forward_love_lanes(link_id,generation,love_artist_key,love_track_key,priority,due_at,head_created_at_ms)
+         VALUES(?,?,?, ?,0,?,?)`,
+        linkId,
+        generation,
+        artistKey,
+        trackKeyValue,
+        now + 60_000,
+        now,
+      );
+      const db = w.app.db;
+      const originalAll = db.all.bind(db);
+      const originalOne = db.one.bind(db);
+      let statements = 0;
+      let returnedRows = 0;
+      db.all = ((sql: string, ...params: SqlParam[]) => {
+        statements++;
+        const rows = originalAll(sql, ...params);
+        returnedRows += rows.length;
+        return rows;
+      }) as typeof db.all;
+      db.one = ((sql: string, ...params: SqlParam[]) => {
+        statements++;
+        const row = originalOne(sql, ...params);
+        if (row !== null) returnedRows++;
+        return row;
+      }) as typeof db.one;
+      try {
+        const due = nextForwardDue({ ...w.rt, db }, now);
+        return { due, expected: now + 60_000, statements, returnedRows };
+      } finally {
+        db.all = originalAll;
+        db.one = originalOne;
+      }
+    };
+    const hundred = await measure(100);
+    const tenThousand = await measure(10_000);
+    expect(hundred.due).toBe(hundred.expected);
+    expect(tenThousand.due).toBe(tenThousand.expected);
+    expect(tenThousand.statements).toBe(hundred.statements);
+    expect(tenThousand.returnedRows).toBe(hundred.returnedRows);
+  });
+
+  it('fails malformed keyless love rows instead of leaving them invisible', async () => {
+    const w = await world();
+    w.link();
+    expect(
+      w.enqueue([{ kind: 'love', operationId: 'malformed-keyless', payload: null } as unknown as ForwardItem]),
+    ).toBe(1);
+    const report = await w.run();
+    expect(w.rows()[0]).toMatchObject({ state: 'failed', last_error: 'invalid_payload' });
+    expect(
+      w.app.db.one<{ last_error: string }>('SELECT last_error FROM linked_accounts WHERE id=?', w.rows()[0]!.link_id),
+    ).toEqual({ last_error: 'invalid_payload' });
+    expect(report.nextDueMs).toBeNull();
+  });
+
+  it('writes a durable lane for each keyed love enqueue and keeps existing lower-bound hints', async () => {
+    const w = await world();
+    const linkId = w.link();
+    const now = w.clock.nowMs();
+    const input = { artist: 'Lane Artist', track: 'Lane Track', recordingMbid: MBID };
+    expect((await enqueueLove(w.app.composed.core.deps, { did: ALICE, input, origin: 'listenbrainz' })).ok).toBe(true);
+    const first = w.rows()[0]!;
+    const [artistKey, trackKeyValue] = trackKey(input.artist, input.track);
+    const laneBefore = w.app.db.one<{ priority: number; due_at: number; head_created_at_ms: number }>(
+      'SELECT priority,due_at,head_created_at_ms FROM forward_love_lanes WHERE link_id=? AND love_artist_key=? AND love_track_key=?',
+      linkId,
+      artistKey,
+      trackKeyValue,
+    );
+    expect(first.love_lane).toBe(1);
+    expect(laneBefore).toMatchObject({ due_at: first.due_at, head_created_at_ms: first.created_at_ms });
+    enqueueForwards(w.app.db, {
+      did: ALICE,
+      items: [{ kind: 'love', operationId: 'later-lane-love', payload: input }],
+      now: now + 1,
+      dueAt: now + 10_000,
+      priority: 1,
+      random: seededRandom(99),
+    });
+    const laneAfter = w.app.db.one<{ priority: number; due_at: number; head_created_at_ms: number }>(
+      'SELECT priority,due_at,head_created_at_ms FROM forward_love_lanes WHERE link_id=? AND love_artist_key=? AND love_track_key=?',
+      linkId,
+      artistKey,
+      trackKeyValue,
+    );
+    expect(laneAfter).toEqual(laneBefore);
+  });
+
+  it('frames a legacy keyless love before a newer unlove without MusicBrainz resolution', async () => {
+    const w = await world();
+    w.link();
+    await enqueueLove(w.app.composed.core.deps, {
+      did: ALICE,
+      input: { artist: 'Band', track: 'Song', recordingMbid: MBID },
+      origin: 'listenbrainz',
+    });
+    const love = w.rows()[0]!;
+    w.app.db.run(
+      'UPDATE forward_outbox SET love_artist_key=NULL,love_track_key=NULL,love_lane=NULL WHERE id=?',
+      love.id,
+    );
+    await enqueueUnlove(w.app.composed.core.deps, {
+      did: ALICE,
+      artist: 'Band',
+      track: 'Song',
+      origin: 'listenbrainz',
+    });
+    await w.run();
+    expect(w.lb.feedback[0]?.json).toEqual({ recording_mbid: MBID, score: 1 });
+    w.clock.advance(SECOND);
+    await w.run();
+    expect(w.lb.feedback[1]?.json).toEqual({ recording_mbid: MBID, score: 0 });
+  });
+
   it('persists the matched upstream target, then deletes that exact listen on a later paced invocation', async () => {
     const w = await world();
     const linkId = w.link();
@@ -277,7 +540,7 @@ describe('ListenBrainz forwarding', () => {
     await w.app.close();
     let db: SqliteDb | null = openSqliteDb(path, { busyTimeoutMs: 200 });
     try {
-      expect(migrate(db)).toEqual({ status: 'ready', version: 42 });
+      expect(migrate(db)).toEqual({ status: 'ready', version: 46 });
       expect(
         db.one('SELECT target_msid,target_listened_at FROM listenbrainz_deletes WHERE id=?', 'restart-delete'),
       ).toEqual({
@@ -302,7 +565,7 @@ describe('ListenBrainz forwarding', () => {
       expect(retry).toMatchObject({ target_msid: msid, target_listened_at: listenedAt + 1 });
       db.close();
       db = openSqliteDb(path, { busyTimeoutMs: 200 });
-      expect(migrate(db)).toEqual({ status: 'ready', version: 42 });
+      expect(migrate(db)).toEqual({ status: 'ready', version: 46 });
       w.clock.set(new Date(retry!.due_at).toISOString());
       expect(
         (
@@ -504,6 +767,12 @@ describe('ListenBrainz forwarding', () => {
     const w = await world();
     const linkId = w.link();
     const now = w.clock.nowMs();
+    await enqueueLove(w.app.composed.core.deps, {
+      did: ALICE,
+      input: { artist: 'Remote Artist', track: 'Remote Track', recordingMbid: MBID },
+      origin: 'listenbrainz',
+    });
+    expect(w.app.db.one('SELECT 1 FROM forward_love_lanes WHERE link_id=?', linkId)).not.toBeNull();
     w.app.db.run(
       `INSERT INTO listenbrainz_deletes
       (id,event_key,link_id,generation,did,identity_key,listened_at,artist_key,track_key,artist,track,source_path,state,attempts,due_at,deadline_at,created_at_ms,updated_at_ms)
@@ -523,6 +792,7 @@ describe('ListenBrainz forwarding', () => {
       generation: 1,
       state: 'queued',
     });
+    expect(w.app.db.one('SELECT 1 FROM forward_love_lanes WHERE link_id=?', linkId)).not.toBeNull();
     saveLink(
       { db: w.app.db, clock: w.clock, random: w.rt.random, box: w.rt.box },
       { did: ALICE, service: 'listenbrainz', remoteUser: 'new_lb_account', credential: TOKEN },
@@ -530,6 +800,82 @@ describe('ListenBrainz forwarding', () => {
     expect(
       w.app.db.one('SELECT generation,state,last_error FROM listenbrainz_deletes WHERE id=?', 'relink-delete'),
     ).toEqual({ generation: 1, state: 'expired', last_error: 'account_changed' });
+    expect(w.app.db.one('SELECT 1 FROM forward_love_lanes WHERE link_id=?', linkId)).toBeNull();
+    await enqueueLove(w.app.composed.core.deps, {
+      did: ALICE,
+      input: { artist: 'New Remote Artist', track: 'New Remote Track', recordingMbid: MBID },
+      origin: 'listenbrainz',
+    });
+    expect(w.app.db.one('SELECT 1 FROM forward_love_lanes WHERE link_id=?', linkId)).not.toBeNull();
+  });
+
+  it('cascades love lane hints when a link is deleted or locally disconnected', async () => {
+    const deletedWorld = await world();
+    const deletedLink = deletedWorld.link();
+    await enqueueLove(deletedWorld.app.composed.core.deps, {
+      did: ALICE,
+      input: { artist: 'Delete Artist', track: 'Delete Track', recordingMbid: MBID },
+      origin: 'listenbrainz',
+    });
+    expect(deletedWorld.app.db.one('SELECT 1 FROM forward_love_lanes WHERE link_id=?', deletedLink)).not.toBeNull();
+    expect(
+      deleteLink(
+        { db: deletedWorld.app.db, revocations: new MemoryRevocations(deletedWorld.clock) },
+        ALICE,
+        deletedLink,
+      ),
+    ).toBe(true);
+    expect(deletedWorld.app.db.one('SELECT 1 FROM forward_love_lanes WHERE link_id=?', deletedLink)).toBeNull();
+
+    const disconnectedWorld = await world();
+    const disconnectedLink = disconnectedWorld.link();
+    await enqueueLove(disconnectedWorld.app.composed.core.deps, {
+      did: ALICE,
+      input: { artist: 'Disconnect Artist', track: 'Disconnect Track', recordingMbid: MBID },
+      origin: 'listenbrainz',
+    });
+    const { disconnectLocally } = await import('../../../src/http/auth');
+    disconnectLocally(
+      { db: disconnectedWorld.app.db, revocations: new MemoryRevocations(disconnectedWorld.clock) },
+      ALICE,
+      disconnectedWorld.clock.nowMs(),
+    );
+    expect(
+      disconnectedWorld.app.db.one('SELECT 1 FROM forward_love_lanes WHERE link_id=?', disconnectedLink),
+    ).toBeNull();
+  });
+
+  it('reframes held love toggles after a 401 relink and preserves FIFO', async () => {
+    const w = await world();
+    const linkId = w.link();
+    await enqueueLove(w.app.composed.core.deps, {
+      did: ALICE,
+      input: { artist: 'Relink Artist', track: 'Relink Track', recordingMbid: MBID },
+      origin: 'listenbrainz',
+    });
+    await enqueueUnlove(w.app.composed.core.deps, {
+      did: ALICE,
+      artist: 'Relink Artist',
+      track: 'Relink Track',
+      origin: 'listenbrainz',
+    });
+    w.intercept(() => Response.json({}, { status: 401 }));
+    await w.run();
+    expect(w.rows().map((row) => row.state)).toEqual(['held', 'held']);
+    saveLink(
+      { db: w.app.db, clock: w.clock, random: w.rt.random, box: w.rt.box },
+      { did: ALICE, service: 'listenbrainz', remoteUser: 'alice_lb', credential: TOKEN },
+    );
+    expect(w.rows().map((row) => row.love_lane)).toEqual([null, null]);
+    expect(w.app.db.one('SELECT 1 FROM forward_love_lanes WHERE link_id=?', linkId)).toBeNull();
+    w.clock.advance(SECOND);
+    await w.run();
+    w.clock.advance(SECOND);
+    await w.run();
+    expect(w.lb.feedback.map((feedback) => feedback.json)).toEqual([
+      { recording_mbid: MBID, score: 1 },
+      { recording_mbid: MBID, score: 0 },
+    ]);
   });
 
   it('retries transient delete failure with the persisted target and stops exactly at the attempt budget', async () => {
@@ -1174,6 +1520,220 @@ describe('ListenBrainz forwarding', () => {
     expect(w.rows().find((r) => r.id === never.id)).toMatchObject({ state: 'ignored', last_error: 'mbid_unresolved' });
     expect(w.seen.every(([, path]) => path === '/1/feedback/recording-feedback')).toBe(true);
     expect(w.rows().find((r) => r.id === never.id)?.link_id).toBe(link);
+  });
+
+  it('bounds love-head row work for a large unresolved backlog and still forwards an unrelated resolved track', async () => {
+    const w = await world();
+    const linkId = w.link();
+    const link = w.app.db.one<{ generation: number }>('SELECT generation FROM linked_accounts WHERE id=?', linkId)!;
+    const count = 2_000;
+    for (let i = 0; i < count; i++) {
+      const artist = i === count - 1 ? 'Ready Artist' : `Unresolved Artist ${i}`;
+      const track = i === count - 1 ? 'Ready Song' : `Unresolved Track ${i}`;
+      const [artistKey, trackKeyValue] = trackKey(artist, track);
+      const payload = JSON.stringify({
+        artist,
+        track,
+        ...(i === count - 1 ? { recordingMbid: MBID } : {}),
+      });
+      w.app.db.run(
+        `INSERT INTO forward_outbox(id,link_id,generation,did,kind,dedupe_key,payload_json,state,attempts,due_at,
+         created_at_ms,updated_at_ms,love_artist_key,love_track_key)
+         VALUES(?,?,?,?,'love',?,?, 'queued',0,0,?,?,?,?)`,
+        `love-backlog-${i}`,
+        linkId,
+        link.generation,
+        ALICE,
+        `love-backlog-${i}`,
+        payload,
+        w.clock.nowMs(),
+        w.clock.nowMs(),
+        artistKey,
+        trackKeyValue,
+      );
+    }
+    const db = w.app.db;
+    const originalAll = db.all.bind(db);
+    let laneRowsThisRun = 0;
+    let maxHeadVisitsInRun = 0;
+    let maxLaneRowsInRun = 0;
+    const visitedIds: string[] = [];
+    db.all = ((sql: string, ...params: SqlParam[]) => {
+      const rows = originalAll(sql, ...params);
+      if (sql.includes(LANE_PICK_SQL)) laneRowsThisRun += rows.length;
+      return rows;
+    }) as typeof db.all;
+    const originalOne = db.one.bind(db);
+    db.one = ((sql: string, ...params: SqlParam[]) => {
+      const row = originalOne(sql, ...params);
+      if (sql === HEAD_SQL && row !== null) visitedIds.push((row as { id: string }).id);
+      return row;
+    }) as typeof db.one;
+    let report: Awaited<ReturnType<typeof runForward>> | null = null;
+    try {
+      for (let run = 0; run < 130; run++) {
+        const visitsBefore = visitedIds.length;
+        report = await runForward({ ...w.rt, db }, w.clock.nowMs(), { maxRequests: 5 });
+        maxLaneRowsInRun = Math.max(maxLaneRowsInRun, laneRowsThisRun);
+        maxHeadVisitsInRun = Math.max(maxHeadVisitsInRun, visitedIds.length - visitsBefore);
+        laneRowsThisRun = 0;
+        w.clock.advance(SECOND);
+      }
+    } finally {
+      db.all = originalAll;
+      db.one = originalOne;
+    }
+
+    expect(w.lb.feedback.map((f) => f.json)).toEqual([{ recording_mbid: MBID, score: 1 }]);
+    expect(maxLaneRowsInRun).toBeLessThanOrEqual(MAX_LOCAL_WORK_PER_RUN);
+    expect(maxHeadVisitsInRun).toBeLessThanOrEqual(MAX_LOCAL_WORK_PER_RUN);
+    const firstRepeatAt = visitedIds.findIndex((id, index) => visitedIds.indexOf(id) !== index);
+    expect(firstRepeatAt).toBe(2_000);
+    expect(new Set(visitedIds.slice(0, firstRepeatAt)).size).toBe(2_000);
+    expect(report?.nextDueMs).not.toBeNull();
+  });
+
+  it('caps expiry transitions and blocks forwarding until a 10k mixed expired backlog drains', async () => {
+    const w = await world();
+    const linkId = w.link();
+    const { generation } = w.app.db.one<{ generation: number }>(
+      'SELECT generation FROM linked_accounts WHERE id=?',
+      linkId,
+    )!;
+    const old = w.clock.nowMs() - LISTENBRAINZ_EXPIRY_MS - 1;
+    for (let i = 0; i < 10_000; i++) {
+      const artist = `Old Artist ${i}`;
+      const track = `Old Track ${i}`;
+      const [artistKey, trackKeyValue] = trackKey(artist, track);
+      w.app.db.run(
+        `INSERT INTO forward_outbox(id,link_id,generation,did,kind,dedupe_key,payload_json,state,attempts,due_at,created_at_ms,updated_at_ms,love_artist_key,love_track_key)
+         VALUES(?,?,?,?,'love',?,?,'queued',0,0,?,?,?,?)`,
+        `expired-love-${i}`,
+        linkId,
+        generation,
+        ALICE,
+        `expired-love-${i}`,
+        JSON.stringify({ artist, track, recordingMbid: MBID }),
+        old,
+        old,
+        artistKey,
+        trackKeyValue,
+      );
+    }
+    for (let i = 0; i < 100; i++) {
+      w.app.db.run(
+        `INSERT INTO forward_outbox(id,link_id,generation,did,kind,dedupe_key,payload_json,state,attempts,due_at,created_at_ms,updated_at_ms)
+         VALUES(?,?,?,?,'love',?,?,'held',0,0,?,?)`,
+        `held-expiry-${i}`,
+        linkId,
+        generation,
+        ALICE,
+        `held-expiry-${i}`,
+        '{}',
+        old,
+        old,
+      );
+      const stale = w.clock.nowMs() - 61_000;
+      w.app.db.run(
+        `INSERT INTO forward_outbox(id,link_id,generation,did,kind,dedupe_key,payload_json,state,attempts,due_at,created_at_ms,updated_at_ms)
+         VALUES(?,?,?,?,'nowplaying',?,?,'queued',0,0,?,?)`,
+        `stale-np-${i}`,
+        linkId,
+        generation,
+        ALICE,
+        `stale-np-${i}`,
+        '{}',
+        stale,
+        stale,
+      );
+    }
+    const originalAll = w.app.db.all.bind(w.app.db);
+    let maxExpiredRows = 0;
+    w.app.db.all = ((sql: string, ...params: SqlParam[]) => {
+      const rows = originalAll(sql, ...params);
+      if (sql.includes('forward_outbox_link_expiry') || sql.includes('forward_outbox_held_expiry')) {
+        maxExpiredRows = Math.max(maxExpiredRows, rows.length);
+      }
+      return rows;
+    }) as typeof w.app.db.all;
+    try {
+      let first = await w.run();
+      expect(first.expired).toMatchObject({ pending: true });
+      expect(first.requests).toBe(0);
+      expect(w.lb.feedback).toHaveLength(0);
+      expect(first.expired!.aged + first.expired!.staleNowPlaying + first.expired!.held).toBe(
+        MAX_EXPIRY_TRANSITIONS_PER_RUN,
+      );
+      for (let run = 0; run < 100; run++) {
+        if (!first.expired?.pending) break;
+        w.clock.advance(SECOND);
+        first = await w.run();
+        expect(first.requests).toBe(0);
+        expect(w.lb.feedback).toHaveLength(0);
+        expect(first.expired!.aged + first.expired!.staleNowPlaying + first.expired!.held).toBeLessThanOrEqual(
+          MAX_EXPIRY_TRANSITIONS_PER_RUN,
+        );
+      }
+      expect(first.expired?.pending).toBe(false);
+      expect(
+        w.app.db.one<{ n: number }>(
+          "SELECT count(*) AS n FROM forward_outbox WHERE state='queued' AND (kind='love' OR kind='unlove')",
+        )?.n,
+      ).toBe(0);
+      expect(w.app.db.one<{ n: number }>("SELECT count(*) AS n FROM forward_outbox WHERE state='held'")?.n).toBe(0);
+      expect(maxExpiredRows).toBeLessThanOrEqual(MAX_EXPIRY_TRANSITIONS_PER_RUN);
+    } finally {
+      w.app.db.all = originalAll;
+    }
+  });
+
+  it('gives independent links separate love lane budgets', async () => {
+    const w = await world();
+    const firstLink = w.link();
+    const bobToken = '6d8e4f2b-1a9c-4f2d-8b7e-3c5d1f9a2b6c';
+    w.lb.addToken('bob_lb', bobToken);
+    ensureAccount({ db: w.app.db, clock: w.clock }, { did: BOB, verifiedHandle: null });
+    const secondLink = saveLink(
+      { db: w.app.db, clock: w.clock, random: w.rt.random, box: w.rt.box },
+      { did: BOB, service: 'listenbrainz', remoteUser: 'bob_lb', credential: bobToken },
+    ).link.id;
+    const linkIds = [firstLink, secondLink];
+    for (const [linkIndex, linkId] of linkIds.entries()) {
+      const generation = w.app.db.one<{ generation: number }>(
+        'SELECT generation FROM linked_accounts WHERE id=?',
+        linkId,
+      )!.generation;
+      for (let i = 0; i < 2_000; i++) {
+        const ready = i === 1_999;
+        const artist = ready ? `Ready Artist ${linkIndex}` : `Busy Artist ${linkIndex}-${i}`;
+        const track = ready ? `Ready Song ${linkIndex}` : `Busy Track ${linkIndex}-${i}`;
+        const [artistKey, trackKeyValue] = trackKey(artist, track);
+        w.app.db.run(
+          `INSERT INTO forward_outbox(id,link_id,generation,did,kind,dedupe_key,payload_json,state,attempts,due_at,created_at_ms,updated_at_ms,love_artist_key,love_track_key)
+           VALUES(?,?,?,?,'love',?,?,'queued',0,?,?,?, ?,?)`,
+          `link-${linkIndex}-love-${i}`,
+          linkId,
+          generation,
+          linkIndex === 0 ? ALICE : BOB,
+          `link-${linkIndex}-love-${i}`,
+          JSON.stringify({ artist, track, ...(ready ? { recordingMbid: MBID } : {}) }),
+          w.clock.nowMs(),
+          w.clock.nowMs(),
+          w.clock.nowMs(),
+          artistKey,
+          trackKeyValue,
+        );
+      }
+    }
+    for (let run = 0; run < 70 && w.lb.feedback.length < 2; run++) {
+      await w.run();
+      w.clock.advance(SECOND);
+    }
+    expect(w.lb.feedback).toHaveLength(2);
+    expect(w.lb.feedback.map((feedback) => feedback.json)).toEqual([
+      { recording_mbid: MBID, score: 1 },
+      { recording_mbid: MBID, score: 1 },
+    ]);
   });
 
   it('401 revokes the link; an attempted 429 counts and waits X-RateLimit-Reset-In; 400 is terminal', async () => {

@@ -1266,6 +1266,47 @@ describe('Last.fm forwarding', () => {
     ).toEqual(['sent', 'sent']);
   });
 
+  it('removes a backed-off love head and immediately exposes the queued unlove behind it', async () => {
+    const w = await world();
+    w.linkLastfm(ALICE, 'alice_fm');
+    const m = w.app.composed.core.deps;
+    await enqueueLove(m, { did: ALICE, input: { artist: 'Cancel Artist', track: 'Cancel Track' }, origin: 'lastfm' });
+    await enqueueUnlove(m, { did: ALICE, artist: 'Cancel Artist', track: 'Cancel Track', origin: 'lastfm' });
+    const head = w.rows(ALICE)[0]!;
+    w.lastfm.fail({ httpStatus: 503, method: 'track.love' });
+    await w.run();
+    expect(w.rows(ALICE)[0]).toMatchObject({ state: 'queued', due_at: expect.any(Number) });
+    deleteQueuedForwardIdentity(
+      w.app.db,
+      ALICE,
+      ['love'],
+      canonicalForwardDedupeKey(head.generation, head.dedupe_key)!,
+    );
+    w.clock.advance(SECOND);
+    await w.run();
+    expect(w.lastfm.loveCalls.map((call) => call.method)).toEqual(['track.unlove']);
+    expect(w.rows(ALICE).find((row) => row.kind === 'unlove')?.state).toBe('sent');
+  });
+
+  it('expires an aged backoff love head and sends the fresh unlove behind it', async () => {
+    const w = await world();
+    w.linkLastfm(ALICE, 'alice_fm');
+    const m = w.app.composed.core.deps;
+    await enqueueLove(m, { did: ALICE, input: { artist: 'Expiry Artist', track: 'Expiry Track' }, origin: 'lastfm' });
+    await enqueueUnlove(m, { did: ALICE, artist: 'Expiry Artist', track: 'Expiry Track', origin: 'lastfm' });
+    const head = w.rows(ALICE)[0]!;
+    w.app.db.run(
+      'UPDATE forward_outbox SET created_at_ms=? WHERE id=?',
+      w.clock.nowMs() - LASTFM_EXPIRY_MS - 1,
+      head.id,
+    );
+    const report = await w.run();
+    expect(report.expired?.aged).toBe(1);
+    expect(w.rows(ALICE).find((row) => row.id === head.id)?.state).toBe('expired');
+    expect(w.lastfm.loveCalls.map((call) => call.method)).toEqual(['track.unlove']);
+    expect(w.rows(ALICE).find((row) => row.kind === 'unlove')?.state).toBe('sent');
+  });
+
   it('forwarded track.scrobble POSTs pass through policyFetch: a fake Last.fm 302 is a retryable redirect error, not followed, and an upstream root on a non-default port is refused before sending', async () => {
     let redirectOnce = true;
     const w = await world({

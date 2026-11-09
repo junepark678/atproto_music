@@ -319,6 +319,8 @@ export function saveLink(deps: LinkDeps, input: SaveLinkInput): SaveLinkResult {
         now,
         now,
       );
+      if (changedRemote)
+        db.run('DELETE FROM forward_love_lanes WHERE link_id=? AND generation=?', existing.id, existing.generation);
       db.run(
         `UPDATE linked_pull_state SET hold_reason=NULL,retry_at_ms=NULL,failures=0,listen_round_saturated=0,
           listen_round_upper_ms=NULL,listen_round_floor_ms=NULL,listen_round_page=NULL,page_cursor=NULL,
@@ -462,6 +464,13 @@ export function deleteLink(deps: { db: Db; revocations: Revocations }, did: stri
     if (row === null) return false;
     // A journal failure throws here and rolls the transaction back: nothing is deleted.
     deps.revocations.record({ kind: 'linked_account', id: row.id, did: row.did });
+    db.run('DELETE FROM forward_love_recording_targets WHERE link_id=?', row.id);
+    db.run(
+      `DELETE FROM forward_unlove_lookup_progress WHERE unlove_rowid IN (
+        SELECT rowid FROM forward_outbox WHERE link_id=? AND kind='unlove'
+      )`,
+      row.id,
+    );
     db.run('DELETE FROM forward_outbox WHERE link_id = ?', row.id);
     db.run('DELETE FROM linked_accounts WHERE id = ?', row.id);
     return true;
