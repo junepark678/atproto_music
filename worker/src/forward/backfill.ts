@@ -222,11 +222,12 @@ function payloadForHistoryRow(
   const mbid =
     row.kind === 'love'
       ? (row.recording_mbid ?? (loveResolution && 'mbid' in loveResolution ? loveResolution.mbid : null))
-      : matchedRecordingMbid(db, {
+      : (row.recording_mbid ??
+        matchedRecordingMbid(db, {
           artistKey: row.artist_key,
           trackKey: row.track_key,
           albumKey: row.album_key ?? (row.album ? albumKey(row.artist, row.album)?.[1] : undefined),
-        });
+        }));
   if (row.kind === 'love' && link.service === 'listenbrainz' && loveResolution && 'terminal' in loveResolution)
     return null;
   if (row.kind === 'scrobble') {

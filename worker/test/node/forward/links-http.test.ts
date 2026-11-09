@@ -180,6 +180,25 @@ async function startLastfm(w: World, token: string): Promise<{ state: string; au
 }
 
 describe('link routes', () => {
+  it('preserves a submitted scrobble recording MBID during history backfill without an enrichment match', async () => {
+    const w = await world();
+    seedBackfillScrobble(w, 1);
+    w.app.db.run("UPDATE users SET indexing_state='current' WHERE did=?", ALICE);
+    const recordingMbid = '123e4567-e89b-42d3-a456-426614174000';
+    w.app.db.run('UPDATE scrobbles SET recording_mbid=? WHERE did=?', recordingMbid, ALICE);
+    const linked = saveLink(
+      { db: w.app.db, clock: w.clock, random: seededRandom(216), box: w.box },
+      { did: ALICE, service: 'listenbrainz', remoteUser: 'alice_lb', credential: 'lb-token' },
+    );
+    for (let turn = 0; turn < 3; turn++) await runLinkBackfill(w.app.db, seededRandom(217 + turn), w.clock.nowMs());
+    const row = w.app.db.one<{ payload_json: string }>(
+      "SELECT payload_json FROM forward_outbox WHERE link_id=? AND kind='scrobble'",
+      linked.link.id,
+    );
+    expect(row).not.toBeNull();
+    expect(JSON.parse(row!.payload_json)).toMatchObject({ listen: { recordingMbid } });
+  });
+
   it('uses two indexed bounded keyset scans and merges them without a global sort', async () => {
     const w = await world();
     const linked = saveLink(
