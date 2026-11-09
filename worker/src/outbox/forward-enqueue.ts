@@ -40,6 +40,7 @@ import { MusicKeyError, trackKey } from '@atmusic/core/music-key';
 import type { ForwardKind } from '../app/rows';
 import type { Db } from '../do/db';
 import { storedForwardDedupeKey } from './forward-key';
+import { noteForwardLoveCurrent, touchLoveLane } from '../forward/love-lanes';
 import { newOperationId } from './operations';
 
 export const NOW_PLAYING_KEY_DOMAIN = 'atmusic:nowplaying-key:v1';
@@ -157,12 +158,12 @@ export function enqueueForwards(db: Db, args: EnqueueForwardsArgs): number {
         const insertSql =
           args.priority === undefined
             ? `INSERT INTO forward_outbox(id,link_id,generation,did,kind,dedupe_key,payload_json,state,attempts,due_at,
-               created_at_ms, updated_at_ms, love_artist_key, love_track_key)
-             VALUES (?,?,?,?,?,?,?,'queued',0,?,?,?,?,?)
+               created_at_ms, updated_at_ms, love_artist_key, love_track_key, love_lane)
+             VALUES (?,?,?,?,?,?,?,'queued',0,?,?,?,?,?,?)
              ON CONFLICT(link_id,kind,dedupe_key) DO NOTHING`
             : `INSERT INTO forward_outbox(id,link_id,generation,did,kind,dedupe_key,payload_json,state,attempts,due_at,
-               created_at_ms, updated_at_ms, love_artist_key, love_track_key,priority)
-             VALUES (?,?,?,?,?,?,?,'queued',0,?,?,?,?,?,?)
+               created_at_ms, updated_at_ms, love_artist_key, love_track_key,priority,love_lane)
+             VALUES (?,?,?,?,?,?,?,'queued',0,?,?,?,?,?,?,?)
              ON CONFLICT(link_id,kind,dedupe_key) DO NOTHING`;
         const params = [
           id,
@@ -178,21 +179,18 @@ export function enqueueForwards(db: Db, args: EnqueueForwardsArgs): number {
           loveArtistKey,
           loveTrackKey,
           ...(args.priority === undefined ? [] : [args.priority]),
+          loveArtistKey === null || item.kind === 'scrobble' || item.kind === 'nowplaying' ? null : 1,
         ];
         const inserted = db.run(insertSql, ...params).rowsWritten;
         created += inserted;
         if (inserted === 1 && loveArtistKey !== null && loveTrackKey !== null) {
           const row = db.one<{ rowid: number }>('SELECT rowid FROM forward_outbox WHERE id=?', id);
-          if (row) {
-            db.run(
-              `INSERT INTO mb_forward_love_current(link_id,love_artist_key,love_track_key,forward_rowid) VALUES(?,?,?,?)
-               ON CONFLICT(link_id,love_artist_key,love_track_key) DO UPDATE SET forward_rowid=excluded.forward_rowid
-               WHERE excluded.forward_rowid>mb_forward_love_current.forward_rowid`,
-              link.id,
-              loveArtistKey,
-              loveTrackKey,
-              row.rowid,
-            );
+          if (row && (item.kind === 'love' || item.kind === 'unlove')) {
+            noteForwardLoveCurrent(db, link.id, loveArtistKey, loveTrackKey, row.rowid);
+            touchLoveLane(db, {
+              linkId: link.id, generation: link.generation, artistKey: loveArtistKey, trackKey: loveTrackKey,
+              priority: args.priority ?? 0, dueAt, createdAtMs: args.now,
+            });
           }
         }
       }
