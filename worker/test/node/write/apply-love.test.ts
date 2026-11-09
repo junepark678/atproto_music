@@ -112,6 +112,7 @@ describe('love projection', () => {
           artist_key: 'björk',
           track_key: 'jóga',
           recording_mbid: MBID,
+          revision: put.rev,
           created_at: '2026-01-15T11:00:00.000000000Z',
           indexed_at: NOW,
         },
