@@ -264,6 +264,7 @@ it.each([false, true])('snapshot accepted recreation archives live deletion: bat
   const a = await putProof(repo, collection, 'snapshot-cycle', value);
   const gone = await deleteProof(repo, collection, 'snapshot-cycle');
   const again = await putProof(repo, collection, 'snapshot-cycle', value);
+  if (again.state !== 'present') throw new Error('expected present snapshot proof');
   await withMigratedDb((db) => {
     seedLink(db);
     expect(db.tx(() => applyRecordProof(db, a, OPTS)).outcome).toBe('applied');
@@ -292,6 +293,7 @@ it('snapshot reaffirm archives an exact live tombstone through the accepted proj
   const repo = await repoFor('alice');
   const a = await putProof(repo, SCROBBLE, 'snapshot-reaffirm', record);
   const again = await putProof(repo, SCROBBLE, 'snapshot-reaffirm', record);
+  if (a.state !== 'present' || again.state !== 'present') throw new Error('expected present snapshot proofs');
   await withMigratedDb((db) => {
     seedLink(db);
     expect(db.tx(() => applyRecordProof(db, a, OPTS)).outcome).toBe('applied');
