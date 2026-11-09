@@ -59,6 +59,12 @@ Owner request:
   - Append-only. Never edit an applied migration.
   - Add every new table to `TABLES` and `TABLE_CLASS`.
   - The tracks run in parallel, so the slice that lands second renumbers its migration when it rebases.
+  - **No table rebuilds, and no relaxing of the additive guard** (planner ruling, 2026-11-08). The rule in `worker/test/storage/schema-v2.test.ts` stays as it is: every migration after 2 may only `CREATE TABLE`, `CREATE INDEX` or `ADD COLUMN`. A changed uniqueness rule must be expressed additively. For example, keep `forward_outbox` UNIQUE(`link_id`, `kind`, `dedupe_key`), add `generation INTEGER NOT NULL DEFAULT 1`, and prefix the dedupe key with the generation (`g<n>:`) for generations above 1.
+  - **Squash unmerged migrations** before readiness, down to the fewest that the logical changes need.
+  - **Assigned numbers:**
+    - Tracks N and M hold 15–21: N1 15, M1 16–18, M2 19–20, and M4 21 if it lands.
+    - Track S takes the next free number after the last N/M migration (22 if M4 lands) when it rebases onto them.
+    - The stack merges linearly: #173, #175, #176, #177, #178, #179, M4, then the S slices.
 - **Tests.**
   - Use `fixedClock` and `seededRandom`. Fake upstreams sit on reserved `.test` hosts, wired through `routerTransport` and fakes beside `worker/test/node/support/fake-{lastfm,listenbrainz}.ts`.
   - Extend the features test so each new client provably gets the pinned transport.
@@ -203,7 +209,15 @@ The owner's word is "synced". Our definition: canonical MusicBrainz data is reso
 - **Forwarding.**
   - A ListenBrainz love or unlove with no submitted MBID falls back to the matched recording MBID.
   - If the lookup is still pending, defer the row for up to 24 h. Do not ignore it.
+  - A deferred row must not block loves or unloves for other tracks. Strict ordering only has to hold per link and per love key.
   - Rows are marked `ignored` with `no_recording_mbid` only after the track resolves as unmatched.
+  - **The 24 h deadline** (planner ruling, 2026-11-08): if the track is still `pending` or `failed` after 24 h, the row becomes terminal `ignored` with the distinct reason `mbid_unresolved`.
+    - It is not marked `failed`: the user can do nothing about it, so it must not count as a sync failure.
+    - It does not stay retryable forever, because it would occupy the queue indefinitely.
+  - **A later match retries automatically.** When a track key later becomes `matched` (a 30-day re-lookup or a refresh), enqueue one fresh row per affected link generation. Affected links are those whose latest row for that love key was ignored as `mbid_unresolved` or `no_recording_mbid`.
+    - The fresh row carries the *current* love state, love or unlove. The latest state wins and history is not replayed.
+    - It has its own dedupe key.
+    - The work is bounded per resolver run.
 - **Now playing.** Add `NowPlaying.musicbrainz` from the exact local matched tuple on profile and followed-feed reads after visibility filtering. Batch the feed lookup, make no upstream request on reads, and preserve submitted values and existing sharing behavior.
 
 ### M3 Web display (base: M2)
@@ -253,9 +267,17 @@ The owner's word is "synced". Our definition: canonical MusicBrainz data is reso
   - love creates and deletes;
 
   that arrive from other clients through **live** Jetstream commits. Exclude snapshot, repair and discovery backfill, which belong to S2.
-- **Exactly once.** A record we accepted through our API that echoes back through Jetstream must be forwarded exactly once.
-  - Verify how long `forward_outbox` rows and `listen_keys` persist.
-  - If sent rows are pruned, add a compact `forward_sent(link_id, dedupe_key)` ledger with an age bound.
+- **Exactly once: the replay contract** (planner ruling, 2026-11-08, replacing the earlier "ledger with an age bound" idea).
+  - **Admission marker.** Every listen and love identity gets one durable, compact *admission marker*, attached to its existing durable identity (`listen_keys` / `record_state`). It is written in the same transaction as the first API or compat acceptance, import, or projection. It records:
+    - the acceptance sequence or time;
+    - the path: `api`, `import`, `live` or `snapshot`;
+    - the import source service, if any.
+  - **Admission happens at most once per identity lifetime.** Live forwarding enqueues only on the first admission through the `api` or `live` path, for the links active at that moment. A replay of a known identity, at any lateness, enqueues nothing.
+  - **The marker lives as long as the identity.** It lasts exactly as long as the indexer keeps that record identity or its tombstone. Forwarding suppression therefore matches the indexer's own resurrection suppression. If the indexer would re-project an identity as new, forwarding treats it as new too.
+  - **No cutoff by age.** There is no TTL, no "echo horizon" and no listen-age exclusion used for dedupe. A replay suppressed beyond the identity's lifetime is out of contract and must not be promised. No new ListenBrainz age limit; Last.fm keeps its 13-day limit when sending.
+  - **Link generations.** Each link has a generation that changes when the remote account changes, and forward rows carry it. For each link generation, every indexed identity is forwarded at most once, either by live admission or by S2 backfill, and the admission marker decides which. Backfill covers what live admission did not enqueue for that generation: identities admitted before the generation started, and `snapshot`-path identities admitted after it.
+  - **Outbox cleanup.** Per-link send state stays in `forward_outbox`. Because re-admission is blocked by the marker, not by outbox rows, terminal outbox rows may be removed by a periodic, bounded, indexed sweep after their terminal age. There is never a global scan on each success. This sweep is optional for S1.
+  - **Storage reporting.** Report marker and outbox row counts and bytes in the operator metrics and admin socket. There is no hard quota beyond existing disk checks.
 - **Imported listens.** Still never forwarded to the service they came from.
   - Forward them to other services only where the per-listen import source is known. Otherwise keep today's exclusion.
 - **Love deletes.** Deleting a love from another client forwards an unlove, keeping the love-head ordering.
