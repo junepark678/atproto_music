@@ -142,6 +142,38 @@ export function matchedEntityMbid(
   return values.length === 1 ? values[0]! : null;
 }
 
+/** Distinct matched recording tuples that may forward-emit this MBID. */
+export function matchedRecordingKeys(db: Db, mbid: string): { artistKey: string; trackKey: string }[] {
+  if (!isUUID(mbid)) return [];
+  return db.all(
+    `SELECT DISTINCT artist_key AS artistKey, track_key AS trackKey FROM mb_tracks
+     WHERE status='matched' AND recording_mbid=?`,
+    mbid,
+  );
+}
+
+/** Distinct matched artist keys crediting this MBID. */
+export function matchedArtistKeys(db: Db, mbid: string): string[] {
+  if (!isUUID(mbid)) return [];
+  return db
+    .all<{ k: string }>(
+      `SELECT DISTINCT m.artist_key AS k FROM mb_tracks m, json_each(m.artist_mbids) j
+     WHERE m.status='matched' AND m.artist_mbids IS NOT NULL AND j.value=?`,
+      mbid,
+    )
+    .map(({ k }) => k);
+}
+
+/** Distinct matched album tuples crediting this release MBID. */
+export function matchedReleaseKeys(db: Db, mbid: string): { artistKey: string; albumKey: string }[] {
+  if (!isUUID(mbid)) return [];
+  return db.all(
+    `SELECT DISTINCT artist_key AS artistKey, album_key AS albumKey FROM mb_tracks
+     WHERE status='matched' AND release_mbid=? AND album_key<>''`,
+    mbid,
+  );
+}
+
 export interface LoveReviveJob extends TrackKey {
   artistKey: string;
   trackKey: string;

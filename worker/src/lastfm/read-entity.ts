@@ -31,7 +31,13 @@ import type { SqlParam } from '../do/db';
 import { isLovedKey } from '../do/read/loves';
 import { globalArtistCounts, globalTrackCounts } from '../do/read/range-stats';
 import { visibleScrobblesFrom } from '../do/read/visibility';
-import { matchedEntityMbid, matchedRecordingMbid } from '../musicbrainz/store';
+import {
+  matchedArtistKeys,
+  matchedEntityMbid,
+  matchedRecordingKeys,
+  matchedRecordingMbid,
+  matchedReleaseKeys,
+} from '../musicbrainz/store';
 import { images, type LfmDocument, type LfmElement, type LfmValue, leaf, lfmOk, list, node } from './encode';
 import { LastfmError } from './errors';
 import {
@@ -78,6 +84,96 @@ function newest(deps: ModuleDeps, where: Where, extra = ''): ScrobbleRowV2 | nul
   );
 }
 
+function newestOf(rows: (ScrobbleRowV2 | null)[]): ScrobbleRowV2 | null {
+  return (
+    rows
+      .filter((row): row is ScrobbleRowV2 => row !== null)
+      .sort((a, b) =>
+        a.listened_at === b.listened_at
+          ? a.uri === b.uri
+            ? 0
+            : a.uri < b.uri
+              ? 1
+              : -1
+          : a.listened_at < b.listened_at
+            ? 1
+            : -1,
+      )[0] ?? null
+  );
+}
+
+function forwardTrackMbid(deps: ModuleDeps, display: ScrobbleRowV2): string {
+  return (
+    display.recording_mbid ||
+    matchedRecordingMbid(deps.db, {
+      artistKey: display.artist_key,
+      trackKey: display.track_key,
+      albumKey: display.album_key,
+    }) ||
+    ''
+  );
+}
+
+function forwardArtistMbid(deps: ModuleDeps, display: ScrobbleRowV2): string {
+  const db = deps.db;
+  return firstArtistMbid(display.artist_mbids) || matchedEntityMbid(db, 'artist', display.artist_key) || '';
+}
+
+function forwardAlbumMbid(db: ModuleDeps['db'], display: ScrobbleRowV2): string {
+  return (
+    display.release_mbid ||
+    matchedEntityMbid(db, 'release', {
+      artistKey: display.artist_key,
+      albumKey: display.album_key ?? '',
+    }) ||
+    ''
+  );
+}
+
+function enrichedTrackWhere(call: LastfmCall, mbid: string): Where | null {
+  const rows = matchedRecordingKeys(call.deps.db, mbid).map(({ artistKey, trackKey }) => {
+    const display = newest(call.deps, { sql: 's.artist_key=? AND s.track_key=?', params: [artistKey, trackKey] });
+    return display && !display.recording_mbid && forwardTrackMbid(call.deps, display) === mbid ? display : null;
+  });
+  const display = newestOf(rows);
+  return display ? { sql: 's.artist_key=? AND s.track_key=?', params: [display.artist_key, display.track_key] } : null;
+}
+
+function enrichedArtistKey(call: LastfmCall, mbid: string): string | null {
+  const rows = matchedArtistKeys(call.deps.db, mbid).map((artistKey) => {
+    const display = newest(call.deps, { sql: 's.artist_key=?', params: [artistKey] });
+    return display && !firstArtistMbid(display.artist_mbids) && forwardArtistMbid(call.deps, display) === mbid
+      ? display
+      : null;
+  });
+  return newestOf(rows)?.artist_key ?? null;
+}
+
+function enrichedAlbumWhere(call: LastfmCall, mbid: string): Where | null {
+  const keys = matchedReleaseKeys(call.deps.db, mbid);
+  if (keys.length === 0) return null;
+  const displays = call.deps.db.all<ScrobbleRowV2>(
+    `WITH mk AS (SELECT json_extract(value,'$.artistKey') AS ak,json_extract(value,'$.albumKey') AS xk FROM json_each(?)),
+       ranked AS (
+         SELECT s.*, row_number() OVER (
+           PARTITION BY coalesce(s.album_artist_key,s.artist_key),s.album_key
+           ORDER BY s.listened_at DESC,s.uri DESC
+         ) AS rn
+         FROM ${visibleScrobblesFrom('s', 'u')} JOIN mk ON mk.ak=s.artist_key AND mk.xk=s.album_key
+         WHERE s.album_key IS NOT NULL AND s.album IS NOT NULL
+       ) SELECT * FROM ranked WHERE rn=1`,
+    JSON.stringify(keys),
+  );
+  const display = newestOf(
+    displays.map((row) =>
+      row.album !== null && !row.release_mbid && forwardAlbumMbid(call.deps.db, row) === mbid ? row : null,
+    ),
+  );
+  return display?.album_key
+    ? { sql: ALBUM_GROUP, params: [display.album_artist_key ?? display.artist_key, display.album_key] }
+    : null;
+}
+
 function countFor(deps: ModuleDeps, where: Where, did: string): number {
   return (
     deps.db.one<{ n: number }>(
@@ -111,8 +207,10 @@ function trackWhere(call: LastfmCall): Where {
   const track = present(call, 'track');
   if (artist === null && track === null && mbid !== null) {
     const row = newest(call.deps, { sql: 's.recording_mbid = ?', params: [mbid] });
-    if (row === null) throw new LastfmError(6, TRACK_NOT_FOUND);
-    return { sql: 's.artist_key = ? AND s.track_key = ?', params: [row.artist_key, row.track_key] };
+    if (row !== null) return { sql: 's.artist_key = ? AND s.track_key = ?', params: [row.artist_key, row.track_key] };
+    const enriched = enrichedTrackWhere(call, mbid);
+    if (enriched) return enriched;
+    throw new LastfmError(6, TRACK_NOT_FOUND);
   }
   const key = keyOr(
     () => trackKey(requiredParam(call.params, 'artist'), requiredParam(call.params, 'track')),
@@ -133,12 +231,7 @@ function trackInfo(call: LastfmCall): LfmDocument {
 
   const children: LfmElement[] = [
     leaf('name', display.track),
-    leaf(
-      'mbid',
-      display.recording_mbid ||
-        matchedRecordingMbid(call.deps.db, { artistKey: ak, trackKey: tk, albumKey: display.album_key }) ||
-        '',
-    ),
+    leaf('mbid', forwardTrackMbid(call.deps, display)),
     leaf('url', trackUrl(display.artist, display.track)),
     leaf(
       'duration',
@@ -194,8 +287,12 @@ function artistInfo(call: LastfmCall): LfmDocument {
       sql: 's.artist_mbids IS NOT NULL AND EXISTS (SELECT 1 FROM json_each(s.artist_mbids) j WHERE j.value = ?)',
       params: [mbid],
     });
-    if (row === null) throw new LastfmError(6, ARTIST_NOT_FOUND);
-    ak = row.artist_key;
+    if (row !== null) ak = row.artist_key;
+    else {
+      const enriched = enrichedArtistKey(call, mbid);
+      if (enriched === null) throw new LastfmError(6, ARTIST_NOT_FOUND);
+      ak = enriched;
+    }
   } else {
     ak = keyOr(() => artistKey(requiredParam(call.params, 'artist')), ARTIST_NOT_FOUND);
   }
@@ -208,7 +305,7 @@ function artistInfo(call: LastfmCall): LfmDocument {
   return lfmOk(
     node('artist', [
       leaf('name', display.artist),
-      leaf('mbid', firstArtistMbid(display.artist_mbids) || matchedEntityMbid(call.deps.db, 'artist', ak) || ''),
+      leaf('mbid', forwardArtistMbid(call.deps, display)),
       leaf('url', artistUrl(display.artist)),
       images(),
       leaf('streamable', '0'),
@@ -230,8 +327,11 @@ function albumWhere(call: LastfmCall): Where {
   const mbid = present(call, 'mbid');
   if (present(call, 'artist') === null && present(call, 'album') === null && mbid !== null) {
     const row = newest(call.deps, { sql: 's.release_mbid = ? AND s.album_key IS NOT NULL', params: [mbid] });
-    if (row === null || row.album_key === null) throw new LastfmError(6, ALBUM_NOT_FOUND);
-    return { sql: ALBUM_GROUP, params: [row.album_artist_key ?? row.artist_key, row.album_key] };
+    if (row !== null && row.album_key !== null)
+      return { sql: ALBUM_GROUP, params: [row.album_artist_key ?? row.artist_key, row.album_key] };
+    const enriched = enrichedAlbumWhere(call, mbid);
+    if (enriched) return enriched;
+    throw new LastfmError(6, ALBUM_NOT_FOUND);
   }
   const key = keyOr(
     () => albumKey(requiredParam(call.params, 'artist'), requiredParam(call.params, 'album')),
@@ -294,12 +394,7 @@ function albumInfo(call: LastfmCall): LfmDocument {
   const children: LfmElement[] = [
     leaf('name', display.album),
     leaf('artist', albumArtist),
-    leaf(
-      'mbid',
-      display.release_mbid ||
-        matchedEntityMbid(db, 'release', { artistKey: display.artist_key, albumKey: display.album_key ?? '' }) ||
-        '',
-    ),
+    leaf('mbid', forwardAlbumMbid(db, display)),
     leaf('url', albumUrl(albumArtist, display.album)),
     images(),
     leaf('listeners', counts.listeners),
