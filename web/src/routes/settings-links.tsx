@@ -8,7 +8,8 @@ const serviceName = (service: Link['service']) => (service === 'lastfm' ? 'Last.
 
 function syncStatus(link: Link) {
   if (link.status === 'revoked' || link.sync?.needsReauth) return { label: 'Needs reconnect', value: 'reconnect' };
-  if (link.status === 'error' || terminalSyncError(link)) return { label: 'Error', value: 'error' };
+  if (link.status === 'error' || terminalSyncError(link) || terminalForwardError(link))
+    return { label: 'Error', value: 'error' };
   return { label: 'Active', value: 'active' };
 }
 
@@ -20,6 +21,7 @@ const terminalPullHolds = new Set([
   'lastfm_error',
   'listenbrainz_page_saturated',
 ]);
+const retryableLastfmForwardCodes = new Set(['8', '11', '16', '29']);
 
 function terminalSyncError(link: Link): boolean {
   return (
@@ -28,19 +30,28 @@ function terminalSyncError(link: Link): boolean {
   );
 }
 
+function terminalForwardError(link: Link): boolean {
+  if (!link.lastError) return false;
+  if (link.lastError === 'lastfm_key_rejected') return true;
+  const lastfmCode = /^lastfm_error_(\d+)$/.exec(link.lastError);
+  if (lastfmCode) return !retryableLastfmForwardCodes.has(lastfmCode[1]!);
+  const httpStatus = /^http_(\d{3})$/.exec(link.lastError);
+  return Boolean(httpStatus && Number(httpStatus[1]) >= 400 && Number(httpStatus[1]) < 500 && httpStatus[1] !== '429');
+}
+
 function holdWords(reason: string, service: string): string | undefined {
   const copy: Record<string, string> = {
     upstream_unauthorized: `${service} rejected the saved connection. Reconnect your account to resume importing.`,
-    retry_exhausted: `Repeated attempts to import from ${service} failed. Check the connection and try reconnecting.`,
+    retry_exhausted: `Repeated attempts to import from ${service} failed. Reconnect the account, or turn importing off and on to restart sync.`,
     remote_user_not_found: `${service} could not find the connected account. Check the account details and reconnect it.`,
     lastfm_key_rejected: `Last.fm is rejecting this server's API key. Syncing is paused.`,
-    lastfm_error: `Last.fm stopped responding successfully. Check its service status and try syncing again later.`,
+    lastfm_error: `Last.fm stopped accepting sync requests. Reconnect the account, or turn importing off and on to restart sync.`,
     listenbrainz_page_saturated: `ListenBrainz returned more history than can be safely imported in one pass. Importing is paused.`,
-    session_missing: `The server session needed to import from ${service} is unavailable. Try again after signing in.`,
-    reauth_required: `Reconnect your ${service} account to resume importing.`,
-    publication_disabled: `Importing from ${service} is disabled in this app's settings.`,
-    scope_insufficient: `The saved ${service} connection lacks permission to import. Reconnect and grant the requested access.`,
-    session_restore_transient: `The server is restoring its session with ${service}. Importing will resume when that finishes.`,
+    session_missing: `Your app sign-in is unavailable. Sign in again and grant the requested access to resume importing.`,
+    reauth_required: `Sign in to this app again and grant the requested access to resume importing.`,
+    publication_disabled: `Importing is disabled by this app's server settings.`,
+    scope_insufficient: `This app needs permission to write to your account. Sign in again and grant the requested access.`,
+    session_restore_transient: `This app is temporarily restoring your sign-in. Importing will resume when that finishes.`,
     legacy_dedupe_coverage: `Importing from ${service} is waiting for older history to be checked for duplicates.`,
     staging_capacity: `Importing from ${service} is temporarily waiting for queue capacity.`,
     credential_unavailable: `The saved ${service} connection is temporarily unavailable. Try again later.`,
@@ -58,7 +69,7 @@ function lastSynced(link: Link): string | undefined {
   return candidates.sort((a, b) => Date.parse(b) - Date.parse(a))[0];
 }
 
-function errorWords(error: string, service: string): string {
+function errorWords(error: string, service: string, history = false): string {
   const advice =
     error === 'session_revoked' || error === 'token_revoked'
       ? `${service} disconnected this app. Reconnect to resume syncing.`
@@ -67,23 +78,20 @@ function errorWords(error: string, service: string): string {
         : error === 'lastfm_key_rejected'
           ? "Last.fm is rejecting this server's API key. Syncing is paused."
           : error === 'retry_exhausted'
-            ? `Repeated attempts to sync with ${service} failed. Check the connection and try again.`
+            ? history
+              ? 'Sending listening history was skipped after repeated failures. Turn sending scrobbles off and on to restart the history run.'
+              : `Repeated attempts to sync with ${service} failed. Check the connection and try again.`
             : /^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$/.test(error)
               ? `Syncing with ${service} stopped after an error. Check the connection and try again.`
-              : error;
-  const words = scrubDids(advice)
-    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, 'an account')
-    .replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi, 'saved credentials')
-    .replace(/\b(?:access[_-]?token|refresh[_-]?token|token)\s*[:=]\s*[^\s,;]+/gi, 'saved credentials')
-    .replace(/\b(?:gh[pousr]_|sk-)[A-Za-z0-9_-]{12,}\b/g, 'saved credentials')
-    .replace(/[_-]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-  return words ? words[0]!.toLocaleUpperCase() + words.slice(1) : '';
+              : `Syncing with ${service} stopped after an error. Check the connection or server settings.`;
+  return advice;
 }
 
 export default function SettingsLinks() {
   const session = useAppState().session.value;
+  const activeSession = useRef(session);
+  activeSession.current = session;
+  const lifecycleSession = useRef(session);
   const ownerDid = useRef(session?.did ?? null);
   if (ownerDid.current === null && session !== null) ownerDid.current = session.did;
   const [links, setLinks] = useState<Link[] | null>(null);
@@ -91,39 +99,84 @@ export default function SettingsLinks() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [message, setMessage] = useState('');
+  const [dataSession, setDataSession] = useState(session);
   const requestGeneration = useRef(0);
+  const actionGeneration = useRef(0);
   const mounted = useRef(true);
   const mutationInFlight = useRef(0);
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (preserveError = false) => {
+    const requestSession = activeSession.current;
     const generation = ++requestGeneration.current;
     try {
       const result = await listLinks();
-      if (mounted.current && mutationInFlight.current === 0 && generation === requestGeneration.current) {
+      if (
+        mounted.current &&
+        activeSession.current === requestSession &&
+        mutationInFlight.current === 0 &&
+        generation === requestGeneration.current
+      ) {
         setLinks(result.items);
-        setError(null);
+        setDataSession(requestSession);
+        if (!preserveError) setError(null);
       }
     } catch (e) {
-      if (mounted.current && mutationInFlight.current === 0 && generation === requestGeneration.current) setError(e);
+      if (
+        !preserveError &&
+        mounted.current &&
+        activeSession.current === requestSession &&
+        mutationInFlight.current === 0 &&
+        generation === requestGeneration.current
+      )
+        setError(e);
     }
   }, []);
 
   useEffect(() => {
-    if (!session) return;
+    if (!session) {
+      lifecycleSession.current = null;
+      mutationInFlight.current = 0;
+      actionGeneration.current++;
+      return;
+    }
     mounted.current = true;
+    if (lifecycleSession.current !== session) {
+      lifecycleSession.current = session;
+      setLinks(null);
+      setDataSession(session);
+      setError(null);
+      setMessage('');
+      setToken('');
+      setBusy(false);
+      mutationInFlight.current = 0;
+      actionGeneration.current++;
+    }
     void refresh();
     let polling = false;
     const poll = async () => {
-      if (document.visibilityState !== 'visible' || polling || mutationInFlight.current > 0) return;
+      if (!mounted.current || document.visibilityState !== 'visible' || polling || mutationInFlight.current > 0) return;
       polling = true;
       const generation = ++requestGeneration.current;
+      const pollSession = session;
       try {
         const result = await listLinks();
-        if (mounted.current && mutationInFlight.current === 0 && generation === requestGeneration.current) {
+        if (
+          mounted.current &&
+          activeSession.current === pollSession &&
+          mutationInFlight.current === 0 &&
+          generation === requestGeneration.current
+        ) {
           setLinks(result.items);
+          setDataSession(pollSession);
           setError(null);
         }
       } catch (e) {
-        if (mounted.current && mutationInFlight.current === 0 && generation === requestGeneration.current) setError(e);
+        if (
+          mounted.current &&
+          activeSession.current === pollSession &&
+          mutationInFlight.current === 0 &&
+          generation === requestGeneration.current
+        )
+          setError(e);
       } finally {
         polling = false;
       }
@@ -154,54 +207,80 @@ export default function SettingsLinks() {
     e.preventDefault();
     setBusy(true);
     setError(null);
-    const generation = ++requestGeneration.current;
+    const operationSession = session;
+    const generation = ++actionGeneration.current;
+    requestGeneration.current++;
     mutationInFlight.current++;
+    let actionError: unknown = null;
     try {
       await addListenbrainzLink(token, expectedDid);
-      if (!mounted.current || generation !== requestGeneration.current) return;
+      if (!mounted.current || activeSession.current !== operationSession || generation !== actionGeneration.current)
+        return;
       setToken('');
       setMessage('ListenBrainz connected.');
     } catch (e) {
-      if (mounted.current && generation === requestGeneration.current) setError(e);
+      actionError = e;
+      if (mounted.current && activeSession.current === operationSession && generation === actionGeneration.current)
+        setError(e);
     } finally {
-      mutationInFlight.current--;
-      if (mounted.current && generation === requestGeneration.current) setBusy(false);
-      if (mounted.current) void refresh();
+      if (activeSession.current === operationSession) mutationInFlight.current--;
+      if (mounted.current && activeSession.current === operationSession && generation === actionGeneration.current)
+        setBusy(false);
+      if (mounted.current && activeSession.current === operationSession && generation === actionGeneration.current)
+        void refresh(Boolean(actionError));
     }
   }
   async function lastfm() {
     setBusy(true);
     setError(null);
-    const generation = ++requestGeneration.current;
+    const operationSession = session;
+    const generation = ++actionGeneration.current;
+    requestGeneration.current++;
+    mutationInFlight.current++;
     try {
       const { authorizeUrl } = await startLastfmLink(expectedDid);
-      if (!mounted.current || generation !== requestGeneration.current) return;
+      if (!mounted.current || activeSession.current !== operationSession || generation !== actionGeneration.current)
+        return;
       window.location.assign(authorizeUrl);
     } catch (e) {
-      if (mounted.current && generation === requestGeneration.current) setError(e);
-      setBusy(false);
+      if (mounted.current && activeSession.current === operationSession && generation === actionGeneration.current)
+        setError(e);
+    } finally {
+      if (activeSession.current === operationSession) mutationInFlight.current--;
+      if (mounted.current && activeSession.current === operationSession && generation === actionGeneration.current)
+        setBusy(false);
     }
   }
   async function remove(link: Link) {
     if (!window.confirm(`Disconnect ${serviceName(link.service)} account ${scrubDids(link.remoteUser)}?`)) return;
     setBusy(true);
     setError(null);
-    const generation = ++requestGeneration.current;
+    const operationSession = session;
+    const generation = ++actionGeneration.current;
+    requestGeneration.current++;
     mutationInFlight.current++;
+    let actionError: unknown = null;
     try {
       await unlink(link.id, expectedDid);
-      if (!mounted.current || generation !== requestGeneration.current) return;
+      if (!mounted.current || activeSession.current !== operationSession || generation !== actionGeneration.current)
+        return;
       setMessage(`${serviceName(link.service)} disconnected.`);
     } catch (e) {
-      if (mounted.current && generation === requestGeneration.current) setError(e);
+      actionError = e;
+      if (mounted.current && activeSession.current === operationSession && generation === actionGeneration.current)
+        setError(e);
     } finally {
-      mutationInFlight.current--;
-      if (mounted.current && generation === requestGeneration.current) setBusy(false);
-      if (mounted.current) void refresh();
+      if (activeSession.current === operationSession) mutationInFlight.current--;
+      if (mounted.current && activeSession.current === operationSession && generation === actionGeneration.current)
+        setBusy(false);
+      if (mounted.current && activeSession.current === operationSession && generation === actionGeneration.current)
+        void refresh(Boolean(actionError));
     }
   }
   async function changeSetting(link: Link, patch: Parameters<typeof patchLink>[1]) {
-    const generation = ++requestGeneration.current;
+    const operationSession = session;
+    const generation = ++actionGeneration.current;
+    requestGeneration.current++;
     mutationInFlight.current++;
     setLinks(
       (current) =>
@@ -223,46 +302,62 @@ export default function SettingsLinks() {
     let actionError: unknown = null;
     try {
       const updated = await patchLink(link.id, patch, expectedDid);
-      if (!mounted.current || generation !== requestGeneration.current) return;
+      if (!mounted.current || activeSession.current !== operationSession || generation !== actionGeneration.current)
+        return;
       setLinks((current) => current?.map((item) => (item.id === updated.id ? updated : item)) ?? current);
       setMessage(`${serviceName(link.service)} sync settings updated.`);
     } catch (e) {
-      if (!mounted.current || generation !== requestGeneration.current) return;
+      if (!mounted.current || activeSession.current !== operationSession || generation !== actionGeneration.current)
+        return;
       actionError = e;
     } finally {
-      mutationInFlight.current--;
-      if (mounted.current && generation === requestGeneration.current) setBusy(false);
-      if (mounted.current) {
-        await refresh();
-        if (actionError && mounted.current) setError(actionError);
+      if (activeSession.current === operationSession) mutationInFlight.current--;
+      if (mounted.current && activeSession.current === operationSession && generation === actionGeneration.current)
+        setBusy(false);
+      if (mounted.current && activeSession.current === operationSession && generation === actionGeneration.current) {
+        await refresh(Boolean(actionError));
+        if (
+          actionError &&
+          mounted.current &&
+          activeSession.current === operationSession &&
+          generation === actionGeneration.current
+        )
+          setError(actionError);
       }
     }
   }
 
+  const displayLinks = dataSession === session ? links : null;
+  const displayError = dataSession === session ? error : null;
+  const displayMessage = dataSession === session ? message : '';
   return (
     <section aria-labelledby="page-title">
       <h1 id="page-title">Connected services</h1>
       {!canManage && <p role="status">Sign in again before changing connected services.</p>}
-      {message && <p role="status">{message}</p>}
-      {error && (
-        <ErrorState title="Connected services could not be updated." error={error} onRetry={() => void refresh()} />
+      {displayMessage && <p role="status">{displayMessage}</p>}
+      {displayError && (
+        <ErrorState
+          title="Connected services could not be updated."
+          error={displayError}
+          onRetry={() => void refresh()}
+        />
       )}
-      {links === null ? (
-        error ? null : (
+      {displayLinks === null ? (
+        displayError ? null : (
           <LoadingState label="Loading connected services…" />
         )
-      ) : links.length === 0 ? (
+      ) : displayLinks.length === 0 ? (
         <EmptyState>No music services are connected.</EmptyState>
       ) : (
         <ul class="link-card-list">
-          {links.map((link) => {
+          {displayLinks.map((link) => {
             const name = serviceName(link.service);
             const status = syncStatus(link);
             const syncedAt = lastSynced(link);
             const backfill = link.sync?.backfill;
             const lastError = link.sync?.lastError ?? link.lastError;
             const holdMessage = link.sync?.holdReason ? holdWords(link.sync.holdReason, name) : undefined;
-            const backfillError = backfill?.lastError ? errorWords(backfill.lastError, name) : undefined;
+            const backfillError = backfill?.lastError ? errorWords(backfill.lastError, name, true) : undefined;
             const pullEnabled = link.sync?.pullEnabled ?? true;
             return (
               <li key={link.id} class="link-card">

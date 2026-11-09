@@ -155,7 +155,7 @@ it('shows reconnect guidance and scrubs DIDs from the server error', async () =>
   const { root, unmount } = mount();
   await vi.waitFor(() => expect(root.textContent).toContain('Reconnect your account to keep importing.'));
   expect(root.textContent).toContain('Needs reconnect');
-  expect(root.textContent).toContain('Unable to sync an account');
+  expect(root.textContent).toContain('Syncing with ListenBrainz stopped after an error.');
   expect(root.textContent).not.toContain('did:');
   expect(root.querySelector('.link-error')?.getAttribute('role')).toBeNull();
   expect(root.querySelector('[role="alert"]')).toBeNull();
@@ -179,11 +179,225 @@ it('shows known sync-error advice in plain words for each service', async () => 
   expect(root.textContent).toContain('ListenBrainz disconnected this app. Reconnect to resume syncing.');
   expect(root.textContent).toContain("Saved credentials couldn't be read. Reconnect to resume syncing.");
   expect(root.textContent).toContain("Last.fm is rejecting this server's API key. Syncing is paused.");
-  expect(root.textContent).toContain('Unable to sync an account with saved credentials');
+  expect(root.textContent).toContain('Syncing with ListenBrainz stopped after an error.');
   expect(root.textContent).not.toContain('alice@example.test');
   expect(root.textContent).not.toContain('hidden');
   expect(root.querySelectorAll('.link-error[role="alert"]')).toHaveLength(0);
   expect(root.textContent).not.toContain('did:');
+  unmount();
+});
+
+it('uses fixed service guidance for unsupported errors without exposing their contents', async () => {
+  stubLinks([
+    link({ id: 'quoted-token', lastError: 'Unable to sync {"token":"example-secret-1234567890"}' }),
+    link({ id: 'unknown-code', lastError: 'E_UPSTREAM_UNKNOWN' }),
+  ]);
+  const { root, unmount } = mount();
+  await vi.waitFor(() => expect(root.querySelectorAll('.link-card')).toHaveLength(2));
+  expect(root.textContent).toContain('Syncing with ListenBrainz stopped after an error.');
+  expect(root.textContent).not.toContain('example-secret');
+  expect(root.textContent).not.toContain('E_UPSTREAM_UNKNOWN');
+  expect(root.querySelectorAll('.link-error[role="alert"]')).toHaveLength(0);
+  unmount();
+});
+
+it('treats terminal forward failures on active DTOs as errors, while retaining retry holds as active', async () => {
+  stubLinks([
+    link({ id: 'server-key', service: 'lastfm', lastError: 'lastfm_key_rejected' }),
+    link({ id: 'permanent', service: 'lastfm', lastError: 'lastfm_error_6' }),
+    link({ id: 'temporary', service: 'lastfm', lastError: 'lastfm_error_11' }),
+  ]);
+  const { root, unmount } = mount();
+  await vi.waitFor(() => expect(root.querySelectorAll('.link-card')).toHaveLength(3));
+  const cards = [...root.querySelectorAll('.link-card')];
+  expect(cards[0]!.querySelector('.link-status-pill')?.textContent).toBe('Error');
+  expect(cards[1]!.querySelector('.link-status-pill')?.textContent).toBe('Error');
+  expect(cards[2]!.querySelector('.link-status-pill')?.textContent).toBe('Active');
+  unmount();
+});
+
+it('describes app authorization, service sync reset, and skipped history recovery accurately', async () => {
+  stubLinks([
+    link({
+      id: 'auth',
+      sync: {
+        backfill: { state: 'done', done: 0, total: 0 },
+        pullEnabled: true,
+        holdReason: 'scope_insufficient',
+        queued: 0,
+        failed: 0,
+      },
+    }),
+    link({
+      id: 'pull',
+      service: 'lastfm',
+      sync: {
+        backfill: { state: 'done', done: 0, total: 0 },
+        pullEnabled: true,
+        holdReason: 'lastfm_error',
+        queued: 0,
+        failed: 1,
+      },
+    }),
+    link({
+      id: 'history',
+      sync: {
+        backfill: { state: 'skipped', done: 0, total: 10, lastError: 'retry_exhausted' },
+        pullEnabled: true,
+        queued: 0,
+        failed: 0,
+      },
+    }),
+  ]);
+  const { root, unmount } = mount();
+  await vi.waitFor(() => expect(root.querySelectorAll('.link-card')).toHaveLength(3));
+  expect(root.textContent).toContain('This app needs permission to write to your account. Sign in again');
+  expect(root.textContent).toContain('turn importing off and on to restart sync');
+  expect(root.textContent).toContain('Sending listening history was skipped after repeated failures.');
+  expect(root.textContent).toContain('Turn sending scrobbles off and on to restart the history run.');
+  unmount();
+});
+
+it('does not let failed PATCH recovery restore an error after a newer successful PATCH', async () => {
+  const pendingLists: Array<(response: Response) => void> = [];
+  const pendingPatches: Array<(response: Response) => void> = [];
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL, init: RequestInit = {}) => {
+    const path = new URL(String(input), 'https://music.test').pathname;
+    const method = init.method ?? 'GET';
+    if (path === '/api/v1/auth/session') return Response.json(session);
+    if (path === '/api/v1/links' && method === 'GET')
+      return await new Promise<Response>((resolve) => pendingLists.push(resolve));
+    if (path === '/api/v1/links/link-1' && method === 'PATCH')
+      return await new Promise<Response>((resolve) => pendingPatches.push(resolve));
+    throw new Error(`unexpected request ${method} ${path}`);
+  });
+  const { root, unmount } = mount();
+  await vi.waitFor(() => expect(pendingLists).toHaveLength(1));
+  pendingLists[0]!(Response.json({ items: [link()] }));
+  await vi.waitFor(() => expect(root.querySelector('.link-card')).not.toBeNull());
+  const toggle = () => {
+    const input = root.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    input.checked = !input.checked;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  };
+  toggle();
+  await vi.waitFor(() => expect(pendingPatches).toHaveLength(1));
+  pendingPatches[0]!(Response.json({ error: 'failed' }, { status: 502 }));
+  await vi.waitFor(() => expect(pendingLists).toHaveLength(2));
+  toggle();
+  await vi.waitFor(() => expect(pendingPatches).toHaveLength(2));
+  pendingPatches[1]!(Response.json(link({ forwardScrobbles: true })));
+  await vi.waitFor(() => expect(pendingLists).toHaveLength(3));
+  pendingLists[2]!(Response.json({ items: [link()] }));
+  await vi.waitFor(() => expect(root.querySelector('[role="alert"]')).toBeNull());
+  pendingLists[1]!(Response.json({ items: [link()] }));
+  await Promise.resolve();
+  expect(root.querySelector('[role="alert"]')).toBeNull();
+  expect(root.textContent).toContain('sync settings updated.');
+  unmount();
+});
+
+it('keeps failed add and unlink errors after authoritative reconciliation', async () => {
+  for (const action of ['add', 'unlink'] as const) {
+    let lists = 0;
+    let reconciled = false;
+    let finishReconcile!: (response: Response) => void;
+    vi.stubGlobal('confirm', () => true);
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init: RequestInit = {}) => {
+      const path = new URL(String(input), 'https://music.test').pathname;
+      const method = init.method ?? 'GET';
+      if (path === '/api/v1/auth/session') return Response.json(session);
+      if (path === '/api/v1/links' && method === 'GET') {
+        lists++;
+        if (lists > 1)
+          return await new Promise<Response>((resolve) => {
+            finishReconcile = (response) => {
+              reconciled = true;
+              resolve(response);
+            };
+          });
+        return Response.json({ items: action === 'add' ? [] : [link()] });
+      }
+      if (path === '/api/v1/links/listenbrainz' && method === 'POST')
+        return Response.json({ error: 'failed' }, { status: 502 });
+      if (path === '/api/v1/links/link-1' && method === 'DELETE')
+        return Response.json({ error: 'failed' }, { status: 502 });
+      throw new Error(`unexpected request ${method} ${path}`);
+    });
+    const { root, unmount } = mount();
+    await vi.waitFor(() => expect(lists).toBeGreaterThan(0));
+    if (action === 'add') {
+      const input = root.querySelector<HTMLInputElement>('#listenbrainz-token')!;
+      input.value = 'test-token';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      root.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    } else {
+      root.querySelector<HTMLButtonElement>('button')?.click();
+    }
+    await vi.waitFor(() => expect(root.querySelector('[role="alert"]')).not.toBeNull());
+    expect(root.querySelector('[role="alert"]')?.textContent).toContain('Something went wrong.');
+    await vi.waitFor(() => expect(lists).toBe(2));
+    finishReconcile(Response.json({ items: action === 'add' ? [] : [link()] }));
+    await vi.waitFor(() => expect(reconciled).toBe(true));
+    expect(root.querySelector('[role="alert"]')).not.toBeNull();
+    unmount();
+    vi.unstubAllGlobals();
+  }
+});
+
+it('keeps a pending Last.fm authorization current across visibility polls and releases busy', async () => {
+  let finishStart!: (response: Response) => void;
+  let listCount = 0;
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL, init: RequestInit = {}) => {
+    const path = new URL(String(input), 'https://music.test').pathname;
+    if (path === '/api/v1/auth/session') return Response.json(session);
+    if (path === '/api/v1/links') {
+      listCount++;
+      return Response.json({ items: [] });
+    }
+    if (path === '/api/v1/links/lastfm/start')
+      return await new Promise<Response>((resolve) => {
+        finishStart = resolve;
+      });
+    throw new Error(`unexpected request ${init.method ?? 'GET'} ${path}`);
+  });
+  const { root, unmount } = mount();
+  const assign = vi.spyOn(window.location, 'assign').mockImplementation(() => {});
+  await vi.waitFor(() => expect(root.textContent).toContain('Connect Last.fm'));
+  await vi.waitFor(() => expect(listCount).toBe(1));
+  const button = [...root.querySelectorAll('button')].find((item) => item.textContent === 'Connect Last.fm')!;
+  button.click();
+  await vi.waitFor(() => expect(finishStart).toBeTypeOf('function'));
+  const beforePoll = listCount;
+  Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+  document.dispatchEvent(new Event('visibilitychange'));
+  expect(listCount).toBe(beforePoll);
+  finishStart(Response.json({ authorizeUrl: 'https://www.last.fm/api/auth/?token=test' }));
+  await vi.waitFor(() => expect(assign).toHaveBeenCalledWith('https://www.last.fm/api/auth/?token=test'));
+  await vi.waitFor(() => expect(button.disabled).toBe(false));
+  expect(assign).toHaveBeenCalledTimes(1);
+  unmount();
+  assign.mockRestore();
+});
+
+it('hides committed owner data immediately while a replacement session loads', async () => {
+  const pending: Array<(response: Response) => void> = [];
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
+    const path = new URL(String(input), 'https://music.test').pathname;
+    if (path === '/api/v1/auth/session') return Response.json(session);
+    if (path === '/api/v1/links') return await new Promise<Response>((resolve) => pending.push(resolve));
+    throw new Error(`unexpected request ${path}`);
+  });
+  const { root, state, unmount } = mount();
+  await vi.waitFor(() => expect(pending).toHaveLength(1));
+  pending[0]!(Response.json({ items: [link({ remoteUser: 'old-owner-private' })] }));
+  await vi.waitFor(() => expect(root.textContent).toContain('old-owner-private'));
+  setSession(state, { ...session, did: 'did:plc:bbbbbbbbbbbbbbbbbbbbbbbb', handle: 'bob.test', username: 'bob' });
+  await vi.waitFor(() => expect(pending).toHaveLength(2));
+  expect(root.textContent).not.toContain('old-owner-private');
+  expect(root.querySelector('.link-card')).toBeNull();
+  pending[1]!(Response.json({ items: [link({ remoteUser: 'new-owner' })] }));
+  await vi.waitFor(() => expect(root.textContent).toContain('new-owner'));
   unmount();
 });
 
@@ -255,13 +469,13 @@ it('shows terminal sync failures, transient holds, and independent backfill erro
   const cards = [...root.querySelectorAll<HTMLElement>('.link-card')];
   expect(cards[0]!.querySelector('.link-status-pill')?.textContent).toBe('Error');
   expect(cards[1]!.querySelector('.link-status-pill')?.textContent).toBe('Error');
-  expect(cards[1]!.textContent).toContain('Repeated attempts to sync with ListenBrainz failed.');
+  expect(cards[1]!.textContent).toContain('Sending listening history was skipped after repeated failures.');
   expect(cards[1]!.textContent).toContain('temporarily waiting for queue capacity');
   expect(cards[2]!.querySelector('.link-status-pill')?.textContent).toBe('Error');
-  expect(cards[2]!.textContent).toContain('Last.fm stopped responding successfully.');
-  expect(cards[2]!.textContent).toContain('Repeated attempts to sync with ListenBrainz failed.');
+  expect(cards[2]!.textContent).toContain('Last.fm stopped accepting sync requests.');
+  expect(cards[2]!.textContent).toContain('Sending listening history was skipped after repeated failures.');
   expect(cards[3]!.querySelector('.link-status-pill')?.textContent).toBe('Active');
-  expect(cards[3]!.textContent).toContain('restoring its session');
+  expect(cards[3]!.textContent).toContain('temporarily restoring your sign-in');
   expect(cards[4]!.querySelector('.link-status-pill')?.textContent).toBe('Active');
   expect(cards[4]!.textContent).toContain('could not be reached. Importing will retry later.');
   expect(cards[5]!.querySelector('.link-status-pill')?.textContent).toBe('Active');
