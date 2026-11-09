@@ -153,6 +153,14 @@ const NEW_TABLES: Record<string, ExpectedTable> = {
       'created_at_ms',
       'expires_at_ms',
       'cleanup_due_ms',
+      'cleanup_cursor_window_hi',
+      'cleanup_cursor_window_lo',
+      'cleanup_cursor_replaced_by_cid',
+      'cleanup_cursor_kind',
+      'cleanup_cursor_member_uri',
+      'cleanup_cursor_removed_cid',
+      'cleanup_scan_complete',
+      'cleanup_has_match',
     ],
     pk: ['uri', 'rev'],
   },
@@ -715,6 +723,9 @@ const NEW_TABLES: Record<string, ExpectedTable> = {
       generation: true,
       priority: true,
       love_lane: true,
+      authorization_uri: true,
+      authorization_rev: true,
+      authorization_conflicted: true,
     }),
     pk: ['id'],
     unique: [['link_id', 'kind', 'dedupe_key']],
@@ -866,6 +877,18 @@ const NEW_SCROBBLE_COLUMNS = cols<ScrobbleV2Columns>({
 
 /** New named indexes: table, unique, partial, [column, desc] in key order. */
 const NEW_INDEXES: Record<string, [string, number, number, Array<[string, number]>]> = {
+  forward_outbox_authorization: [
+    'forward_outbox',
+    0,
+    0,
+    [['authorization_uri', 0], ['authorization_rev', 0], ['state', 0]],
+  ],
+  live_pending_removal_events_uri_ready_order: [
+    'live_pending_removal_events',
+    0,
+    0,
+    [['uri', 0], ['scan_complete', 0], ['created_at_ms', 0], ['rev', 0]],
+  ],
   live_record_evidence_expiry: ['live_record_evidence', 0, 0, [['expires_at_ms', 0]]],
   live_acceptance_candidates_expiry: ['live_acceptance_candidates', 0, 0, [['expires_at_ms', 0]]],
   live_pending_removals_ready: [
@@ -2229,6 +2252,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       "49|'live_pending_removals'",
       "50|'live_pending_removal_repair'",
       "51|'live_pending_removal_bounds'",
+      "52|'a2_authorization_binding'",
     ]);
     // The new scrobble columns exist and are NULL on every migrated row.
     expect(after.newColumns).toHaveLength(expectedScrobbles);
@@ -2287,6 +2311,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       { version: 49, name: 'live_pending_removals' },
       { version: 50, name: 'live_pending_removal_repair' },
       { version: 51, name: 'live_pending_removal_bounds' },
+      { version: 52, name: 'a2_authorization_binding' },
     ]);
     expect(after.compat).toEqual([{ singleton: 1, min_compatible_version: 2 }]);
     expect(after.newTablesEmpty).toEqual(['mb_cover_art_usage']);

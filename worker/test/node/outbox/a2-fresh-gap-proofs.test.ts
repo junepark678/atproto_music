@@ -10,9 +10,10 @@ import { enqueueHints } from '../../../src/do/ingest/hints';
 import { LIVE_EVIDENCE_TTL_MS } from '../../../src/do/ingest/live-evidence';
 import {
   AUTHORIZATION_EVENT_HEAD_SQL,
+  AUTHORIZATION_EVENT_HEAD_URI_SQL,
   AUTHORIZATION_PAGE_SQL,
   authorizePendingRemovals,
-  CONFLICT_PENDING_RETENTION_SQL,
+  CONFLICT_RETENTION_SCAN_SQL,
   executeAuthorizedRemovals,
   type PendingListen,
   recordPendingRemoval,
@@ -517,6 +518,65 @@ it('fresh: production SQL bounds equal-hi tail seeks, event readiness, and retai
     expect(db.all(eventSql)).toHaveLength(1);
     expect(eventVisits).toBe(1);
 
+    const sameUriEvents = `${pendingUri}-same-uri-events`;
+    for (let i = 0; i < 10_000; i++)
+      db.run(
+        `INSERT INTO live_pending_removal_events(uri,rev,action,cid,conflicted,scan_complete,created_at_ms,expires_at_ms,cleanup_due_ms)
+         VALUES(?,?,'update','x',0,0,?,?,?)`,
+        sameUriEvents,
+        String(i).padStart(13, '0'),
+        10_000 - i,
+        NOW_MS + (i % 2 ? 5_000 : 50_000),
+        NOW_MS + 50_000,
+      );
+    eventVisits = 0;
+    const uriEventSql = AUTHORIZATION_EVENT_HEAD_URI_SQL.replace(
+      'WHERE uri=? AND scan_complete=0',
+      'WHERE uri=? AND scan_complete=0 AND a2_event_visit()=1',
+    );
+    expect(db.all(uriEventSql, sameUriEvents)).toHaveLength(1);
+    expect(eventVisits).toBe(1);
+    const uriEventPlan = db
+      .all<{ detail: string }>(`EXPLAIN QUERY PLAN ${AUTHORIZATION_EVENT_HEAD_URI_SQL}`, sameUriEvents)
+      .map((row: { detail: string }) => row.detail)
+      .join(' ');
+    expect(uriEventPlan).toContain('live_pending_removal_events_uri_ready_order');
+    expect(uriEventPlan).not.toContain('TEMP B-TREE');
+
+    const retentionUri = `${pendingUri}-retention-page`;
+    for (let i = 0; i < 10_000; i++) {
+      const lo = String(i).padStart(13, '0');
+      db.run(
+        `INSERT INTO live_pending_removals
+         (uri,member_uri,removed_cid,kind,window_lo,window_hi,replaced_by_cid,identity_key,artist_key,track_key,artist,track,created_at_ms,expires_at_ms)
+         VALUES(?,?,'old','scrobble',?,'zzzzzzzzzzzzz','',?,'a','t','A','T',1,?)`,
+        retentionUri,
+        `retained-${lo}`,
+        lo,
+        `retained-key-${lo}`,
+        NOW_MS + 10_000_000,
+      );
+    }
+    let boundedRetentionVisits = 0;
+    db.raw.function('a2_bounded_retention_visit', () => {
+      boundedRetentionVisits++;
+      return 1;
+    });
+    const boundedRetentionSql = CONFLICT_RETENTION_SCAN_SQL.replace(
+      'WHERE uri=?',
+      'WHERE uri=? AND a2_bounded_retention_visit()=1',
+    );
+    expect(
+      db.all(boundedRetentionSql, retentionUri, '', '', '', '', '', '', 128),
+    ).toHaveLength(128);
+    expect(boundedRetentionVisits).toBe(128);
+    const boundedRetentionPlan = db
+      .all<{ detail: string }>(`EXPLAIN QUERY PLAN ${CONFLICT_RETENTION_SCAN_SQL}`, retentionUri, '', '', '', '', '', '', 128)
+      .map((row: { detail: string }) => row.detail)
+      .join(' ');
+    expect(boundedRetentionPlan).toContain('live_pending_removals_page');
+    expect(boundedRetentionPlan).not.toContain('TEMP B-TREE');
+
     for (let i = 0; i < 10_000; i++) {
       const eventUri = `at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/retained-${i}`;
       const rev = String(i).padStart(13, '0');
@@ -547,15 +607,17 @@ it('fresh: production SQL bounds equal-hi tail seeks, event readiness, and retai
       return 1;
     });
     const traced: Db = {
-      all: db.all.bind(db),
+      all(sql, ...params) {
+        const instrumented =
+          sql === CONFLICT_RETENTION_SCAN_SQL
+            ? sql.replace('WHERE uri=?', 'WHERE uri=? AND a2_retention_visit()=1')
+            : sql;
+        return db.all(instrumented, ...params);
+      },
       run: db.run.bind(db),
       tx: db.tx.bind(db),
       one(sql, ...params) {
-        const instrumented =
-          sql === CONFLICT_PENDING_RETENTION_SQL
-            ? sql.replace('WHERE uri=?', 'WHERE uri=? AND a2_retention_visit()=1')
-            : sql;
-        return db.one(instrumented, ...params);
+        return db.one(sql, ...params);
       },
     };
     executeAuthorizedRemovals(traced, { nowMs: NOW_MS, random: seededRandom(12), limit: 1 });
@@ -566,10 +628,10 @@ it('fresh: production SQL bounds equal-hi tail seeks, event readiness, and retai
       db.one('SELECT count(*) AS n FROM live_pending_removal_events WHERE conflicted=1 AND cleanup_due_ms<=?', NOW_MS),
     ).toEqual({ n: 9_744 });
     const retentionPlan = db
-      .all<{ detail: string }>(`EXPLAIN QUERY PLAN ${CONFLICT_PENDING_RETENTION_SQL}`, 'uri', hi, 'rev')
+      .all<{ detail: string }>(`EXPLAIN QUERY PLAN ${CONFLICT_RETENTION_SCAN_SQL}`, 'uri', '', '', '', '', '', '', 128)
       .map((row: { detail: string }) => row.detail)
       .join(' ');
-    expect(retentionPlan).toContain('live_pending_removals_authorize');
+    expect(retentionPlan).toContain('live_pending_removals_page');
     expect(retentionPlan).not.toContain('TEMP B-TREE');
 
     const queuedUri = uri('retained-effect');
