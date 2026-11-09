@@ -22,6 +22,22 @@ const TABLES = [
     marker: true,
   },
   {
+    key: 'live_pending_removals',
+    primaryKey: ['uri', 'member_uri', 'removed_cid', 'window_lo', 'window_hi', 'replaced_by_cid'],
+    columns: [
+      'uri',
+      'member_uri',
+      'removed_cid',
+      'kind',
+      'window_lo',
+      'window_hi',
+      'replaced_by_cid',
+      'identity_key',
+      'authorized_rev',
+    ],
+    marker: true,
+  },
+  {
     key: 'forward_admissions',
     primaryKey: ['did', 'identity_key'],
     columns: ['did', 'identity_key', 'path', 'source_service'],

@@ -227,6 +227,7 @@ describe('admin socket', () => {
       tables: {
         live_record_evidence: { rows: 0, logicalBytesEstimate: 0 },
         live_acceptance_candidates: { rows: 0, logicalBytesEstimate: 0 },
+        live_pending_removals: { rows: 0, logicalBytesEstimate: 0 },
         forward_admissions: { rows: 1, logicalBytesEstimate: admissionsBytes },
         love_incarnations: { rows: 1, logicalBytesEstimate: incarnationBytes },
         love_delete_bridges: { rows: 1, logicalBytesEstimate: deleteBridgeBytes },

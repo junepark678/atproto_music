@@ -1489,6 +1489,28 @@ const MIGRATION_LIVE_ADMISSION_EVIDENCE: Migration = {
   ],
 };
 
+const MIGRATION_LIVE_PENDING_REMOVALS: Migration = {
+  version: 49,
+  name: 'live_pending_removals',
+  statements: [
+    `CREATE TABLE live_pending_removals (
+      uri TEXT NOT NULL, member_uri TEXT NOT NULL, removed_cid TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK(kind IN ('scrobble','love')),
+      window_lo TEXT NOT NULL, window_hi TEXT NOT NULL, replaced_by_cid TEXT NOT NULL,
+      identity_key TEXT NOT NULL, listened_at INTEGER,
+      artist_key TEXT NOT NULL, track_key TEXT NOT NULL, artist TEXT NOT NULL, track TEXT NOT NULL,
+      recording_mbid TEXT, love_source_service TEXT, love_import_sources TEXT,
+      authorized_rev TEXT, created_at_ms INTEGER NOT NULL, expires_at_ms INTEGER NOT NULL,
+      PRIMARY KEY(uri,member_uri,removed_cid,window_lo,window_hi,replaced_by_cid)
+    )`,
+    'CREATE INDEX live_pending_removals_ready ON live_pending_removals(authorized_rev,created_at_ms,uri,window_hi,expires_at_ms)',
+    'CREATE INDEX live_pending_removals_uri_ready ON live_pending_removals(uri,authorized_rev,created_at_ms,window_hi,expires_at_ms)',
+    'CREATE INDEX live_pending_removals_group ON live_pending_removals(uri,kind,window_lo,window_hi,replaced_by_cid,authorized_rev,expires_at_ms,member_uri)',
+    'CREATE INDEX live_pending_removals_authorize ON live_pending_removals(uri,window_hi,window_lo DESC,replaced_by_cid,authorized_rev,expires_at_ms)',
+    'CREATE INDEX live_pending_removals_expiry ON live_pending_removals(expires_at_ms,uri,window_hi)',
+  ],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
   MIGRATION_2,
@@ -1538,6 +1560,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_FORWARD_LOVE_RECORDING_TARGETS,
   MIGRATION_OPERATIONS_RECORD_TARGET,
   MIGRATION_LIVE_ADMISSION_EVIDENCE,
+  MIGRATION_LIVE_PENDING_REMOVALS,
 ];
 
 /** The schema version this code expects. */
@@ -1571,6 +1594,7 @@ export const TABLES = [
   'schema_migrations',
   'live_record_evidence',
   'live_acceptance_candidates',
+  'live_pending_removals',
   // Migration 2.
   'accounts',
   'web_sessions',
@@ -1671,6 +1695,7 @@ export const TABLE_CLASS: Readonly<Record<TableName, TableClass>> = {
   schema_migrations: 'non-derived',
   live_record_evidence: 'non-derived',
   live_acceptance_candidates: 'non-derived',
+  live_pending_removals: 'non-derived',
   accounts: 'non-derived',
   web_sessions: 'non-derived',
   oauth_states: 'non-derived',

@@ -31,7 +31,7 @@ function trace(db: Db, queries: string[], limits: SqlParam[]): Db {
 }
 
 describe('forward storage statistics refresh', () => {
-  it('includes durable live evidence and acceptance candidates in bounded marker statistics', async () => {
+  it('includes durable live evidence, candidates, and pending removals in bounded marker statistics', async () => {
     await withMigratedDb((db) => {
       const uri = `at://${DID}/com.example.atmusic.scrobble/r1`;
       db.run(
@@ -47,6 +47,17 @@ describe('forward storage statistics refresh', () => {
         9999999999999,
       );
       db.run(
+        `INSERT INTO live_pending_removals
+         (uri,member_uri,removed_cid,kind,window_lo,window_hi,replaced_by_cid,identity_key,listened_at,
+          artist_key,track_key,artist,track,recording_mbid,authorized_rev,created_at_ms,expires_at_ms)
+         VALUES(?,?,?,'scrobble','','3333333333333','',?,1,'artist-key','track-key','Artist','Track',NULL,NULL,1,?)`,
+        uri,
+        uri,
+        'bafycid',
+        'listen-key',
+        9999999999999,
+      );
+      db.run(
         `INSERT INTO live_acceptance_candidates(uri,identity_key,kind,member_uri,cid,created_at_ms,expires_at_ms)
          VALUES(?,?,'scrobble',?,?,1,?)`,
         uri,
@@ -59,10 +70,11 @@ describe('forward storage statistics refresh', () => {
       for (let i = 0; i < 20 && !complete; i++) complete = refreshForwardStorageStats(db, 10);
       expect(complete).toBe(true);
       expect(readForwardStorageStats(db)).toMatchObject({
-        markers: { rows: 2 },
+        markers: { rows: 3 },
         tables: {
           live_record_evidence: { rows: 1 },
           live_acceptance_candidates: { rows: 1 },
+          live_pending_removals: { rows: 1 },
         },
       });
     });
