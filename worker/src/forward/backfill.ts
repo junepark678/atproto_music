@@ -7,6 +7,7 @@ import type { CoreExtension } from '../app/host';
 import type { LinkedAccountRow } from '../app/rows';
 import type { Db } from '../do/db';
 import { matchedRecordingMbid } from '../musicbrainz/store';
+import { ensureLegacyLoveIncarnation } from './love-incarnation';
 import { enqueueForwards } from '../outbox/forward-enqueue';
 import type { ForwardRuntime } from './forwarder';
 import { projectionListenKey } from './projection';
@@ -233,6 +234,7 @@ async function admitHistoryRow(
   db: Db,
   link: LinkedAccountRow,
   row: HistoryRow,
+  now: number,
 ): Promise<{ key: string; payload: unknown } | null> {
   let identityKey: string;
   if (row.kind === 'scrobble') {
@@ -240,11 +242,25 @@ async function admitHistoryRow(
     if (ns === null) return null;
     identityKey = await listenKey({ did: link.did, listenedAtNs: ns, artist: row.artist, track: row.track });
   } else {
-    const incarnation = db.one<{ incarnation_key: string }>(
-      "SELECT incarnation_key FROM love_incarnations WHERE uri=? AND state='present'",
-      row.uri,
-    );
-    if (incarnation === null) return null;
+    const incarnation = db.tx(() => {
+      const existing = db.one<{ incarnation_key: string; state: string }>(
+        'SELECT incarnation_key,state FROM love_incarnations WHERE uri=?',
+        row.uri,
+      );
+      if (existing !== null) return existing;
+      const [, collection, rkey] = row.uri.slice('at://'.length).split('/');
+      if (!collection || !rkey) return null;
+      return ensureLegacyLoveIncarnation(db, {
+        did: link.did,
+        uri: row.uri,
+        collection,
+        rkey,
+        cid: row.cid,
+        nowMs: now,
+        admitMarker: false,
+      });
+    });
+    if (incarnation?.state !== 'present') return null;
     identityKey = incarnation.incarnation_key;
   }
   return payloadForHistoryRow(db, link, row, identityKey);
@@ -445,7 +461,7 @@ export async function runLinkBackfill(
       const discovery = candidates(db, link, now, maxPageSize, cursorOf(link.backfill_discovery_cursor));
       const eligible: Array<{ row: HistoryRow; key: string }> = [];
       for (const row of discovery) {
-        const result = await admitHistoryRow(db, link, row);
+        const result = await admitHistoryRow(db, link, row, now);
         if (result !== null) eligible.push({ row, key: result.key });
       }
       const lastDiscovered = discovery.at(-1);
