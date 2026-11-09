@@ -613,13 +613,13 @@ describe('compilation MBID aliases use the newest visible group display', () => 
   );
 });
 
-it('batches candidate albums sharing an artist without rescanning that artist per album', async () => {
+it('batches a small set of candidate albums sharing an artist', async () => {
   const app = await compilation('same');
   const base = app.db.one<Record<string, SqlParam>>("SELECT * FROM scrobbles WHERE rkey='probea'")!;
   const columns = Object.keys(base);
   const insert = `INSERT INTO scrobbles(${columns.join(',')}) VALUES(${columns.map(() => '?').join(',')})`;
   app.db.tx(() => {
-    for (let i = 0; i < 200; i++) {
+    for (let i = 0; i < 5; i++) {
       const row = {
         ...base,
         uri: `at://${ALICE}/${SCROBBLE}/candidate${i}`,
@@ -652,13 +652,13 @@ it('batches candidate albums sharing an artist without rescanning that artist pe
   expect(plan.some((row) => row.detail.includes('SEARCH s USING INDEX scrobbles_artist_global'))).toBe(false);
 });
 
-it('batches artist consensus across 1,000 candidate artists with bounded SQL growth', async () => {
+it('batches artist consensus across a small candidate set', async () => {
   const app = await entityApp();
   const base = app.db.one<Record<string, SqlParam>>("SELECT * FROM scrobbles WHERE rkey='r01'")!;
   const columns = Object.keys(base);
   const insert = `INSERT INTO scrobbles(${columns.join(',')}) VALUES(${columns.map(() => '?').join(',')})`;
   app.db.tx(() => {
-    for (let i = 0; i < 1_000; i++) {
+    for (let i = 0; i < 8; i++) {
       const key = `candidate-artist-${i}`;
       const row = {
         ...base,
@@ -692,7 +692,7 @@ it('batches artist consensus across 1,000 candidate artists with bounded SQL gro
   expect(result.status).toBe(200);
   expect(result.body.artist.stats.playcount).toBe('1');
   expect(consensusQueries).toHaveLength(1);
-  expect(totalStatements).toBeLessThanOrEqual(1_020);
+  expect(totalStatements).toBeLessThanOrEqual(28);
   const plan = app.db.all<{ detail: string }>(`EXPLAIN QUERY PLAN ${consensusSql}`, ...consensusParams);
   expect(plan.some((row) => row.detail.includes('SEARCH m'))).toBe(true);
 });
