@@ -391,6 +391,7 @@ it.each(['incremental', 'snapshot', 'reaffirm'] as const)(
     const repo = await repoFor('alice');
     const first = await putProof(repo, SCROBBLE, 'raw-import', record);
     const next = await putProof(repo, SCROBBLE, 'raw-import', record);
+    if (first.state !== 'present' || next.state !== 'present') throw new Error('expected present proof fixtures');
     await withMigratedDb(async (db) => {
       seedLink(db);
       expect(db.tx(() => applyRecordProof(db, first, OPTS)).outcome).toBe('applied');
