@@ -597,16 +597,21 @@ describe('restore.ts', () => {
           authorized_rev,created_at_ms,expires_at_ms)
          VALUES('${uri}','${uri}','bafyold','scrobble','1111111111111','2222222222222','','${identity}',
           'artist-key','track-key','Artist','Track',NULL,1,9999999999999)`,
+        `INSERT INTO live_pending_removal_events(uri,rev,action,cid,created_at_ms,expires_at_ms)
+         VALUES('${uri}','2222222222222','delete','',1,9999999999999)`,
       ],
       liveSql: [
         `UPDATE live_record_evidence SET up_rev='3333333333333',up_action='update',up_cid='bafynew' WHERE uri='${uri}'`,
         `UPDATE live_acceptance_candidates SET cid='bafynew',created_at_ms=2 WHERE uri='${uri}' AND identity_key='${identity}'`,
         `UPDATE live_pending_removals SET authorized_rev='2222222222222',expires_at_ms=9999999999998 WHERE uri='${uri}'`,
+        `UPDATE live_pending_removals SET conflict_invalidated=1 WHERE uri='${uri}'`,
+        `UPDATE live_pending_removal_events SET conflicted=1,cursor_window_hi='2222222222222',scan_complete=0 WHERE uri='${uri}'`,
       ],
     });
     expect(TABLE_CLASS.live_record_evidence).toBe('non-derived');
     expect(TABLE_CLASS.live_acceptance_candidates).toBe('non-derived');
     expect(TABLE_CLASS.live_pending_removals).toBe('non-derived');
+    expect(TABLE_CLASS.live_pending_removal_events).toBe('non-derived');
     const systemd = new FakeSystemd(world, { servicePort: null });
     await systemd.boot();
     const result = await restoreCli(world, systemd, [...baseArgs(world), '--no-ready-check']);
@@ -635,6 +640,13 @@ describe('restore.ts', () => {
         window_hi: '2222222222222',
         authorized_rev: '2222222222222',
         expires_at_ms: 9999999999998,
+      });
+      expect(
+        db.one('SELECT conflicted,cursor_window_hi,scan_complete FROM live_pending_removal_events WHERE uri=?', uri),
+      ).toEqual({
+        conflicted: 1,
+        cursor_window_hi: '2222222222222',
+        scan_complete: 0,
       });
       expect(
         executeAuthorizedRemovals(db, { nowMs: world.clock.nowMs(), random: seededRandom(0xa2), limit: 1 }),

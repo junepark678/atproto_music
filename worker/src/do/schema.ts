@@ -1511,6 +1511,33 @@ const MIGRATION_LIVE_PENDING_REMOVALS: Migration = {
   ],
 };
 
+// A2 repair: durable authorization cursors and conflict decisions. Migration 49
+// is already applied in deployed stores and remains byte-for-byte unchanged.
+const MIGRATION_LIVE_PENDING_REMOVAL_REPAIR: Migration = {
+  version: 50,
+  name: 'live_pending_removal_repair',
+  statements: [
+    'ALTER TABLE live_pending_removals ADD COLUMN conflict_invalidated INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE loves ADD COLUMN revision TEXT',
+    'CREATE INDEX loves_newer_by_track ON loves(did,artist_key,track_key,revision)',
+    'CREATE INDEX live_pending_removals_page ON live_pending_removals(uri,window_hi,window_lo,replaced_by_cid,kind,member_uri,removed_cid)',
+    `CREATE TABLE live_pending_removal_events (
+      uri TEXT NOT NULL, rev TEXT NOT NULL, action TEXT NOT NULL CHECK(action IN ('create','update','delete')),
+      cid TEXT NOT NULL DEFAULT '', conflicted INTEGER NOT NULL DEFAULT 0 CHECK(conflicted IN (0,1)),
+      cursor_window_hi TEXT NOT NULL DEFAULT '', cursor_window_lo TEXT NOT NULL DEFAULT '',
+      cursor_replaced_by_cid TEXT NOT NULL DEFAULT '', cursor_kind TEXT NOT NULL DEFAULT '',
+      cursor_member_uri TEXT NOT NULL DEFAULT '', cursor_removed_cid TEXT NOT NULL DEFAULT '',
+      scan_complete INTEGER NOT NULL DEFAULT 0 CHECK(scan_complete IN (0,1)),
+      created_at_ms INTEGER NOT NULL, expires_at_ms INTEGER NOT NULL,
+      PRIMARY KEY(uri,rev)
+    )`,
+    'CREATE INDEX live_pending_removal_events_expiry ON live_pending_removal_events(expires_at_ms,uri,rev)',
+    'CREATE INDEX live_pending_removal_events_by_uri ON live_pending_removal_events(uri,rev,expires_at_ms)',
+    'CREATE INDEX live_pending_removal_events_scan ON live_pending_removal_events(scan_complete,expires_at_ms,created_at_ms,uri,rev)',
+    'CREATE INDEX live_pending_removal_events_uri_scan ON live_pending_removal_events(uri,scan_complete,expires_at_ms,created_at_ms,rev)',
+  ],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
   MIGRATION_2,
@@ -1561,6 +1588,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_OPERATIONS_RECORD_TARGET,
   MIGRATION_LIVE_ADMISSION_EVIDENCE,
   MIGRATION_LIVE_PENDING_REMOVALS,
+  MIGRATION_LIVE_PENDING_REMOVAL_REPAIR,
 ];
 
 /** The schema version this code expects. */
@@ -1595,6 +1623,7 @@ export const TABLES = [
   'live_record_evidence',
   'live_acceptance_candidates',
   'live_pending_removals',
+  'live_pending_removal_events',
   // Migration 2.
   'accounts',
   'web_sessions',
@@ -1696,6 +1725,7 @@ export const TABLE_CLASS: Readonly<Record<TableName, TableClass>> = {
   live_record_evidence: 'non-derived',
   live_acceptance_candidates: 'non-derived',
   live_pending_removals: 'non-derived',
+  live_pending_removal_events: 'non-derived',
   accounts: 'non-derived',
   web_sessions: 'non-derived',
   oauth_states: 'non-derived',

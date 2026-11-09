@@ -368,6 +368,16 @@ function scrobbleVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, 
           : legacyPresent
             ? retainedRecordProvenance(db, t.did, t.collection, t.rkey)
             : null;
+      const anyUriCandidate = db.one(
+        'SELECT 1 AS hit FROM live_acceptance_candidates WHERE uri=? LIMIT 1',
+        t.recordUri ?? t.uri,
+      );
+      const replacementCandidate =
+        canonical === null &&
+        before !== null &&
+        priorIdentityKey !== undefined &&
+        priorIdentityKey !== identityKey &&
+        anyUriCandidate === null;
       const firstAdmission = admitProjectedIdentity(db, {
         did: t.did,
         identityKey,
@@ -377,6 +387,8 @@ function scrobbleVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, 
         path: additionAuthority(o.live, t.rev, cid) ? 'live' : 'snapshot',
         now,
       });
+      if (replacementCandidate && !additionAuthority(o.live, t.rev, cid))
+        db.run("UPDATE forward_admissions SET path='snapshot' WHERE did=? AND identity_key=?", t.did, identityKey);
       if (additionAuthority(o.live, t.rev, cid)) countLiveAdmission(db, 'addition_matched');
       db.run(
         `INSERT INTO scrobbles(uri, record_uri, listen_id, cid, did, rkey, revision, artist, track, album, listened_at, created_at,
@@ -470,7 +482,7 @@ function scrobbleVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, 
       }
       if (
         (ownedCandidate !== null || firstAdmission) &&
-        !legacyPresent &&
+        (!legacyPresent || replacementCandidate) &&
         knownListen === null &&
         localOperation?.origin !== 'import' &&
         (ownedCandidate !== null || !additionAuthority(o.live, t.rev, cid)) &&
@@ -716,12 +728,12 @@ function loveVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: A
       );
       db.run(
         `INSERT INTO loves(uri, did, rkey, cid, artist, track, album, artist_key, track_key, recording_mbid,
-           created_at, indexed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           created_at, indexed_at, revision)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(uri) DO UPDATE SET cid = excluded.cid, rkey = excluded.rkey, artist = excluded.artist,
            track = excluded.track, album = excluded.album, artist_key = excluded.artist_key,
            track_key = excluded.track_key, recording_mbid = excluded.recording_mbid,
-           created_at = excluded.created_at, indexed_at = excluded.indexed_at`,
+           created_at = excluded.created_at, indexed_at = excluded.indexed_at, revision = excluded.revision`,
         t.uri,
         t.did,
         t.rkey,
@@ -734,6 +746,7 @@ function loveVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: A
         row.recordingMbid,
         row.createdAt,
         toStorage(o.nowNs),
+        t.rev,
       );
       enqueueTrack(
         db,

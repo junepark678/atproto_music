@@ -149,6 +149,9 @@ function upsertHint(db: Db, h: HintInput): string {
       },
       h.receiptMs,
     );
+    const conflicted =
+      db.one<{ conflict_rev: string | null }>('SELECT conflict_rev FROM live_record_evidence WHERE uri=?', uri)
+        ?.conflict_rev === hintRev;
     authorizePendingRemovals(
       db,
       {
@@ -156,6 +159,7 @@ function upsertHint(db: Db, h: HintInput): string {
         rev: hintRev!,
         action: h.live.operation,
         ...(h.live.cid === undefined ? {} : { cid: h.live.cid }),
+        conflicted,
       },
       h.receiptMs,
     );

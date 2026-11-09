@@ -351,6 +351,8 @@ export interface LoveRow {
   /** 30-character storage timestamp. */
   created_at: string;
   indexed_at: string;
+  /** Repository revision that verified this projected love (nullable for pre-50 rows). */
+  revision: string | null;
 }
 
 export interface LinkedAccountRow {

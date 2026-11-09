@@ -16,6 +16,7 @@ import { applyRecordProof } from '../../../src/do/write/apply-record';
 import { executeListenRemovals } from '../../../src/forward/live-removal-effects';
 import { admitForwardIdentity, projectionListenKey } from '../../../src/forward/projection';
 import { enqueueForwards } from '../../../src/outbox/forward-enqueue';
+import { cleanupForwardAdmissionsForSuppression } from '../../../src/forward/projection';
 import {
   ALICE as DID,
   deleteProof,
@@ -465,5 +466,33 @@ it('executes one complete validator-sized 10,000-member container group in linea
       n: BATCH_MAX_LISTENS,
     });
     expect(statements).toBeLessThanOrEqual(BATCH_MAX_LISTENS * 5 + 20);
+  });
+});
+
+it('DID suppression cleanup removes only that DID’s pending authorization and event cursor', async () => {
+  await withMigratedDb((db) => {
+    seedUser(db, DID);
+    const otherDid = 'did:plc:bbbbbbbbbbbbbbbbbbbbbbbb';
+    seedUser(db, otherDid);
+    setup(db);
+    const otherUri = `at://${otherDid}/com.example.atmusic.scrobble/r2`;
+    const row = pending('1111111111111', '2222222222222');
+    recordPendingRemoval(db, row);
+    authorizePendingRemovals(db, { uri: URI, rev: '2222222222222', action: 'delete' }, NOW);
+    authorizePendingRemovals(db, { uri: otherUri, rev: '2222222222222', action: 'delete' }, NOW);
+
+    cleanupForwardAdmissionsForSuppression(db, DID);
+
+    expect(
+      db.one('SELECT count(*) AS n FROM live_pending_removals WHERE uri>=? AND uri<?', `at://${DID}/`, `at://${DID}0`),
+    ).toEqual({ n: 0 });
+    expect(
+      db.one(
+        'SELECT count(*) AS n FROM live_pending_removal_events WHERE uri>=? AND uri<?',
+        `at://${DID}/`,
+        `at://${DID}0`,
+      ),
+    ).toEqual({ n: 0 });
+    expect(db.one('SELECT count(*) AS n FROM live_pending_removal_events WHERE uri=?', otherUri)).toEqual({ n: 1 });
   });
 });

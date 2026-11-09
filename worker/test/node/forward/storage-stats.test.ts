@@ -75,6 +75,7 @@ describe('forward storage statistics refresh', () => {
           live_record_evidence: { rows: 1 },
           live_acceptance_candidates: { rows: 1 },
           live_pending_removals: { rows: 1 },
+          live_pending_removal_events: { rows: 0 },
         },
       });
     });
