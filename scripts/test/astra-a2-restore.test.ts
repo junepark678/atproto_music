@@ -724,7 +724,8 @@ it('independent signed settings suppression clears only A retained work and rest
  expect(delivered).toBe(1);
  await x.repo.delete(x.collection,x.rkey);const goneA=await x.proof();x.apply(x.db,goneA);
  await other.delete(x.collection,bobKey);const goneB=await verifyBob();x.apply(x.db,goneB);
- for(const [did,rkey,rev] of [[DID_A,x.rkey,goneA.commit.rev],[DID_B,bobKey,goneB.commit.rev]])enqueueHints(x.db,[{did,collection:x.collection,rkey,source:'jetstream',hintRev:rev,live:{operation:'delete'},receiptMs:x.world.clock.nowMs()}]);
+ const removals:Array<[string,string,string]>=[[DID_A,x.rkey,goneA.commit.rev],[DID_B,bobKey,goneB.commit.rev]];
+ for(const [did,rkey,rev] of removals)enqueueHints(x.db,[{did,collection:x.collection,rkey,source:'jetstream',hintRev:rev,live:{operation:'delete'},receiptMs:x.world.clock.nowMs()}]);
  expect(x.db.one('SELECT count(*) n FROM live_pending_removals')).toEqual({n:2});
  await x.repo.put(PREFIX+'.settings','self',{$type:PREFIX+'.settings',indexing:'disabled',createdAt:'2026-01-15T11:00:00Z'});
  const disabled=await verifyRecordProof(await x.repo.getRecordCar(PREFIX+'.settings','self'),{did:DID_A,collection:PREFIX+'.settings',rkey:'self',signingKey:x.repo.key.didKey});
