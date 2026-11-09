@@ -75,7 +75,7 @@ describe('migrate over node:sqlite', () => {
   it('migration 30 creates durable per-generation pull state, staging and tombstone tables', () => {
     const db = freshDb();
     migrate(db);
-    expect(SCHEMA_VERSION).toBe(52);
+    expect(SCHEMA_VERSION).toBe(53);
     for (const table of [
       'linked_pull_state',
       'linked_pull_items',

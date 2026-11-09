@@ -602,7 +602,7 @@ describe('worker/test/harness', () => {
   it('the migration ledger is ordered across the N/M, M4, S1, S2, S3 and S4 stack', async () => {
     const versions = MIGRATIONS.map((m) => m.version);
     expect(versions.slice(0, 14)).toEqual(Array.from({ length: 14 }, (_, i) => i + 1));
-    expect(versions.slice(-20)).toEqual(Array.from({ length: 20 }, (_, i) => i + 33));
+    expect(versions.slice(-21)).toEqual(Array.from({ length: 21 }, (_, i) => i + 33));
     expect(versions.every((version, index) => index === 0 || version > (versions[index - 1] ?? 0))).toBe(true);
     expect(SCHEMA_VERSION).toBe(MIGRATIONS[MIGRATIONS.length - 1]?.version);
     expect(MIGRATIONS.length).toBeGreaterThanOrEqual(2);
@@ -727,7 +727,8 @@ describe('worker/test/harness', () => {
           table === 'linked_pull_receipt_seed' ||
           table === 'linked_pull_projection_scan' ||
           table === 'live_pending_removal_events' ||
-          table === 'live_pending_removal_reconcile'
+          table === 'live_pending_removal_reconcile' ||
+          table === 'live_pending_removal_retention_epoch'
         )
           continue;
         expect([table, rowCount(db, table)]).not.toEqual([table, 0]);
