@@ -100,6 +100,62 @@ it.each(
   });
 });
 
+it.each(['valid-before-conflict', 'valid-after-conflict', 'no-alternative', 'ineligible-alternative'] as const)(
+  'reconsiders retained authorizations after conflict: %s',
+  async (order) => {
+    const repo = await repoFor('alice');
+    const first = await putProof(repo, SCROBBLE, 'a', record);
+    const older = await deleteProof(repo, SCROBBLE, 'a');
+    const middle = await putProof(repo, SCROBBLE, 'a', scrobble({ artist: 'Other', track: 'Middle' }));
+    const newer = await deleteProof(repo, SCROBBLE, 'a');
+    if (first.state !== 'present' || middle.state !== 'present') throw new Error('expected present fixture proofs');
+    await withMigratedDb(async (db) => {
+      seedLink(db);
+      expect(db.tx(() => applyRecordProof(db, first, live(db, first))).outcome).toBe('applied');
+      delivered(db);
+      expect(db.tx(() => applyRecordProof(db, newer, OPTS)).outcome).toBe('absent');
+      const event = (rev: string, operation: 'delete' | 'update', cid?: string) =>
+        enqueueHints(db, [
+          {
+            did: ALICE,
+            collection: SCROBBLE,
+            rkey: 'a',
+            source: 'jetstream',
+            hintRev: rev,
+            live: { operation, cid },
+            receiptMs: NOW_MS,
+          },
+        ]);
+      event(older.commit.rev, 'delete');
+      event(middle.commit.rev, 'update', middle.cid);
+      event(middle.commit.rev, 'update', first.cid);
+      if (order === 'valid-before-conflict') event(newer.commit.rev, 'delete');
+      event(older.commit.rev, 'update', first.cid);
+      if (order === 'valid-after-conflict') event(newer.commit.rev, 'delete');
+      if (order === 'ineligible-alternative') event(newer.commit.rev, 'update', middle.cid);
+      const originalExpiry = db.one<{ expires_at_ms: number }>(
+        'SELECT expires_at_ms FROM live_pending_removals',
+      )!.expires_at_ms;
+      for (let i = 0; i < 5; i++) sweep(db);
+      const validAlternative = order === 'valid-before-conflict' || order === 'valid-after-conflict';
+      expect((await drain(db)).deletes).toBe(validAlternative ? 1 : 0);
+      if (!validAlternative) {
+        expect(db.one('SELECT authorized_rev,expires_at_ms FROM live_pending_removals')).toEqual({
+          authorized_rev: null,
+          expires_at_ms: originalExpiry,
+        });
+        expect(
+          db.one(
+            'SELECT 1 FROM live_pending_removal_events WHERE uri=? AND rev=? AND conflicted=1',
+            uri('a'),
+            older.commit.rev,
+          ),
+        ).not.toBeNull();
+      }
+    });
+  },
+);
+
 function seedLink(db: Db) {
   seedUser(db, ALICE);
   const accountDeps: Pick<CredentialDeps, 'db' | 'clock'> = { db, clock: { nowMs: () => NOW_MS } };

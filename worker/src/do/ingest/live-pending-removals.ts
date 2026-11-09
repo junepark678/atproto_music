@@ -533,7 +533,34 @@ function processGroup(db: Db, group: PendingGroup, nowMs: number, random: Random
     group.conflicted_auth_rev === group.authorized_rev ||
     evidence?.conflict_rev === group.authorized_rev
   ) {
-    deleteGroup(db, group);
+    // Reject this authorization, not the verified removal observation. Other
+    // retained events may already have completed their event-to-window scan
+    // while this authorization was still valid, so reconsider them in bounded
+    // window-to-event pages before waiting for any new event.
+    db.run(
+      `UPDATE live_pending_removals SET authorized_rev=NULL,conflict_invalidated=0
+       WHERE uri=? AND kind=? AND window_lo=? AND window_hi=? AND replaced_by_cid=? AND authorized_rev=?`,
+      group.uri,
+      group.kind,
+      group.window_lo,
+      group.window_hi,
+      group.replaced_by_cid,
+      group.authorized_rev,
+    );
+    db.run(
+      `INSERT INTO live_pending_removal_reconcile
+       (uri,window_lo,window_hi,replaced_by_cid,cursor_rev,next_due_ms,created_at_ms)
+       VALUES(?,?,?,?,?,?,?)
+       ON CONFLICT(uri,window_lo,window_hi,replaced_by_cid) DO UPDATE SET
+         cursor_rev=excluded.cursor_rev,next_due_ms=excluded.next_due_ms`,
+      group.uri,
+      group.window_lo,
+      group.window_hi,
+      group.replaced_by_cid,
+      group.window_lo,
+      nowMs,
+      nowMs,
+    );
     countLiveAdmission(db, 'pending_conflict');
     return 0;
   }
