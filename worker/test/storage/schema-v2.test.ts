@@ -1707,6 +1707,12 @@ async function inDb<T>(name: string, fn: (db: Db) => T): Promise<T> {
   return fn(fileIndexes().get(name));
 }
 
+// Build this fresh latest-schema fixture during module setup. The shape test
+// below checks the complete migration output; keeping the historical 1→current
+// bootstrap out of its 5s assertion window avoids making test scheduling part
+// of the schema contract.
+const schemaV2ShapeReady = inDb('schema-v2-shape', () => undefined);
+
 /** Wipe the named database and apply migration 1 only: a database written by version-1 code. */
 async function resetToV1(name: string): Promise<unknown> {
   return migrate(fileIndexes().reset(name), MIGRATIONS.slice(0, 1));
@@ -1840,6 +1846,7 @@ const UNIQUE_FAILED = /UNIQUE constraint failed/;
 
 describe('schema v2 (ADR 0005 §6.4)', () => {
   it('migration 2 creates exactly the ADR 0005 §6.4 tables, scrobbles columns and indexes, and TABLES lists every table', async () => {
+    await schemaV2ShapeReady;
     const v1Name = 'schema-v2-shape-v1';
     expect(await resetToV1(v1Name)).toEqual({ status: 'ready', version: 1 });
     const v1 = await inDb(v1Name, (db) => ({
