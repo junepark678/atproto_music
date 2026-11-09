@@ -4,12 +4,14 @@ import { seededRandom } from '@atmusic/core/test-support/random';
 import { expect, it } from 'vitest';
 import type { CredentialDeps } from '../../src/credentials/accounts';
 import { ensureAccount } from '../../src/credentials/accounts';
+import type { Box } from '../../src/crypto/box';
 import type { ModuleDeps } from '../../src/do/contracts';
 import type { Db } from '../../src/do/db';
 import { applyRecordProof } from '../../src/do/write/apply-record';
 import { enqueueListenDelete, hasCanonicalListenSurvivor } from '../../src/forward/delete-enqueue';
 import type { DeleteForwardDeps } from '../../src/forward/delete-forwarder';
 import { runDeleteSlice } from '../../src/forward/delete-forwarder';
+import type { ListenbrainzClient } from '../../src/forward/listenbrainz-client';
 import { projectionListenKey } from '../../src/forward/projection';
 import { UpstreamPacing } from '../../src/forward/upstream-pacing';
 import { enqueueBatchListenDelete } from '../../src/outbox/batch-delete-ops';
@@ -36,13 +38,8 @@ const identity = projectionListenKey(ALICE, record.listenedAt as string, artistK
 const live = { ...OPTS, forwarding: { random: seededRandom(619) } };
 function seedLink(db: Db) {
   seedUser(db, ALICE);
-  ensureAccount(
-    { db, clock: { nowMs: () => NOW_MS } satisfies Pick<CredentialDeps, 'db' | 'clock'> },
-    {
-      did: ALICE,
-      verifiedHandle: null,
-    },
-  );
+  const accountDeps: Pick<CredentialDeps, 'db' | 'clock'> = { db, clock: { nowMs: () => NOW_MS } };
+  ensureAccount(accountDeps, { did: ALICE, verifiedHandle: null });
   db.run(
     `INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,created_at_ms,updated_at_ms)
     VALUES ('replacement-link',?,'listenbrainz','alice',X'00','fixture',?,?)`,
@@ -104,7 +101,7 @@ async function drain(db: Db) {
     db,
     clock,
     random: seededRandom(9),
-    box: { openText: () => 'fixture' },
+    box: { openText: () => 'fixture' } as unknown as Box,
     pacing: new UpstreamPacing(clock as Clock),
     client: {
       listWindowPage: async () => {
@@ -117,9 +114,9 @@ async function drain(db: Db) {
       },
       deleteListen: async () => {
         deletes++;
-        return { ok: true, rate: { remaining: 100, resetInS: 0 } };
+        return { ok: true, accepted: true, rate: { remaining: 100, resetInS: 0 } };
       },
-    },
+    } as unknown as ListenbrainzClient,
   };
   for (let i = 0; i < 12; i++) {
     await runDeleteSlice(deps);
