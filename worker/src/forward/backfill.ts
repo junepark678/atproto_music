@@ -9,6 +9,7 @@ import type { Db } from '../do/db';
 import { matchedRecordingMbid } from '../musicbrainz/store';
 import { ensureLegacyLoveIncarnation } from './love-incarnation';
 import { latestExplicitLoveIntent } from './love-intent';
+import { resolveLoveRecording } from './love-recording';
 import { enqueueForwards } from '../outbox/forward-enqueue';
 import type { ForwardRuntime } from './forwarder';
 import { projectionListenKey } from './projection';
@@ -196,14 +197,24 @@ function payloadForHistoryRow(
     if (marker?.path === 'import' && sourceService(marker.source_service) === link.service) return null;
   }
   if (marker !== null && marker.admission_seq > link.generation_start_seq && marker.path !== 'snapshot') return null;
+  const loveResolution =
+    row.kind === 'love' && row.recording_mbid === null
+      ? resolveLoveRecording(db, {
+          artist: row.artist,
+          track: row.track,
+          ...(row.album ? { album: row.album } : {}),
+        })
+      : null;
   const mbid =
-    row.recording_mbid ??
-    matchedRecordingMbid(db, {
-      artistKey: row.artist_key,
-      trackKey: row.track_key,
-      albumKey: row.album_key ?? (row.album ? albumKey(row.artist, row.album)?.[1] : undefined),
-    });
-  if (row.kind === 'love' && link.service === 'listenbrainz' && mbid === null) return null;
+    row.kind === 'love'
+      ? (row.recording_mbid ?? (loveResolution && 'mbid' in loveResolution ? loveResolution.mbid : null))
+      : matchedRecordingMbid(db, {
+          artistKey: row.artist_key,
+          trackKey: row.track_key,
+          albumKey: row.album_key ?? (row.album ? albumKey(row.artist, row.album)?.[1] : undefined),
+        });
+  if (row.kind === 'love' && link.service === 'listenbrainz' && loveResolution && 'terminal' in loveResolution)
+    return null;
   if (row.kind === 'scrobble') {
     const listenedAt = row.listened_at as string;
     return {

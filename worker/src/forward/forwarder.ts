@@ -91,6 +91,7 @@ import {
   holdLinkRows,
   lastfmKeyRejectedAt,
   lovePayload,
+  loveRowOrigin,
   markLastfmKeyRejected,
   nextUtcMidnight,
   nowPlayingPayload,
@@ -125,6 +126,7 @@ import {
   UNKEYED_SQL,
 } from './love-lanes';
 import { indexForwardLoveTarget, indexLoveOperationTarget, normalizeForwardLoveKeys } from './love-recording-targets';
+import { loveFallbackKey, lovePrimaryKey, resolveLoveRecording } from './love-recording';
 import { refreshForwardStorageStats } from './storage-stats';
 import { LASTFM_MIN_INTERVAL_MS, listenbrainzPacingKey, type UpstreamPacing } from './upstream-pacing';
 
@@ -442,20 +444,34 @@ function loveJob(rt: ForwardRuntime, link: LinkRow, now: number, budget: { remai
             rt.db.run('UPDATE forward_love_lanes SET due_at=? WHERE rowid=?', next, lane.rowid);
             continue;
           }
-          const local = known.mbid ?? matchedRecordingMbid(rt.db, key);
+          const isBackfillLove = head.kind === 'love' && loveRowOrigin(head) === 'backfill';
+          const backfillResolution = isBackfillLove ? resolveLoveRecording(rt.db, entry[1]) : null;
+          const local =
+            known.mbid ??
+            (backfillResolution && 'mbid' in backfillResolution
+              ? backfillResolution.mbid
+              : matchedRecordingMbid(rt.db, key));
           if (local === null) {
+            const primaryKey = isBackfillLove ? lovePrimaryKey(entry[1]) : key;
             const resolved = rt.db.one<{ status: string }>(
               'SELECT status FROM mb_tracks WHERE artist_key=? AND track_key=? AND album_key=?',
-              key.artistKey,
-              key.trackKey,
-              key.albumKey ?? '',
+              primaryKey.artistKey,
+              primaryKey.trackKey,
+              primaryKey.albumKey ?? '',
             );
-            if (resolved?.status === 'unmatched') {
+            if (
+              (isBackfillLove && backfillResolution && 'terminal' in backfillResolution) ||
+              (!isBackfillLove && resolved?.status === 'unmatched')
+            ) {
               settleRows(rt.db, [head.id], 'ignored', now, 'no_recording_mbid', false);
               refreshLoveLane(rt.db, link.id, link.generation, lane.love_artist_key, lane.love_track_key);
               continue;
             }
-            enqueueTrack(rt.db, key, now);
+            enqueueTrack(rt.db, primaryKey, now);
+            if (isBackfillLove && resolved?.status === 'unmatched') {
+              const fallback = loveFallbackKey(entry[1]);
+              if (fallback !== null) enqueueTrack(rt.db, fallback, now);
+            }
             const deadline = head.created_at_ms + 24 * 60 * 60 * 1000;
             if (now >= deadline) {
               settleRows(rt.db, [head.id], 'ignored', now, 'mbid_unresolved', false);

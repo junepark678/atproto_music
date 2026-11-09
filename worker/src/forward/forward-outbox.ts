@@ -195,6 +195,12 @@ export function lovePayload(row: Pick<ForwardOutboxRow, 'payload_json'>): Forwar
   return isObject(doc) ? trackOf(doc) : null;
 }
 
+/** Whether a queued love came from historical backfill (scoped consumer policy). */
+export function loveRowOrigin(row: Pick<ForwardOutboxRow, 'payload_json'>): string | null {
+  const doc = parseJson(row.payload_json);
+  return isObject(doc) && typeof doc.origin === 'string' ? doc.origin : null;
+}
+
 // ---------------------------------------------------------------------------
 // Reading rows
 
