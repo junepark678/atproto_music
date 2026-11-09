@@ -607,3 +607,104 @@ it('fresh: production SQL bounds equal-hi tail seeks, event readiness, and retai
     expect(queuedRetentionPlan).toContain('listenbrainz_deletes_authorization');
   });
 });
+
+it('fresh: authorization cursor transaction rollback retries the same page, including a window inserted between pages', async () => {
+  await withMigratedDb(async (db) => {
+    seedLink(db);
+    const eventUri = uri('cursor-fault-interleave');
+    const eventRev = '3333333333333';
+    const eventHi = 'zzzzzzzzzzzzz';
+    for (let i = 0; i < 130; i++) {
+      const lo = String(i).padStart(13, '0');
+      db.run(
+        `INSERT INTO live_pending_removals
+         (uri,member_uri,removed_cid,kind,window_lo,window_hi,replaced_by_cid,identity_key,listened_at,
+          artist_key,track_key,artist,track,authorized_rev,created_at_ms,expires_at_ms)
+         VALUES(?,?,'old','scrobble',?,?,'wrong',?,1,'artist','track','Artist','Track',NULL,?,?)`,
+        eventUri,
+        `initial-${lo}`,
+        lo,
+        eventHi,
+        `identity-${lo}`,
+        NOW_MS,
+        NOW_MS + LIVE_EVIDENCE_TTL_MS,
+      );
+    }
+    db.run(
+      `INSERT INTO live_pending_removal_events(uri,rev,action,cid,conflicted,scan_complete,created_at_ms,expires_at_ms,cleanup_due_ms)
+       VALUES(?,?,'delete','',0,0,?,?,?)`,
+      eventUri,
+      eventRev,
+      NOW_MS,
+      NOW_MS + LIVE_EVIDENCE_TTL_MS,
+      NOW_MS + LIVE_EVIDENCE_TTL_MS,
+    );
+    let failCursorWrite = true;
+    const faulted: Db = {
+      all: db.all.bind(db),
+      one: db.one.bind(db),
+      tx: (fn) => db.tx(fn),
+      run(sql, ...params) {
+        if (failCursorWrite && sql.includes('UPDATE live_pending_removal_events SET\n       cursor_window_hi')) {
+          failCursorWrite = false;
+          throw new Error('injected authorization cursor write failure');
+        }
+        return db.run(sql, ...params);
+      },
+    };
+    expect(() =>
+      db.tx(() => executeAuthorizedRemovals(faulted, { nowMs: NOW_MS, random: seededRandom(0xa2), limit: 0 })),
+    ).toThrow('injected authorization cursor write failure');
+    expect(
+      db.one(
+        'SELECT cursor_window_hi,cursor_window_lo,scan_complete FROM live_pending_removal_events WHERE uri=?',
+        eventUri,
+      ),
+    ).toEqual({ cursor_window_hi: '', cursor_window_lo: '', scan_complete: 0 });
+    expect(db.one('SELECT count(*) AS n FROM live_pending_removals WHERE authorized_rev IS NOT NULL')).toEqual({
+      n: 0,
+    });
+
+    db.tx(() => executeAuthorizedRemovals(db, { nowMs: NOW_MS, random: seededRandom(0xa2), limit: 0 }));
+    expect(
+      db.one('SELECT cursor_window_hi,scan_complete FROM live_pending_removal_events WHERE uri=?', eventUri),
+    ).toEqual({
+      cursor_window_hi: eventHi,
+      scan_complete: 0,
+    });
+    const inserted = uri('interleaved-window');
+    recordPendingRemoval(db, {
+      did: ALICE,
+      uri: eventUri,
+      kind: 'scrobble',
+      row: {
+        uri: inserted,
+        record_uri: null,
+        listen_id: null,
+        cid: 'old',
+        listened_at: record.listenedAt as string,
+        artist_key: artistKey,
+        track_key: musicTrackKey,
+        artist: 'Björk',
+        track: 'Jóga',
+        recording_mbid: null,
+      },
+      identityKey: identity,
+      windowLo: '2222222222222',
+      windowHi: '4444444444444',
+      replacedByCid: 'match',
+      nowMs: NOW_MS,
+    });
+    expect(
+      db.one('SELECT authorized_rev FROM live_pending_removals WHERE uri=? AND member_uri=?', eventUri, inserted),
+    ).toEqual({ authorized_rev: eventRev });
+    for (let i = 0; i < 3; i++)
+      db.tx(() => executeAuthorizedRemovals(db, { nowMs: NOW_MS, random: seededRandom(0xa2), limit: 0 }));
+    expect(db.one('SELECT scan_complete FROM live_pending_removal_events WHERE uri=?', eventUri)).toEqual({
+      scan_complete: 1,
+    });
+    expect(
+      db.one('SELECT authorized_rev FROM live_pending_removals WHERE uri=? AND member_uri=?', eventUri, inserted),
+    ).toEqual({ authorized_rev: eventRev });
+  });
+});
