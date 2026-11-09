@@ -696,3 +696,24 @@ it('batches artist consensus across 1,000 candidate artists with bounded SQL gro
   const plan = app.db.all<{ detail: string }>(`EXPLAIN QUERY PLAN ${consensusSql}`, ...consensusParams);
   expect(plan.some((row) => row.detail.includes('SEARCH m'))).toBe(true);
 });
+
+it('keeps submitted name-based artist and album IDs independent of cached consensus reads', async () => {
+  const app = await entityApp();
+  const ak = artistKey('Radiohead');
+  app.db.run('UPDATE scrobbles SET artist_mbids=?,release_mbid=? WHERE artist_key=?', JSON.stringify([M]), N, ak);
+  app.db.run("UPDATE mb_tracks SET status='matched',artist_mbids='invalid-cache-json' WHERE artist_key=?", ak);
+  const spy = vi.spyOn(app.db, 'all');
+  const artist = await get(app, { method: 'artist.getInfo', artist: 'Radiohead' });
+  const album = await get(app, { method: 'album.getInfo', artist: 'Radiohead', album: 'OK Computer' });
+  const consensusReads = spy.mock.calls.filter(
+    ([sql]) =>
+      sql.includes('SELECT DISTINCT j.value AS value FROM mb_tracks') ||
+      sql.includes('SELECT DISTINCT release_mbid AS value FROM mb_tracks'),
+  );
+  spy.mockRestore();
+  expect(artist.status).toBe(200);
+  expect(artist.body.artist.mbid).toBe(M);
+  expect(album.status).toBe(200);
+  expect(album.body.album.mbid).toBe(N);
+  expect(consensusReads).toHaveLength(0);
+});

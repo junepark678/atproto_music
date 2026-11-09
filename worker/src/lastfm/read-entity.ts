@@ -116,23 +116,22 @@ function forwardTrackMbid(deps: ModuleDeps, display: ScrobbleRowV2): string {
   );
 }
 
-function forwardArtistMbid(
-  deps: ModuleDeps,
-  display: ScrobbleRowV2,
-  consensus = matchedEntityMbid(deps.db, 'artist', display.artist_key),
-): string {
-  return firstArtistMbid(display.artist_mbids) || consensus || '';
+function forwardArtistMbid(deps: ModuleDeps, display: ScrobbleRowV2, consensus?: string | null): string {
+  return (
+    firstArtistMbid(display.artist_mbids) ||
+    (consensus === undefined ? matchedEntityMbid(deps.db, 'artist', display.artist_key) : consensus) ||
+    ''
+  );
 }
 
-function forwardAlbumMbid(
-  db: ModuleDeps['db'],
-  display: ScrobbleRowV2,
-  consensus = matchedEntityMbid(db, 'release', {
-    artistKey: display.artist_key,
-    albumKey: display.album_key ?? '',
-  }),
-): string {
-  return display.release_mbid || consensus || '';
+function forwardAlbumMbid(db: ModuleDeps['db'], display: ScrobbleRowV2, consensus?: string | null): string {
+  return (
+    display.release_mbid ||
+    (consensus === undefined
+      ? matchedEntityMbid(db, 'release', { artistKey: display.artist_key, albumKey: display.album_key ?? '' })
+      : consensus) ||
+    ''
+  );
 }
 
 function enrichedTrackWhere(call: LastfmCall, mbid: string): Where | null {
