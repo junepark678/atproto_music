@@ -568,6 +568,12 @@ export function disconnectLocally(
       'DELETE FROM forward_love_recording_targets WHERE link_id IN (SELECT id FROM linked_accounts WHERE did = ?)',
       did,
     );
+    db.run(
+      `DELETE FROM forward_unlove_lookup_progress WHERE unlove_rowid IN (
+        SELECT rowid FROM forward_outbox WHERE did=? AND kind='unlove'
+      )`,
+      did,
+    );
     add(
       'forward_outbox',
       db.run('DELETE FROM forward_outbox WHERE link_id IN (SELECT id FROM linked_accounts WHERE did = ?)', did)
