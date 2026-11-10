@@ -95,6 +95,18 @@ const TABLES = [
     columns: ['id', 'link_id', 'did', 'kind', 'dedupe_key', 'payload_json', 'state', 'last_error'],
     marker: false,
   },
+  {
+    key: 'forward_receipts',
+    primaryKey: ['link_id', 'generation', 'kind', 'dedupe_key'],
+    columns: ['link_id', 'kind', 'dedupe_key'],
+    marker: false,
+  },
+  {
+    key: 'forward_link_gaps',
+    primaryKey: ['link_id', 'generation', 'from_seq'],
+    columns: ['link_id', 'reason'],
+    marker: false,
+  },
 ] as const;
 
 type TableKey = (typeof TABLES)[number]['key'];
@@ -131,13 +143,13 @@ function writeCounter(db: Db, label: string, value: number): void {
 
 function scanTablePage(db: Db, table: (typeof TABLES)[number], progress: ProgressRow): boolean {
   const columns = [...table.primaryKey];
-  const cursor = progress.cursor_json === null ? null : (JSON.parse(progress.cursor_json) as string[]);
+  const cursor = progress.cursor_json === null ? null : (JSON.parse(progress.cursor_json) as Array<string | number>);
   if (cursor !== null && cursor.length !== columns.length)
     throw new Error(`invalid forwarding scan cursor for ${table.key}`);
 
   const bytes = table.columns.map((column) => `coalesce(length(CAST(${column} AS BLOB)),0)`).join(' + ');
   const keyset = cursor === null ? '' : `WHERE (${columns.join(',')}) > (${columns.map(() => '?').join(',')})`;
-  const rows = db.all<Record<string, string> & { logical_bytes_estimate: number }>(
+  const rows = db.all<Record<string, string | number> & { logical_bytes_estimate: number }>(
     `SELECT ${columns.join(',')},(${bytes}) AS logical_bytes_estimate FROM ${table.key}
      ${keyset} ORDER BY ${columns.join(',')} LIMIT ?`,
     ...(cursor ?? []),

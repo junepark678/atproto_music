@@ -1597,6 +1597,32 @@ const MIGRATION_LOVE_IMPORT_BRIDGE_SOURCE_CLASS: Migration = {
   ],
 };
 
+const MIGRATION_LINK_COVERAGE_RECEIPTS: Migration = {
+  version: 55,
+  name: 'link_coverage_receipts',
+  statements: [
+    `CREATE TABLE forward_receipts (
+      link_id TEXT NOT NULL REFERENCES linked_accounts(id) ON DELETE CASCADE,
+      generation INTEGER NOT NULL,
+      kind TEXT NOT NULL CHECK(kind IN ('scrobble','love','unlove')),
+      dedupe_key TEXT NOT NULL,
+      created_at_ms INTEGER NOT NULL,
+      retired_at_ms INTEGER,
+      PRIMARY KEY(link_id,generation,kind,dedupe_key)
+    )`,
+    `CREATE TABLE forward_link_gaps (
+      link_id TEXT NOT NULL REFERENCES linked_accounts(id) ON DELETE CASCADE,
+      generation INTEGER NOT NULL,
+      from_seq INTEGER NOT NULL CHECK(from_seq>=0),
+      to_seq INTEGER CHECK(to_seq IS NULL OR to_seq>from_seq),
+      reason TEXT NOT NULL CHECK(reason IN ('disabled','revoked','legacy')),
+      opened_at_ms INTEGER NOT NULL,
+      closed_at_ms INTEGER,
+      PRIMARY KEY(link_id,generation,from_seq)
+    )`,
+  ],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
   MIGRATION_2,
@@ -1652,6 +1678,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_A2_AUTHORIZATION_BINDING,
   MIGRATION_A2_RETENTION_EPOCH,
   MIGRATION_LOVE_IMPORT_BRIDGE_SOURCE_CLASS,
+  MIGRATION_LINK_COVERAGE_RECEIPTS,
 ];
 
 /** The schema version this code expects. */
@@ -1754,6 +1781,9 @@ export const TABLES = [
   'linked_pull_receipt_seed',
   'linked_pull_projection_scan',
   'linked_pull_love_admissions',
+  // Migration 55.
+  'forward_receipts',
+  'forward_link_gaps',
 ] as const;
 
 export type TableName = (typeof TABLES)[number];
@@ -1855,4 +1885,6 @@ export const TABLE_CLASS: Readonly<Record<TableName, TableClass>> = {
   linked_pull_receipt_seed: 'non-derived',
   linked_pull_projection_scan: 'non-derived',
   linked_pull_love_admissions: 'non-derived',
+  forward_receipts: 'non-derived',
+  forward_link_gaps: 'non-derived',
 };

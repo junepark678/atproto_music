@@ -75,7 +75,7 @@ describe('migrate over node:sqlite', () => {
   it('migration 30 creates durable per-generation pull state, staging and tombstone tables', () => {
     const db = freshDb();
     migrate(db);
-    expect(SCHEMA_VERSION).toBe(54);
+    expect(SCHEMA_VERSION).toBe(55);
     for (const table of [
       'linked_pull_state',
       'linked_pull_items',
@@ -139,7 +139,7 @@ describe('migrate over node:sqlite', () => {
       );
     }
     const before = db.all('SELECT * FROM love_import_bridges ORDER BY operation_id');
-    expect(migrate(db)).toEqual({ status: 'ready', version: 54 });
+    expect(migrate(db, MIGRATIONS.slice(0, 54))).toEqual({ status: 'ready', version: 54 });
     expect(db.all('SELECT * FROM love_import_bridges ORDER BY operation_id')).toEqual(before);
     const plan = db
       .all<{ detail: string }>(
@@ -156,6 +156,34 @@ describe('migrate over node:sqlite', () => {
       .join(' | ');
     expect(plan).toContain('COVERING INDEX love_import_bridges_source_class');
     expect(plan).toContain('<expr>=?');
+  });
+
+  it('migration 55 upgrades populated v54 links and outbox without seeding coverage state', () => {
+    const db = freshDb();
+    expect(migrate(db, MIGRATIONS.slice(0, 54))).toEqual({ status: 'ready', version: 54 });
+    db.run(
+      `INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,created_at_ms,updated_at_ms)
+       VALUES('active','did:plc:alice','lastfm','alice',X'00','key',1,1),
+             ('disabled','did:plc:bob','listenbrainz','bob',X'00','key',2,2),
+             ('revoked','did:plc:carol','lastfm','carol',X'00','key',3,3)`,
+    );
+    db.run("UPDATE linked_accounts SET forward_scrobbles=0 WHERE id='disabled'");
+    db.run("UPDATE linked_accounts SET status='revoked' WHERE id='revoked'");
+    for (const [id, linkId] of [['f-active', 'active'], ['f-disabled', 'disabled'], ['f-revoked', 'revoked']]) {
+      db.run(
+        `INSERT INTO forward_outbox(id,link_id,did,kind,dedupe_key,payload_json,state,attempts,due_at,created_at_ms,updated_at_ms)
+         VALUES(?,?,?,'scrobble',?,'{}','sent',0,1,1,1)`,
+        id,
+        linkId,
+        `did:plc:${linkId}`,
+        id,
+      );
+    }
+    const before = db.all('SELECT id,link_id,generation,kind,dedupe_key,payload_json,state,created_at_ms FROM forward_outbox ORDER BY id');
+    expect(migrate(db)).toEqual({ status: 'ready', version: 55 });
+    expect(db.all('SELECT id,link_id,generation,kind,dedupe_key,payload_json,state,created_at_ms FROM forward_outbox ORDER BY id')).toEqual(before);
+    expect(db.all('SELECT * FROM forward_receipts')).toEqual([]);
+    expect(db.all('SELECT * FROM forward_link_gaps')).toEqual([]);
   });
 
   it('all MIGRATIONS apply in one transaction on a fresh file and schema_migrations lists every version', () => {

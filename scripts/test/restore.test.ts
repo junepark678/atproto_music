@@ -616,6 +616,8 @@ describe('restore.ts', () => {
     expect(TABLE_CLASS.live_pending_removals).toBe('non-derived');
     expect(TABLE_CLASS.live_pending_removal_events).toBe('non-derived');
     expect(TABLE_CLASS.live_pending_removal_reconcile).toBe('non-derived');
+    expect(TABLE_CLASS.forward_receipts).toBe('non-derived');
+    expect(TABLE_CLASS.forward_link_gaps).toBe('non-derived');
     const systemd = new FakeSystemd(world, { servicePort: null });
     await systemd.boot();
     const result = await restoreCli(world, systemd, [...baseArgs(world), '--no-ready-check']);

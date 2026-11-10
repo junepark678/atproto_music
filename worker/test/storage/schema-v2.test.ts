@@ -90,6 +90,14 @@ interface ExpectedTable {
 }
 
 const NEW_TABLES: Record<string, ExpectedTable> = {
+  forward_receipts: {
+    columns: ['link_id', 'generation', 'kind', 'dedupe_key', 'created_at_ms', 'retired_at_ms'],
+    pk: ['link_id', 'generation', 'kind', 'dedupe_key'],
+  },
+  forward_link_gaps: {
+    columns: ['link_id', 'generation', 'from_seq', 'to_seq', 'reason', 'opened_at_ms', 'closed_at_ms'],
+    pk: ['link_id', 'generation', 'from_seq'],
+  },
   live_record_evidence: {
     columns: [
       'uri',
@@ -1630,6 +1638,8 @@ const NEW_INDEXES: Record<string, [string, number, number, Array<[string | null,
 
 /** Foreign keys in the additive schema: [table, from, parent, to, on_delete]. */
 const NEW_FOREIGN_KEYS = [
+  ['forward_receipts', 'link_id', 'linked_accounts', 'id', 'CASCADE'],
+  ['forward_link_gaps', 'link_id', 'linked_accounts', 'id', 'CASCADE'],
   ['listenbrainz_deletes', 'link_id', 'linked_accounts', 'id', 'CASCADE'],
   ['mb_forward_love_current', 'link_id', 'linked_accounts', 'id', 'CASCADE'],
   ['loves', 'did', 'users', 'did', 'CASCADE'],
@@ -2272,6 +2282,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       "52|'a2_authorization_binding'",
       "53|'a2_retention_epoch'",
       "54|'love_import_bridges_source_class'",
+      "55|'link_coverage_receipts'",
     ]);
     // The new scrobble columns exist and are NULL on every migrated row.
     expect(after.newColumns).toHaveLength(expectedScrobbles);
@@ -2333,6 +2344,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       { version: 52, name: 'a2_authorization_binding' },
       { version: 53, name: 'a2_retention_epoch' },
       { version: 54, name: 'love_import_bridges_source_class' },
+      { version: 55, name: 'link_coverage_receipts' },
     ]);
     expect(after.compat).toEqual([{ singleton: 1, min_compatible_version: 2 }]);
     expect(after.newTablesEmpty).toEqual(['mb_cover_art_usage']);
