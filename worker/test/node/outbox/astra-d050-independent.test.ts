@@ -438,59 +438,72 @@ it.each(['listenbrainz', 'lastfm'] as const)(
   },
 );
 
-it('keeps a revoked ListenBrainz love authoritative while an unlove waits, then sends it once after same-remote relink', async () => {
-  await withMigratedDb(async (db) => {
-    seedLink(db);
-    const payload = { artist: 'Revoked Resume Artist', track: 'Revoked Resume Track', recordingMbid: REVIVAL_MBID };
-    expect(
-      enqueueForwards(db, {
-        did: ALICE,
-        items: [{ kind: 'love', operationId: 'revoked-resume-love', payload }],
-        now: NOW_MS,
-        random: rng,
-      }),
-    ).toBe(1);
-    expect((await forward(db)).feedbacks).toEqual([{ recordingMbid: REVIVAL_MBID, score: 1 }]);
+it.each(['listenbrainz', 'lastfm'] as const)(
+  'keeps a revoked %s love authoritative while an unlove waits, then sends it once after same-remote relink',
+  async (service) => {
+    await withMigratedDb(async (db) => {
+      seedLink(db);
+      db.run('UPDATE linked_accounts SET service=? WHERE id=?', service, 'replacement-link');
+      const payload = { artist: 'Revoked Resume Artist', track: 'Revoked Resume Track', recordingMbid: REVIVAL_MBID };
+      expect(
+        enqueueForwards(db, {
+          did: ALICE,
+          items: [{ kind: 'love', operationId: 'revoked-resume-love', payload }],
+          now: NOW_MS,
+          random: rng,
+        }),
+      ).toBe(1);
+      const expectedLove =
+        service === 'listenbrainz'
+          ? { recordingMbid: REVIVAL_MBID, score: 1 }
+          : { recordingMbid: 'track.love', score: 0 };
+      const expectedUnlove =
+        service === 'listenbrainz'
+          ? { recordingMbid: REVIVAL_MBID, score: 0 }
+          : { recordingMbid: 'track.unlove', score: 0 };
+      expect((await forward(db)).feedbacks).toEqual([expectedLove]);
 
-    const link = db.one<{ id: string; generation: number; credential_ciphertext: ArrayBuffer }>(
-      'SELECT id,generation,credential_ciphertext FROM linked_accounts WHERE id=?',
-      'replacement-link',
-    )!;
-    expect(revokeLink(db, link, 'credential_revoked', NOW_MS + 1)).toBe(true);
-    expect(holdLinkRows(db, link.id, NOW_MS + 1)).toBe(0);
-    expect(db.one('SELECT status FROM linked_accounts WHERE id=?', link.id)).toEqual({ status: 'revoked' });
+      const link = db.one<{ id: string; generation: number; credential_ciphertext: ArrayBuffer }>(
+        'SELECT id,generation,credential_ciphertext FROM linked_accounts WHERE id=?',
+        'replacement-link',
+      )!;
+      expect(revokeLink(db, link, 'credential_revoked', NOW_MS + 1)).toBe(true);
+      expect(holdLinkRows(db, link.id, NOW_MS + 1)).toBe(0);
+      expect(db.one('SELECT status FROM linked_accounts WHERE id=?', link.id)).toEqual({ status: 'revoked' });
 
-    const unlove = { artist: payload.artist, track: payload.track, recordingMbid: payload.recordingMbid };
-    expect(
-      enqueueForwards(db, {
-        did: ALICE,
-        items: [{ kind: 'unlove', operationId: 'revoked-resume-unlove', payload: unlove }],
-        now: NOW_MS + 2,
-        random: rng,
-      }),
-    ).toBe(0);
-    expect(db.one("SELECT count(*) AS n FROM forward_outbox WHERE kind='unlove'")).toEqual({ n: 0 });
+      const unlove = { artist: payload.artist, track: payload.track, recordingMbid: payload.recordingMbid };
+      expect(
+        enqueueForwards(db, {
+          did: ALICE,
+          items: [{ kind: 'unlove', operationId: 'revoked-resume-unlove', payload: unlove }],
+          now: NOW_MS + 2,
+          random: rng,
+        }),
+      ).toBe(0);
+      expect(db.one("SELECT count(*) AS n FROM forward_outbox WHERE kind='unlove'")).toEqual({ n: 0 });
+      expect((await forward(db)).feedbacks).toEqual([]);
 
-    const relinked = saveLink(
-      {
-        db,
-        clock: { nowMs: () => NOW_MS + 3 },
-        random: rng,
-        box: createBox(testSecrets().encryptionKeys, rng),
-      },
-      { did: ALICE, service: 'listenbrainz', remoteUser: 'alice', credential: 'resumed-token' },
-    );
-    expect(relinked).toMatchObject({ created: false, link: { generation: 1, status: 'active' } });
-    expect(db.one('SELECT count(*) AS n FROM forward_deferred_love_intents')).toEqual({ n: 1 });
-    db.run("UPDATE users SET indexing_state='current' WHERE did=?", ALICE);
-    for (let turn = 0; turn < 8; turn++) await runLinkBackfill(db, rng, NOW_MS + 10 + turn);
-    expect(db.one("SELECT state FROM forward_outbox WHERE kind='unlove'")).toEqual({ state: 'queued' });
-    await forward(db, NOW_MS + 1_000);
-    expect(db.one("SELECT state FROM forward_outbox WHERE kind='unlove'")).toEqual({ state: 'sent' });
-    await forward(db, NOW_MS + 2_000);
-    expect(db.one("SELECT count(*) AS n FROM forward_outbox WHERE kind='unlove' AND state='sent'")).toEqual({ n: 1 });
-  });
-});
+      const relinked = saveLink(
+        {
+          db,
+          clock: { nowMs: () => NOW_MS + 3 },
+          random: rng,
+          box: createBox(testSecrets().encryptionKeys, rng),
+        },
+        { did: ALICE, service, remoteUser: 'alice', credential: 'resumed-token' },
+      );
+      expect(relinked).toMatchObject({ created: false, link: { generation: 1, status: 'active' } });
+      expect(db.one('SELECT count(*) AS n FROM forward_deferred_love_intents')).toEqual({ n: 1 });
+      db.run("UPDATE users SET indexing_state='current' WHERE did=?", ALICE);
+      for (let turn = 0; turn < 8; turn++) await runLinkBackfill(db, rng, NOW_MS + 10 + turn);
+      expect(db.one("SELECT state FROM forward_outbox WHERE kind='unlove'")).toEqual({ state: 'queued' });
+      expect((await forward(db, NOW_MS + 1_000)).feedbacks).toEqual([expectedUnlove]);
+      expect(db.one("SELECT state FROM forward_outbox WHERE kind='unlove'")).toEqual({ state: 'sent' });
+      await forward(db, NOW_MS + 2_000);
+      expect(db.one("SELECT count(*) AS n FROM forward_outbox WHERE kind='unlove' AND state='sent'")).toEqual({ n: 1 });
+    });
+  },
+);
 
 it('does not settle or dispatch a stale-generation row after a real remote rotation', async () => {
   await withMigratedDb(async (db) => {
