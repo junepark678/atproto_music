@@ -445,6 +445,18 @@ whole-L2 acceptance or readiness. The audit and repair direction are
    fail closed; there is no A2 reconstruction or horizon extension. Existing
    sticky-fact, sibling rollback, no-A2-source, and clean retained-fact tests
    cover the seam. More full real producer-batch coverage remains pending.
+   A producer-backed regression deletes the actual A2 event and B2 authority
+   after a signed PDS absence seals the decision, then proves the real handoff
+   recreates only exact active authority from the retained L2 fact. Its
+   materializer/enqueue trace is 55 reads, 11 mutation statements, and 10
+   changed rows; this is a materializer unit trace, not a whole-decision
+   acceptance claim. Partial-delete attribution is split: the fact-owner
+   transaction is 1 read/3 mutation statements/2 changed rows; all statements
+   from `love-api-recipients.ts` total 3/5/4; and the archived exact-#209
+   whole-call comparison is 3 added reads/6 mutation statements/5 changed
+   rows. The old 2/3/2 assertion described the fact-owner transaction, not the
+   whole call. The remaining one statement/row in the whole-call delta stays
+   visible for Sol's reconciliation; no SQL was hidden or excluded.
 4. Handoff loads and persists the minimum original horizon before pending
    member, payload, generation, alias, and replay guards. Expired pending
    members complete as expired and the bounded sweep reclaims stale children
@@ -476,8 +488,9 @@ whole-L2 acceptance or readiness. The audit and repair direction are
    The regression checks the shorter stored horizon and unchanged clean fact.
 
 Scoped evidence for the earlier repair slice: six worker-node files / 72 tests
-pass; four worker-bench files / 16 tests pass. The follow-up bench file passes
-13/13, including production guard controls for >96 invocation rows, >16 visits,
+pass; four worker-bench files / 16 tests pass. The follow-up bench and origin
+growth suites now pass 15/15, including production guard controls for >96
+invocation rows, >16 visits,
 >128 decision reads, and >28 decision changed rows, plus a real 40-row
 amplification injected inside the decision transaction that rolls back its
 decision, outbox, and amplified rows. The B2 failure control verifies a
@@ -485,7 +498,9 @@ committed `rr` frontier transaction survives the L2 failure. The full restore
 file passes 25/25, including producer-derived proof, schema57 CLI restore,
 revoked Last.fm plus disabled ListenBrainz zero-egress, same-remote/same-
 generation resume, one unlove per remote, and zero-request rerun. Seven
-relevant worker-node files pass 112/112. A broader eight-file run passed
+relevant worker-node files pass 112/112; `loves.test.ts` now passes 27/27 with
+the fact-owner 2/3/2 and complete partial-delete source trace explicitly
+separated. A broader eight-file run passed
 138/139; the unchanged Last.fm key-rejection scenario failed its existing
 per-link error assertion (global pause counter was recorded, but the link row
 retained its prior error fields). That failure is recorded and remains open;

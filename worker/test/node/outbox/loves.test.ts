@@ -597,15 +597,15 @@ it('traces the actual API love partial-delete comparison hook transaction', asyn
       ).length,
       changedRows: loveApiStatements.reduce((sum, statement) => sum + statement.changedRows, 0),
     };
-    expect(completeHook).toEqual({ reads: 2, mutationStatements: 3, changedRows: 2 });
-    expect(factHook!.reads).toBeLessThanOrEqual(2);
-    expect(factHook!.mutationStatements).toBeLessThanOrEqual(3);
-    expect(factHook!.changedRows).toBeLessThanOrEqual(2);
-    expect(metric.reads - API_PARENT_PARTIAL_DELETE_TRACE.reads).toBe(completeHook.reads);
-    expect(metric.mutationStatements - API_PARENT_PARTIAL_DELETE_TRACE.mutationStatements).toBe(
-      completeHook.mutationStatements,
-    );
-    expect(metric.changedRows - API_PARENT_PARTIAL_DELETE_TRACE.changedRows).toBe(completeHook.changedRows);
+    // The fact-owner hook has its own 2/3/2 charge; the complete source-file
+    // total also includes prepare/seal decision effects and must stay visible.
+    expect(factHook).toMatchObject({ reads: 1, mutationStatements: 3, changedRows: 2 });
+    expect(completeHook).toEqual({ reads: 3, mutationStatements: 5, changedRows: 4 });
+    expect({
+      reads: metric.reads - API_PARENT_PARTIAL_DELETE_TRACE.reads,
+      mutationStatements: metric.mutationStatements - API_PARENT_PARTIAL_DELETE_TRACE.mutationStatements,
+      changedRows: metric.changedRows - API_PARENT_PARTIAL_DELETE_TRACE.changedRows,
+    }).toEqual({ reads: 3, mutationStatements: 6, changedRows: 5 });
   });
 });
 
@@ -724,7 +724,7 @@ it('forwards a live deletion of an API-created love, and routes imported love de
   });
 });
 
-it('reconstructs API source from L2 after operation and sent-outbox cleanup before deletion proof sealing', async () => {
+it('reconstructs API source and trusted authority from retained L2 after operation, outbox, and A2 cleanup', async () => {
   await withHarness(async (h) => {
     h.seedUser(h.alice);
     const linkId = h.link(h.alice, 'lastfm');
@@ -842,6 +842,29 @@ it('reconstructs API source from L2 after operation and sent-outbox cleanup befo
     });
     h.db.run('DELETE FROM linked_love_intents WHERE did=? AND operation_id=?', h.alice, alias.operation.id);
     bumpLoveApiIntentEpoch(h.db, h.alice);
+    expect(
+      h.db.one(
+        'SELECT action,cid,conflicted FROM love_api_comparison_facts WHERE authorization_uri=? AND authorization_rev=?',
+        uri,
+        proof.commit.rev,
+      ),
+    ).toEqual({ action: 'delete', cid: '', conflicted: 0 });
+    h.db.run('DELETE FROM live_pending_removal_events WHERE uri=? AND rev=?', uri, proof.commit.rev);
+    h.db.run(
+      'DELETE FROM forward_deferred_love_authorities WHERE authorization_uri=? AND authorization_rev=?',
+      uri,
+      proof.commit.rev,
+    );
+    expect(
+      h.db.one('SELECT 1 FROM live_pending_removal_events WHERE uri=? AND rev=?', uri, proof.commit.rev),
+    ).toBeNull();
+    expect(
+      h.db.one(
+        'SELECT 1 FROM forward_deferred_love_authorities WHERE authorization_uri=? AND authorization_rev=?',
+        uri,
+        proof.commit.rev,
+      ),
+    ).toBeNull();
     const materializerTrace = traceDb(h.db);
     const materialized = materializeLoveApiRecipientDecisions(
       materializerTrace.db,
@@ -851,6 +874,13 @@ it('reconstructs API source from L2 after operation and sent-outbox cleanup befo
     );
     const materializerCost = materializerTrace.result();
     expect(materialized).toMatchObject({ visited: 1, queued: 1, deferred: 0, replay: 0, refused: 0 });
+    expect(
+      h.db.one(
+        'SELECT action,cid,state FROM forward_deferred_love_authorities WHERE authorization_uri=? AND authorization_rev=?',
+        uri,
+        proof.commit.rev,
+      ),
+    ).toEqual({ action: 'delete', cid: '', state: 'active' });
     expect(materializerCost.changedRows, JSON.stringify(materializerCost)).toBeLessThanOrEqual(28);
     if (process.env.FINDING32_L2_COST_TRACE === '1')
       console.info(`L2_ACTUAL_CREATED_DECISION_TRACE ${JSON.stringify({ ...materializerCost, ...materialized })}`);
