@@ -19,6 +19,7 @@ import type { OAuthKeyset } from '../../../src/bff/keyset';
 import { createPolicyFetch } from '../../../src/node/policy-fetch';
 import { closeOwnedDevEnv, createOwnedTestPds, createOwnedTestPlc } from '../support/dev-env-startup';
 import { withMigratedDb } from '../support/node-db';
+import { ownTestResources } from '../support/test-resource-owner';
 import { createWorld, freezeDate } from './oauth-world';
 
 const CLIENT_ORIGIN = 'https://music.214510.xyz';
@@ -109,6 +110,11 @@ async function finishProviderAuthorization(
 
 describe('the confidential OAuth client against @atproto/dev-env', () => {
   it('exchanges a confidential grant, writes and deletes through the PDS, and observes upstream revocation', async () => {
+    const owner = ownTestResources();
+    const startup = {
+      onCaptured: (kind: 'plc' | 'pds', server: TestPds['server'] | TestPlc['server'], roots: string[]) =>
+        owner.trackCaptured(kind, server, roots),
+    };
     freezeDate();
     await withMigratedDb(async (db) => {
       const app = await createWorld(db);
@@ -117,7 +123,7 @@ describe('the confidential OAuth client against @atproto/dev-env', () => {
       const originalFetch = globalThis.fetch;
       let stage = 'PDS setup';
       try {
-        plc = await createOwnedTestPlc({});
+        plc = await createOwnedTestPlc({}, startup);
         globalThis.fetch = async (input, init) => {
           const request = input instanceof Request ? input : new Request(input, init);
           const url = new URL(request.url);
@@ -134,7 +140,7 @@ describe('the confidential OAuth client against @atproto/dev-env', () => {
           }
           throw new Error('dev-env OAuth test refused a non-fixture network request');
         };
-        const devPds = await createOwnedTestPds({ didPlcUrl: plc.url, hostname: PDS_HOST });
+        const devPds = await createOwnedTestPds({ didPlcUrl: plc.url, hostname: PDS_HOST }, undefined, startup);
         pds = devPds;
 
         const handle = 'n6-oauth.test';
