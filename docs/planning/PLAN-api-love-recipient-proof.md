@@ -4,10 +4,11 @@
 
 L2 is stacked on READY PR #209 at `5d573706bf07bb50e0c8b79cf1d34a3f6c56a975`.
 Root orchestration thread: <t3-thread://v2/087fc341-1687-4dc7-ab25-e7c53896db5e/31bac5d7-edc0-4879-af3e-91e9f6e2600c>.
-Migration 57 is not allocated in this checkpoint. Schema ceiling remains 56;
-all existing migrations remain byte-identical. The unallocated proposal is
-[the v4 DDL](finding32-l2-v4-proposed.sql): 17 statements, eight non-derived
-tables and nine indexes. It is not registered or executed by application code.
+Migration 57 is allocated and registered from the exact reviewed
+[final v4 DDL](finding32-l2-v4-proposed.sql): 17 statements, eight non-derived
+tables and nine indexes. Migrations 1–56 remain byte-identical. The actual
+restore CLI upgraded schema-56 backup/live files to 57; this does not yet prove
+populated-L2 restore or whole-path readiness.
 
 Binding design is replay addendum > batch addendum > Opus v4 plan. Q1 is YES
 (proof is independent of egress pause), Q2 is NO (no opaque revival proof).
@@ -36,8 +37,11 @@ recipient tables exist. The existing expiry report shape is unchanged.
 
 Fresh Astra stage-one review of
 `0e61254bb0f8a53af3a0e5986efbb1791f34d45e` returned **REJECT**. Sol accepted
-all four actionable findings and directed this interface repair, without a
-policy question or schema57 allocation. The retained
+all four actionable findings and directed this interface repair. The exact
+047b1c6 stage-one recheck independently accepted stage-one compatibility only;
+it did not accept full L2, the 128-read whole-path gate, CLI/restore readiness,
+or finding32 closure. Sol then explicitly authorized migration57 allocation
+and full L2 implementation in the same PR. The retained
 verified-authority helper and shared settlement `UPDATE RETURNING` contract
 remain accepted.
 
@@ -115,8 +119,7 @@ path used 25 facade read statements versus the model surrogate's 13:
 for acknowledgement, envelope, and counter work; they are not measured
 full-path proof.
 
-This is a full-L2 runtime/acceptance gate, not a prerequisite to registering
-the reviewed schema-57 DDL. The actual whole DECISION path must have a hard
+This remains a full-L2 runtime/acceptance gate after schema57 registration. The actual whole DECISION path must have a hard
 Node/bench assertion of at most 128 read statements across cold initialization,
 warm, replay, refusal, partial-delete, completion, rejection, and cleanup
 paths. Include a deliberate negative control that exceeds the bound and fails.
@@ -132,7 +135,7 @@ it cannot inherit the earlier 96-read model or presume 128 is unchanged policy.
 If any actual whole-path scenario exceeds 128, stop that path and return the
 trace to the planner through Sol. Neither Sol nor implementation may raise the
 cap again independently. Other limits remain 96 writes/invocation, 16 visits,
-DECISION 28, and mandatory real schema-56-to-57 CLI upgrade/restore.
+DECISION 28, and mandatory populated real schema-56-to-57 CLI upgrade/restore acceptance.
 
 Probe artifacts: `/tmp/atproto-followup-sol/finding32-sol-actual209-cost-probe.ts.txt`,
 `finding32-sol-actual209-cost-results.json`, and `finding32-sol-actual209-cost-probe.log`.
@@ -140,20 +143,16 @@ Those artifacts measured materialization plus one link-scoped enqueue only.
 
 ## Remaining gates
 
-Before migration-57 registration, Sol must reconcile this stage-one checkpoint,
-the measured 13-row handoff allowance, and the final DDL. The proposal hash is
-`8f13e1943e5ad599-84c4bd9d783e299c-ce931963f4064330-3e0f30cce3768a5d`
-(hyphen-separated groups of the SHA-256 value); the
-existing schema-56 Node authorizer scratch-upgrade test executes all 17
-statements and verifies eight tables, nine indexes, unchanged schema version 56,
-and a clean foreign-key check on the rebuilt scratch database. The migration
-is still unregistered. Before full-L2 acceptance/readiness, complete whole-path
-128-read traces and countercontrol, real 56-to-57 CLI upgrade/restore, fresh
-Astra review of the provisional cap/derivation/worst case, and remaining
-terminal, cleanup, and scale gates. Small behavior fixtures belong in
+Migration57 is registered at the authorized final DDL hash
+`8f13e1943e5ad599-84c4bd9d783e299c-ce931963f4064330-3e0f30cce3768a5d` (four SHA-256 groups). The
+Node migration-authorizer test confirms its 17 statements match the proposal and
+creates eight tables/nine indexes with clean foreign keys. The real restore CLI
+upgraded a populated 56 backup/live pair to 57 and verified the 57 ledger,
+tables, and foreign keys. Full L2 behavior, whole-path128 traces/countercontrol,
+fresh Astra review of that gate, populated-L2 restore and remaining terminal,
+cleanup, and scale gates are still pending. Small behavior fixtures belong in
 `worker-node`; growing fixtures belong in `worker-bench` with VM/statement/
-returned-row bounds, not elapsed-time claims. No schema-57 runtime behavior or
-full recipient/materializer is part of this stage.
+returned-row bounds, not elapsed-time claims.
 
 
 ## Narrow request-metadata correction

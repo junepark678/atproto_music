@@ -1732,6 +1732,30 @@ const MIGRATION_LINK_LOVE_COVERAGE: Migration = {
   ],
 };
 
+const MIGRATION_API_LOVE_RECIPIENT_PROOF: Migration = {
+  version: 57,
+  name: 'api_love_recipient_proof',
+  statements: [
+    'CREATE TABLE love_api_bindings (\n  did TEXT NOT NULL,\n  operation_id TEXT NOT NULL,\n  uri TEXT NOT NULL,\n  incarnation_key TEXT NOT NULL,\n  binding_seq INTEGER NOT NULL UNIQUE CHECK(binding_seq>=1),\n  created_at_ms INTEGER NOT NULL,\n  PRIMARY KEY(did,operation_id)\n)',
+    'CREATE INDEX love_api_bindings_incarnation ON love_api_bindings(did,uri,incarnation_key)',
+    "CREATE TABLE love_api_recipients (\n  did TEXT NOT NULL,\n  uri TEXT NOT NULL,\n  incarnation_key TEXT NOT NULL,\n  link_id TEXT NOT NULL REFERENCES linked_accounts(id) ON DELETE CASCADE,\n  generation INTEGER NOT NULL CHECK(generation>=1),\n  aggregate_seq INTEGER NOT NULL UNIQUE CHECK(aggregate_seq>=1),\n  state TEXT NOT NULL CHECK(state IN ('present','sealed','released')),\n  sent_operation_id TEXT,\n  next_member_seq INTEGER NOT NULL DEFAULT 1 CHECK(next_member_seq>=1),\n  validate_after_seq INTEGER NOT NULL DEFAULT 0 CHECK(validate_after_seq>=0),\n  created_at_ms INTEGER NOT NULL,\n  updated_at_ms INTEGER NOT NULL,\n  PRIMARY KEY(did,uri,incarnation_key,link_id,generation)\n)",
+    'CREATE TABLE love_api_recipient_members (\n  link_id TEXT NOT NULL,\n  generation INTEGER NOT NULL,\n  operation_id TEXT NOT NULL,\n  did TEXT NOT NULL,\n  uri TEXT NOT NULL,\n  incarnation_key TEXT NOT NULL,\n  member_seq INTEGER NOT NULL CHECK(member_seq>=1),\n  created_at_ms INTEGER NOT NULL,\n  PRIMARY KEY(link_id,generation,operation_id),\n  FOREIGN KEY(did,uri,incarnation_key,link_id,generation)\n    REFERENCES love_api_recipients(did,uri,incarnation_key,link_id,generation) ON DELETE CASCADE\n)',
+    'CREATE INDEX love_api_recipient_members_aggregate ON love_api_recipient_members(did,uri,incarnation_key,link_id,generation,member_seq)',
+    "CREATE TABLE love_api_comparison_facts (\n  authorization_uri TEXT NOT NULL,\n  authorization_rev TEXT NOT NULL,\n  fact_seq INTEGER NOT NULL UNIQUE CHECK(fact_seq>=1),\n  action TEXT NOT NULL CHECK(action IN ('update','delete')),\n  cid TEXT NOT NULL,\n  horizon_ms INTEGER NOT NULL CHECK(horizon_ms>=1),\n  conflicted INTEGER NOT NULL DEFAULT 0 CHECK(conflicted IN (0,1)),\n  created_at_ms INTEGER NOT NULL,\n  CHECK((action='delete') = (cid='')),\n  PRIMARY KEY(authorization_uri,authorization_rev)\n)",
+    'CREATE TABLE love_api_window_owners (\n  uri TEXT NOT NULL,\n  member_uri TEXT NOT NULL,\n  removed_cid TEXT NOT NULL,\n  window_lo TEXT NOT NULL,\n  window_hi TEXT NOT NULL,\n  replaced_by_cid TEXT NOT NULL,\n  did TEXT NOT NULL,\n  incarnation_key TEXT NOT NULL,\n  link_id TEXT NOT NULL,\n  generation INTEGER NOT NULL,\n  created_at_ms INTEGER NOT NULL,\n  PRIMARY KEY(uri,member_uri,removed_cid,window_lo,window_hi,replaced_by_cid,link_id,generation),\n  FOREIGN KEY(uri,member_uri,removed_cid,window_lo,window_hi,replaced_by_cid)\n    REFERENCES live_pending_removals(uri,member_uri,removed_cid,window_lo,window_hi,replaced_by_cid) ON DELETE CASCADE,\n  FOREIGN KEY(did,uri,incarnation_key,link_id,generation)\n    REFERENCES love_api_recipients(did,uri,incarnation_key,link_id,generation) ON DELETE CASCADE\n)',
+    'CREATE INDEX love_api_window_owners_aggregate ON love_api_window_owners(did,uri,incarnation_key,link_id,generation)',
+    "CREATE TABLE love_api_unlove_decisions (\n  did TEXT NOT NULL,\n  uri TEXT NOT NULL,\n  incarnation_key TEXT NOT NULL,\n  link_id TEXT NOT NULL,\n  generation INTEGER NOT NULL,\n  artist TEXT NOT NULL,\n  track TEXT NOT NULL,\n  artist_key TEXT NOT NULL,\n  track_key TEXT NOT NULL,\n  recording_mbid TEXT,\n  payload_json TEXT NOT NULL,\n  love_source_service TEXT,\n  love_import_sources TEXT,\n  authorization_uri TEXT NOT NULL,\n  authorization_rev TEXT NOT NULL,\n  fact_action TEXT NOT NULL CHECK(fact_action IN ('update','delete')),\n  fact_cid TEXT NOT NULL,\n  expires_at_ms INTEGER NOT NULL CHECK(expires_at_ms>=1),\n  due_at_ms INTEGER NOT NULL,\n  scan_session TEXT,\n  alias_epoch INTEGER,\n  alias_cursor TEXT,\n  created_at_ms INTEGER NOT NULL,\n  PRIMARY KEY(did,uri,incarnation_key,link_id,generation),\n  FOREIGN KEY(did,uri,incarnation_key,link_id,generation)\n    REFERENCES love_api_recipients(did,uri,incarnation_key,link_id,generation) ON DELETE CASCADE,\n  FOREIGN KEY(authorization_uri,authorization_rev)\n    REFERENCES love_api_comparison_facts(authorization_uri,authorization_rev)\n)",
+    'CREATE INDEX love_api_unlove_decisions_due ON love_api_unlove_decisions(due_at_ms,did,uri,incarnation_key,link_id,generation)',
+    'CREATE INDEX love_api_unlove_decisions_fact ON love_api_unlove_decisions(authorization_uri,authorization_rev)',
+    'CREATE INDEX love_api_unlove_decisions_uri ON love_api_unlove_decisions(uri,did,incarnation_key,link_id,generation)',
+    'CREATE TABLE love_api_intent_epochs (\n  did TEXT PRIMARY KEY NOT NULL,\n  epoch INTEGER NOT NULL CHECK(epoch>=0)\n)',
+    "CREATE INDEX love_api_intent_alias_scan ON linked_love_intents(did,recording_mbid,love_key) WHERE intent='love'",
+    "CREATE INDEX love_api_active_love_put ON operations(did,\n  (CASE WHEN json_valid(record_json) THEN json_extract(record_json,'$.artist') END),\n  (CASE WHEN json_valid(record_json) THEN json_extract(record_json,'$.track') END))\n  WHERE kind='love.put' AND state IN ('queued','blocked','running')",
+    "CREATE INDEX love_api_active_love_put_malformed ON operations(did)\n  WHERE kind='love.put' AND state IN ('queued','blocked','running') AND (record_json IS NULL OR NOT json_valid(record_json))",
+    "CREATE TABLE love_api_proof_state (\n  singleton INTEGER PRIMARY KEY NOT NULL CHECK(singleton=1),\n  lane_turn INTEGER NOT NULL DEFAULT 0 CHECK(lane_turn BETWEEN 0 AND 2),\n  next_binding_seq INTEGER NOT NULL DEFAULT 1 CHECK(next_binding_seq>=1),\n  next_aggregate_seq INTEGER NOT NULL DEFAULT 1 CHECK(next_aggregate_seq>=1),\n  next_fact_seq INTEGER NOT NULL DEFAULT 1 CHECK(next_fact_seq>=1),\n  sweep_cursor INTEGER NOT NULL DEFAULT 0 CHECK(sweep_cursor>=0),\n  sweep_frontier INTEGER NOT NULL DEFAULT 0 CHECK(sweep_frontier>=0),\n  reclaim_kind TEXT NOT NULL DEFAULT 'binding' CHECK(reclaim_kind IN ('binding','fact')),\n  binding_cursor INTEGER NOT NULL DEFAULT 0 CHECK(binding_cursor>=0),\n  binding_frontier INTEGER NOT NULL DEFAULT 0 CHECK(binding_frontier>=0),\n  fact_cursor INTEGER NOT NULL DEFAULT 0 CHECK(fact_cursor>=0),\n  fact_frontier INTEGER NOT NULL DEFAULT 0 CHECK(fact_frontier>=0),\n  sweep_passes INTEGER NOT NULL DEFAULT 0,\n  reclaim_passes INTEGER NOT NULL DEFAULT 0,\n  updated_at_ms INTEGER NOT NULL DEFAULT 0\n)",
+  ],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
   MIGRATION_2,
@@ -1789,6 +1813,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_LOVE_IMPORT_BRIDGE_SOURCE_CLASS,
   MIGRATION_LINK_COVERAGE_RECEIPTS,
   MIGRATION_LINK_LOVE_COVERAGE,
+  MIGRATION_API_LOVE_RECIPIENT_PROOF,
 ];
 
 /** The schema version this code expects. */
@@ -1900,6 +1925,15 @@ export const TABLES = [
   'forward_deferred_love_witnesses',
   'forward_deferred_love_authorities',
   'forward_deferred_love_maintenance',
+  // Migration 57: API love recipient proof.
+  'love_api_bindings',
+  'love_api_recipients',
+  'love_api_recipient_members',
+  'love_api_comparison_facts',
+  'love_api_window_owners',
+  'love_api_unlove_decisions',
+  'love_api_intent_epochs',
+  'love_api_proof_state',
 ] as const;
 
 export type TableName = (typeof TABLES)[number];
@@ -2009,4 +2043,12 @@ export const TABLE_CLASS: Readonly<Record<TableName, TableClass>> = {
   forward_deferred_love_witnesses: 'non-derived',
   forward_deferred_love_authorities: 'non-derived',
   forward_deferred_love_maintenance: 'non-derived',
+  love_api_bindings: 'non-derived',
+  love_api_recipients: 'non-derived',
+  love_api_recipient_members: 'non-derived',
+  love_api_comparison_facts: 'non-derived',
+  love_api_window_owners: 'non-derived',
+  love_api_unlove_decisions: 'non-derived',
+  love_api_intent_epochs: 'non-derived',
+  love_api_proof_state: 'non-derived',
 };

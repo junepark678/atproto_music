@@ -4,6 +4,7 @@
 // compatibility cases use synthetic migration lists, so they do not depend on
 // migration 2 (N1-10).
 
+import { createHash } from 'node:crypto';
 import { readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -73,46 +74,51 @@ function recordingTarget(db: SqliteDb) {
 }
 
 describe('migrate over node:sqlite', () => {
-  it('executes the unallocated L2 proposal on schema 56 through the Node authorizer with clean foreign keys', async () => {
-    await withMigratedDb((db) => {
-      const ddl = readFileSync(new URL('../../../docs/planning/finding32-l2-v4-proposed.sql', import.meta.url), 'utf8');
-      const statements = ddl
-        .split(';')
-        .map((statement) => statement.trim())
-        .filter(Boolean);
-      expect(statements).toHaveLength(17);
-      expect(db.exec('SELECT max(version) AS version FROM schema_migrations')).toEqual([{ version: 56 }]);
-      db.tx(() => {
-        for (const statement of statements) db.exec(statement);
-      });
-      const tables = db.all<{ name: string }>(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'love_api_%' ORDER BY name",
-      );
-      expect(tables).toHaveLength(8);
-      const indexes = db.all<{ name: string }>(
-        "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'love_api_%' ORDER BY name",
-      );
-      expect(indexes).toHaveLength(9);
-      expect(db.exec('SELECT max(version) AS version FROM schema_migrations')).toEqual([{ version: 56 }]);
+  it('applies the exact allocated schema-57 proposal from schema 56 through the Node authorizer', () => {
+    const db = freshDb();
+    const ddl = readFileSync(new URL('../../../docs/planning/finding32-l2-v4-proposed.sql', import.meta.url), 'utf8');
+    const statements = ddl
+      .split(';')
+      .map((statement) => statement.trim())
+      .filter(Boolean);
+    const migration = MIGRATIONS.at(-1)!;
+    expect(migration).toMatchObject({ version: 57, name: 'api_love_recipient_proof' });
+    expect(createHash('sha256').update(ddl).digest('hex')).toBe(
+      '8f13e1943e5ad59984c4bd9d783e299cce931963f40643303e0f30cce3768a5d',
+    );
+    expect(statements).toHaveLength(17);
+    expect(migration.statements).toEqual(statements);
+    expect(migrate(db, MIGRATIONS.slice(0, 56))).toEqual({ status: 'ready', version: 56 });
+    expect(db.exec('SELECT max(version) AS version FROM schema_migrations')).toEqual([{ version: 56 }]);
+    expect(migrate(db)).toEqual({ status: 'ready', version: 57 });
 
-      const verify = new DatabaseSync(':memory:');
-      try {
-        verify.exec('PRAGMA foreign_keys=ON');
-        for (const { sql } of db.all<{ sql: string }>(
-          "SELECT sql FROM sqlite_master WHERE type IN ('table','index') AND sql IS NOT NULL ORDER BY rowid",
-        ))
-          verify.exec(sql);
-        expect(verify.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
-      } finally {
-        verify.close();
-      }
-    });
+    const tables = db.all<{ name: string }>(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'love_api_%' ORDER BY name",
+    );
+    expect(tables).toHaveLength(8);
+    const indexes = db.all<{ name: string }>(
+      "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'love_api_%' ORDER BY name",
+    );
+    expect(indexes).toHaveLength(9);
+    expect(db.exec('SELECT max(version) AS version FROM schema_migrations')).toEqual([{ version: 57 }]);
+
+    const verify = new DatabaseSync(':memory:');
+    try {
+      verify.exec('PRAGMA foreign_keys=ON');
+      for (const { sql } of db.all<{ sql: string }>(
+        "SELECT sql FROM sqlite_master WHERE type IN ('table','index') AND sql IS NOT NULL ORDER BY rowid",
+      ))
+        verify.exec(sql);
+      expect(verify.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+    } finally {
+      verify.close();
+    }
   });
 
   it('migration 30 creates durable per-generation pull state, staging and tombstone tables', () => {
     const db = freshDb();
     migrate(db);
-    expect(SCHEMA_VERSION).toBe(56);
+    expect(SCHEMA_VERSION).toBe(57);
     for (const table of [
       'linked_pull_state',
       'linked_pull_items',

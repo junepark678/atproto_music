@@ -850,7 +850,7 @@ describe('ListenBrainz forwarding', () => {
     await w.app.close();
     let db: SqliteDb | null = openSqliteDb(path, { busyTimeoutMs: 200 });
     try {
-      expect(migrate(db)).toEqual({ status: 'ready', version: 56 });
+      expect(migrate(db)).toEqual({ status: 'ready', version: 57 });
       expect(
         db.one('SELECT target_msid,target_listened_at FROM listenbrainz_deletes WHERE id=?', 'restart-delete'),
       ).toEqual({
@@ -875,7 +875,7 @@ describe('ListenBrainz forwarding', () => {
       expect(retry).toMatchObject({ target_msid: msid, target_listened_at: listenedAt + 1 });
       db.close();
       db = openSqliteDb(path, { busyTimeoutMs: 200 });
-      expect(migrate(db)).toEqual({ status: 'ready', version: 56 });
+      expect(migrate(db)).toEqual({ status: 'ready', version: 57 });
       w.clock.set(new Date(retry!.due_at).toISOString());
       expect(
         (

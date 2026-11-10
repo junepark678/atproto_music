@@ -2044,7 +2044,10 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
         ),
         indexes: Object.fromEntries(
           objects
-            .filter((o) => o.type === 'index' && !v1.objects.some((x) => x.name === o.name))
+            .filter(
+              (o) =>
+                o.type === 'index' && !o.name.startsWith('love_api_') && !v1.objects.some((x) => x.name === o.name),
+            )
             .map((o) => [o.name, indexShape(db, o.tbl_name, o.name)]),
         ),
         foreignKeys: Object.keys(NEW_TABLES).flatMap((t) => foreignKeys(db, t)),
@@ -2053,7 +2056,9 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
     });
 
     // Exactly the new tables and indexes, no trigger or view.
-    const added = v2.objects.filter((o) => !v1.objects.some((x) => x.name === o.name));
+    const added = v2.objects.filter(
+      (o) => !v1.objects.some((x) => x.name === o.name) && !o.name.startsWith('love_api_'),
+    );
     expect(
       added
         .filter((o) => o.type === 'table')
@@ -2438,6 +2443,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       "54|'love_import_bridges_source_class'",
       "55|'link_coverage_receipts'",
       "56|'link_love_coverage'",
+      "57|'api_love_recipient_proof'",
     ]);
     // The new scrobble columns exist and are NULL on every migrated row.
     expect(after.newColumns).toHaveLength(expectedScrobbles);
@@ -2501,6 +2507,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       { version: 54, name: 'love_import_bridges_source_class' },
       { version: 55, name: 'link_coverage_receipts' },
       { version: 56, name: 'link_love_coverage' },
+      { version: 57, name: 'api_love_recipient_proof' },
     ]);
     expect(after.compat).toEqual([{ singleton: 1, min_compatible_version: 2 }]);
     expect(after.newTablesEmpty).toEqual(['mb_cover_art_usage']);

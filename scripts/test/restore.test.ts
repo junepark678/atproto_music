@@ -759,10 +759,40 @@ function query(path: string, sql: string, ...params: sqlite.SQLInputValue[]): Re
   }
 }
 
-function downgradeFixtureTo55(path: string): void {
+function downgradeFixtureTo56(path: string): void {
   const db = openSqliteDb(path, { busyTimeoutMs: BUSY_MS });
   try {
-    expect(migrate(db, MIGRATIONS)).toEqual({ status: 'ready', version: 56 });
+    expect(migrate(db, MIGRATIONS)).toEqual({ status: 'ready', version: 57 });
+    db.tx(() => {
+      for (const index of [
+        'love_api_intent_alias_scan',
+        'love_api_active_love_put',
+        'love_api_active_love_put_malformed',
+      ])
+        db.exec(`DROP INDEX ${index}`);
+      for (const table of [
+        'love_api_unlove_decisions',
+        'love_api_window_owners',
+        'love_api_recipient_members',
+        'love_api_recipients',
+        'love_api_bindings',
+        'love_api_comparison_facts',
+        'love_api_intent_epochs',
+        'love_api_proof_state',
+      ])
+        db.exec(`DROP TABLE ${table}`);
+      db.run('DELETE FROM schema_migrations WHERE version=57');
+    });
+    expect(migrate(db, MIGRATIONS.slice(0, 56))).toEqual({ status: 'ready', version: 56 });
+  } finally {
+    db.close();
+  }
+}
+
+function downgradeFixtureTo55(path: string): void {
+  downgradeFixtureTo56(path);
+  const db = openSqliteDb(path, { busyTimeoutMs: BUSY_MS });
+  try {
     db.tx(() => {
       db.exec('DROP INDEX forward_outbox_unlove_authority_dependency');
       for (const table of [
@@ -1065,10 +1095,10 @@ describe('restore.ts', () => {
     await systemd.boot();
     const result = await restoreCli(oldWorld, systemd, [...baseArgs(oldWorld), '--no-ready-check']);
     expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
-    expect(result.stdout).toContain('migrated the copy from version 55 to 56');
+    expect(result.stdout).toContain('migrated the copy from version 55 to 57');
     const restored = openSqliteDb(live55, { busyTimeoutMs: BUSY_MS });
     try {
-      expect(restored.one('SELECT max(version) AS version FROM schema_migrations')).toEqual({ version: 56 });
+      expect(restored.one('SELECT max(version) AS version FROM schema_migrations')).toEqual({ version: 57 });
       expect(restored.all('SELECT kind,dedupe_key,created_at_ms FROM forward_receipts ORDER BY dedupe_key')).toEqual([
         { kind: 'scrobble', dedupe_key: 'schema55-live-receipt', created_at_ms: 201 },
         { kind: 'scrobble', dedupe_key: 'schema55-receipt', created_at_ms: 101 },
@@ -1095,6 +1125,38 @@ describe('restore.ts', () => {
       restored.close();
     }
     expect(query(live55, 'PRAGMA foreign_key_check')).toEqual([]);
+  }, 30_000);
+
+  it('migrates real schema-56 backup and live files to 57 through the restore CLI', async () => {
+    const world = await buildWorld();
+    const backup56 = join(world.dir, 'backup-schema-56.db');
+    const live56 = join(world.dir, 'live-schema-56.db');
+    copyFileSync(world.backupPath, backup56);
+    copyFileSync(world.dbPath, live56);
+    downgradeFixtureTo56(backup56);
+    downgradeFixtureTo56(live56);
+    expect(query(backup56, 'SELECT max(version) AS v FROM schema_migrations')).toEqual([{ v: 56 }]);
+    expect(query(live56, 'SELECT max(version) AS v FROM schema_migrations')).toEqual([{ v: 56 }]);
+
+    const oldWorld = { ...world, dbPath: live56, backupPath: backup56 };
+    const systemd = new FakeSystemd(oldWorld, { servicePort: null });
+    await systemd.boot();
+    const result = await restoreCli(oldWorld, systemd, [...baseArgs(oldWorld), '--no-ready-check']);
+    expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.stdout).toContain('migrated the copy from version 56 to 57');
+    const restored = openSqliteDb(live56, { busyTimeoutMs: BUSY_MS });
+    try {
+      expect(restored.one('SELECT max(version) AS version FROM schema_migrations')).toEqual({ version: 57 });
+      expect(
+        restored.all("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'love_api_%' ORDER BY name"),
+      ).toHaveLength(8);
+      expect(
+        restored.all("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'love_api_%' ORDER BY name"),
+      ).toHaveLength(9);
+    } finally {
+      restored.close();
+    }
+    expect(query(live56, 'PRAGMA foreign_key_check')).toEqual([]);
   }, 30_000);
 
   it('merges populated schema-56 love state from the readable live DB and reopens it in a fresh server composition', async () => {
@@ -1144,7 +1206,7 @@ describe('restore.ts', () => {
     expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
     expect(systemd.server).not.toBe(priorComposition);
     const db = systemd.server!.server.db;
-    expect(db.one('SELECT max(version) AS version FROM schema_migrations')).toEqual({ version: 56 });
+    expect(db.one('SELECT max(version) AS version FROM schema_migrations')).toEqual({ version: 57 });
     expect(
       db.one("SELECT last_sent_dedupe_key FROM forward_love_delivery WHERE last_sent_dedupe_key='live-delivery-love'"),
     ).not.toBeNull();
