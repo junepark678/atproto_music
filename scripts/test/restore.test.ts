@@ -75,6 +75,8 @@ import {
   saveLink,
 } from '../../worker/src/forward/links.ts';
 import { ListenbrainzClient } from '../../worker/src/forward/listenbrainz-client.ts';
+import { reclaimLoveApiProofRows } from '../../worker/src/forward/love-api-maintenance.ts';
+import { materializeLoveApiRecipientDecisions } from '../../worker/src/forward/love-api-materializer.ts';
 import { runDeferredLoveMaintenance } from '../../worker/src/forward/love-deferral-maintenance.ts';
 import { admitForwardIdentity } from '../../worker/src/forward/projection.ts';
 import { UpstreamPacing } from '../../worker/src/forward/upstream-pacing.ts';
@@ -437,6 +439,208 @@ function populateDeferredLoveState(db: SqliteDb, clock: FixedClock, linkId: stri
   )
     throw new Error(`restore fixture ${label} did not populate all six B2 tables`);
   return unloveOperation;
+}
+
+const LOVE_API_TABLES = [
+  'love_api_bindings',
+  'love_api_recipients',
+  'love_api_recipient_members',
+  'love_api_comparison_facts',
+  'love_api_window_owners',
+  'love_api_unlove_decisions',
+  'love_api_intent_epochs',
+  'love_api_proof_state',
+] as const;
+
+function populateLoveApiProofState(db: SqliteDb, clock: FixedClock, linkId: string, label: string): string {
+  const link = getLinkById(db, linkId);
+  if (link === null) throw new Error(`restore fixture link ${linkId} is missing`);
+  const now = clock.nowMs();
+  const tag = label.toLowerCase();
+  const uri = `at://${link.did}/${PREFIX}.love/${tag}-api-origin`;
+  const incarnation = `love:${uri}:api:${tag}-api-put`;
+  const apiOperation = `${tag}-api-put`;
+  const pendingOperation = `${tag}-api-pending-put`;
+  const memberUri = `at://${link.did}/${PREFIX}.scrobble/${tag}-removed-member`;
+  const rev = '3lbcdefghijkm';
+  const windowLo = '3lbcdefghijkh';
+  const windowHi = '3lbcdefghijkn';
+  const artist = `Restore ${label} artist`;
+  const track = `Restore ${label} track`;
+  const [artistKey, trackKeyValue] = trackKey(artist, track);
+  const payload = JSON.stringify({ artist, track, origin: 'lastfm' });
+  const horizon = now + 60 * 60_000;
+  const bindingSeq = label === 'Backup' ? 31 : 41;
+  const aggregateSeq = label === 'Backup' ? 32 : 42;
+  const factSeq = label === 'Backup' ? 33 : 43;
+  const dedupe = link.generation === 1 ? apiOperation : `g${link.generation}:${apiOperation}`;
+  db.run(
+    `INSERT INTO operations(id,did,kind,origin,priority,collection,rkey,record_json,digest,state,due_at,
+       created_at_ms,updated_at_ms,send_state)
+     VALUES(?,?,'love.put','lastfm',0,?,?,?,?, 'succeeded',?,?,?,'sent')`,
+    apiOperation,
+    link.did,
+    `${PREFIX}.love`,
+    `${tag}-request-rkey`,
+    JSON.stringify({ $type: `${PREFIX}.love`, artist, track }),
+    `digest-${tag}-api`,
+    now,
+    now,
+    now,
+  );
+  db.run(
+    `INSERT INTO operations(id,did,kind,origin,priority,collection,rkey,record_json,digest,state,due_at,
+       created_at_ms,updated_at_ms,send_state)
+     VALUES(?,?,'love.put','lastfm',0,?,?,?,?, 'queued',?,?,?,'unsent')`,
+    pendingOperation,
+    link.did,
+    `${PREFIX}.love`,
+    `${tag}-pending-rkey`,
+    JSON.stringify({ $type: `${PREFIX}.love`, artist, track }),
+    `digest-${tag}-pending`,
+    now,
+    now,
+    now,
+  );
+  db.run(
+    `INSERT INTO love_incarnations(uri,incarnation_key,state,path,source_service,updated_at_ms)
+     VALUES(?,?,'present','api',NULL,?)`,
+    uri,
+    incarnation,
+    now,
+  );
+  db.run(
+    `INSERT INTO love_api_bindings(did,operation_id,api_origin,uri,incarnation_key,binding_seq,created_at_ms)
+     VALUES(?,?,'lastfm',?,?,?,?)`,
+    link.did,
+    apiOperation,
+    uri,
+    incarnation,
+    bindingSeq,
+    now,
+  );
+  db.run(
+    `INSERT INTO forward_outbox(id,link_id,generation,did,kind,dedupe_key,payload_json,state,attempts,due_at,created_at_ms,updated_at_ms)
+     VALUES(?,?,?,?,?,? ,?,'sent',1,?,?,?)`,
+    `${tag}-api-sent-row`,
+    linkId,
+    link.generation,
+    link.did,
+    'love',
+    dedupe,
+    payload,
+    now,
+    now,
+    now,
+  );
+  db.run(
+    `INSERT INTO love_api_recipients(did,uri,incarnation_key,link_id,generation,aggregate_seq,state,sent_operation_id,created_at_ms,updated_at_ms)
+     VALUES(?,?,?,?,?,?,'sealed',?,?,?)`,
+    link.did,
+    uri,
+    incarnation,
+    linkId,
+    link.generation,
+    aggregateSeq,
+    apiOperation,
+    now,
+    now,
+  );
+  db.run(
+    `INSERT INTO love_api_recipient_members(link_id,generation,operation_id,did,uri,incarnation_key,member_seq,created_at_ms)
+     VALUES(?,?,?,?,?,?,1,?)`,
+    linkId,
+    link.generation,
+    pendingOperation,
+    link.did,
+    uri,
+    incarnation,
+    now,
+  );
+  db.run(
+    `INSERT INTO live_pending_removals(uri,member_uri,removed_cid,kind,window_lo,window_hi,replaced_by_cid,identity_key,
+       listened_at,artist_key,track_key,artist,track,recording_mbid,love_source_service,love_import_sources,
+       authorized_rev,created_at_ms,expires_at_ms,conflict_invalidated,conflicted_auth_rev)
+     VALUES(?,?,?,'love',?,?,? ,?,NULL,?,?,?,?,NULL,'lastfm',NULL,?,?,?,0,NULL)`,
+    uri,
+    memberUri,
+    `removed-${tag}-cid`,
+    windowLo,
+    windowHi,
+    '',
+    incarnation,
+    artistKey,
+    trackKeyValue,
+    artist,
+    track,
+    rev,
+    now,
+    horizon,
+  );
+  db.run(
+    `INSERT INTO love_api_window_owners(uri,member_uri,removed_cid,window_lo,window_hi,replaced_by_cid,did,incarnation_key,link_id,generation,created_at_ms)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+    uri,
+    memberUri,
+    `removed-${tag}-cid`,
+    windowLo,
+    windowHi,
+    '',
+    link.did,
+    incarnation,
+    linkId,
+    link.generation,
+    now,
+  );
+  db.run(
+    `INSERT INTO love_api_comparison_facts(authorization_uri,authorization_rev,fact_seq,action,cid,horizon_ms,created_at_ms)
+     VALUES(?,?,?,'delete','',?,?)`,
+    uri,
+    rev,
+    factSeq,
+    horizon,
+    now,
+  );
+  db.run(
+    `INSERT INTO love_api_unlove_decisions(did,uri,incarnation_key,link_id,generation,artist,track,artist_key,track_key,
+       recording_mbid,payload_json,love_source_service,love_import_sources,authorization_uri,authorization_rev,
+       fact_action,fact_cid,expires_at_ms,due_at_ms,scan_session,alias_epoch,alias_cursor,created_at_ms)
+     VALUES(?,?,?,?,?,?,?,?,?,NULL,?,NULL,NULL,?,?,'delete','',?,?,NULL,NULL,NULL,?)`,
+    link.did,
+    uri,
+    incarnation,
+    linkId,
+    link.generation,
+    artist,
+    track,
+    artistKey,
+    trackKeyValue,
+    payload,
+    uri,
+    rev,
+    horizon,
+    now,
+    now,
+  );
+  db.run(
+    `INSERT INTO love_api_intent_epochs(did,epoch) VALUES(?,?)
+     ON CONFLICT(did) DO UPDATE SET epoch=excluded.epoch`,
+    link.did,
+    label === 'Backup' ? 3 : 5,
+  );
+  db.run(
+    `INSERT INTO love_api_proof_state(singleton,next_binding_seq,next_aggregate_seq,next_fact_seq,updated_at_ms)
+     VALUES(1,?,?,?,?)
+     ON CONFLICT(singleton) DO UPDATE SET next_binding_seq=excluded.next_binding_seq,
+       next_aggregate_seq=excluded.next_aggregate_seq,next_fact_seq=excluded.next_fact_seq,updated_at_ms=excluded.updated_at_ms`,
+    bindingSeq + 1,
+    aggregateSeq + 1,
+    factSeq + 1,
+    now,
+  );
+  for (const table of LOVE_API_TABLES)
+    if (db.one(`SELECT 1 FROM ${table} LIMIT 1`) === null) throw new Error(`restore fixture omitted ${table}`);
+  return uri;
 }
 
 function restoreB2Snapshot(path: string): string {
@@ -1153,10 +1357,78 @@ describe('restore.ts', () => {
       expect(
         restored.all("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'love_api_%' ORDER BY name"),
       ).toHaveLength(9);
+      for (const table of LOVE_API_TABLES)
+        expect(restored.one(`SELECT count(*) AS count FROM ${table}`), table).toEqual({ count: 0 });
     } finally {
       restored.close();
     }
     expect(query(live56, 'PRAGMA foreign_key_check')).toEqual([]);
+  }, 30_000);
+
+  it('restores populated schema-57 API-love proof rows from live after operation and sent-outbox cleanup', async () => {
+    let liveUri: string | null = null;
+    const world = await buildWorld({
+      beforeBackup: ({ db, clock, linkId }) => {
+        populateDeferredLoveState(db, clock, linkId, 'Backup');
+        populateLoveApiProofState(db, clock, linkId, 'Backup');
+      },
+      afterBackup: ({ db, clock, linkId }) => {
+        populateDeferredLoveState(db, clock, linkId, 'Live');
+        liveUri = populateLoveApiProofState(db, clock, linkId, 'Live');
+        db.run('DELETE FROM operations WHERE id=?', 'live-api-put');
+        db.run("DELETE FROM forward_outbox WHERE id='live-api-sent-row'");
+      },
+    });
+    expect(liveUri).not.toBeNull();
+    for (const table of LOVE_API_TABLES) {
+      expect(query(world.backupPath, `SELECT count(*) AS count FROM ${table}`)[0]?.count, `${table} backup`).toBe(1);
+      const expectedLiveRows = table === 'love_api_intent_epochs' || table === 'love_api_proof_state' ? 1 : 2;
+      expect(query(world.dbPath, `SELECT count(*) AS count FROM ${table}`)[0]?.count, `${table} live`).toBe(
+        expectedLiveRows,
+      );
+    }
+    expect(query(world.backupPath, 'SELECT api_origin FROM love_api_bindings')).toEqual([{ api_origin: 'lastfm' }]);
+    expect(query(world.dbPath, 'SELECT api_origin,operation_id FROM love_api_bindings ORDER BY operation_id')).toEqual([
+      { api_origin: 'lastfm', operation_id: 'backup-api-put' },
+      { api_origin: 'lastfm', operation_id: 'live-api-put' },
+    ]);
+    expect(query(world.dbPath, "SELECT 1 AS present FROM operations WHERE id='live-api-put'")).toEqual([]);
+    expect(query(world.dbPath, "SELECT 1 AS present FROM forward_outbox WHERE id='live-api-sent-row'")).toEqual([]);
+
+    const servicePort = await freePort();
+    const systemd = new FakeSystemd(world, { servicePort });
+    await systemd.boot();
+    const result = await restoreCli(world, systemd, [...baseArgs(world), '--listen', `127.0.0.1:${servicePort}`]);
+    expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
+    const db = systemd.server!.server.db;
+    expect(db.one('SELECT max(version) AS version FROM schema_migrations')).toEqual({ version: 57 });
+    for (const table of LOVE_API_TABLES) {
+      const expectedRows = table === 'love_api_intent_epochs' || table === 'love_api_proof_state' ? 1 : 2;
+      expect(db.one(`SELECT count(*) AS count FROM ${table}`), table).toEqual({ count: expectedRows });
+    }
+    expect(
+      db.one('SELECT api_origin,operation_id FROM love_api_bindings WHERE operation_id=?', 'live-api-put'),
+    ).toEqual({
+      api_origin: 'lastfm',
+      operation_id: 'live-api-put',
+    });
+    expect(db.one('SELECT state,sent_operation_id FROM love_api_recipients WHERE uri=?', liveUri)).toEqual({
+      state: 'sealed',
+      sent_operation_id: 'live-api-put',
+    });
+    expect(db.one('SELECT 1 FROM operations WHERE id=?', 'live-api-put')).toBeNull();
+    expect(db.one('SELECT 1 FROM forward_outbox WHERE id=?', 'live-api-sent-row')).toBeNull();
+    expect(
+      materializeLoveApiRecipientDecisions(db, world.clock.nowMs(), seededRandom(77), 'restore-fresh-session'),
+    ).toMatchObject({ visited: 2, awaiting: 2, queued: 0, refused: 0 });
+    expect(reclaimLoveApiProofRows(db, world.clock.nowMs())).toMatchObject({ visited: 2, bindingsDeleted: 0 });
+    expect(db.one('SELECT api_origin FROM love_api_bindings WHERE operation_id=?', 'live-api-put')).toEqual({
+      api_origin: 'lastfm',
+    });
+    await stopServer(systemd.server!.server);
+    systemd.server = null;
+    expect(query(world.dbPath, 'PRAGMA foreign_key_check')).toEqual([]);
+    expect(query(world.backupPath, 'PRAGMA foreign_key_check')).toEqual([]);
   }, 30_000);
 
   it('merges populated schema-56 love state from the readable live DB and reopens it in a fresh server composition', async () => {
