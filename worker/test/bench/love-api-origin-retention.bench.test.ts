@@ -6,7 +6,7 @@ import { type Harness, LOVE, withHarness } from '../node/outbox/support';
 
 const PAGE_READ_BOUND = 10;
 const PAGE_MUTATION_BOUND = 17;
-const PAGE_CHANGED_BOUND = 17;
+const PAGE_CHANGED_BOUND = 16;
 const PAGE_VISIT_BOUND = LOVE_API_RECLAIM_PAGE;
 
 interface PassMetric {
@@ -228,10 +228,10 @@ it('keeps selected origins and reclaims large unneeded binding history in finite
 });
 
 it('trips the actual per-page read, mutation, changed-row and visit bounds', () => {
-  const metric: PassMetric = { reads: 10, mutations: 17, changedRows: 17, returnedRows: 8, statements: [] };
+  const metric: PassMetric = { reads: 10, mutations: 17, changedRows: 16, returnedRows: 8, statements: [] };
   expect(() => assertPageBounds({ ...metric, reads: 11 }, 8)).toThrow('origin reclaim read bound exceeded');
   expect(() => assertPageBounds({ ...metric, mutations: 18 }, 8)).toThrow('origin reclaim mutation bound exceeded');
-  expect(() => assertPageBounds({ ...metric, changedRows: 18 }, 8)).toThrow(
+  expect(() => assertPageBounds({ ...metric, changedRows: 17 }, 8)).toThrow(
     'origin reclaim changed-row bound exceeded',
   );
   expect(() => assertPageBounds(metric, 9)).toThrow('origin reclaim visit bound exceeded');

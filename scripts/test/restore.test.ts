@@ -1428,12 +1428,12 @@ describe('restore.ts', () => {
     const scheduled: number[] = [];
     const timerNow = world.clock.nowMs() + 2_000;
     await l2Timer!(timerNow, {
-      schedule: (_name, at) => {
+      schedule: (_name: 'link-backfill', at: number) => {
         scheduled.push(at);
         return at;
       },
       kick: () => null,
-    } as ExtensionContext);
+    } as unknown as ExtensionContext);
     expect(scheduled).toHaveLength(1);
     expect(db.one('SELECT min(due_at_ms) AS due FROM love_api_unlove_decisions')).toEqual({ due: timerNow + 1_000 });
     expect(reclaimLoveApiProofRows(db, world.clock.nowMs())).toMatchObject({ visited: 2, bindingsDeleted: 0 });
