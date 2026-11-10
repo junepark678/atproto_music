@@ -2256,3 +2256,140 @@ it('review: external unlove retains its known MBID after terminal forward GC', a
   expect(w.rows().filter((r) => r.kind === 'unlove')).toHaveLength(1);
   expect(w.rows().find((r) => r.kind === 'unlove')?.state).toBe('sent');
 });
+
+it.fails('known residual: source-excluded pull love plus verified survivor must suppress premature unlove', async () => {
+  const { SignedRepo } = await import('@atmusic/atproto/test-support/signed-repo');
+  const { fixtureKeys } = await import('@atmusic/atproto/test-support/keys');
+  const { applyRecordProof } = await import('../../../src/do/write/apply-record');
+  const { enqueueHints } = await import('../../../src/do/ingest/hints');
+  const { readLiveEvidence } = await import('../../../src/do/ingest/live-evidence');
+  const { seedUser, putProof, deleteProof, liveApplyOptions, PREFIX } = await import('../../write/support');
+  const w = await world();
+  const targetLinkId = w.link();
+  const sourceLinkId = 'linked-pull-love-projection-source';
+  w.app.db.run(
+    `INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,forward_scrobbles,
+       forward_now_playing,pull_enabled,status,created_at_ms,updated_at_ms)
+     VALUES(?,?,'lastfm','remote-fm',X'00','e1',1,1,1,'active',?,?)`,
+    sourceLinkId,
+    ALICE,
+    w.clock.nowMs(),
+    w.clock.nowMs(),
+  );
+  w.app.db.run(
+    `INSERT INTO linked_pull_state(link_id,generation,source_service,source_account,listen_watermark_ms,updated_at_ms)
+     VALUES(?,1,'lastfm','remote-fm',0,?)`,
+    sourceLinkId,
+    w.clock.nowMs(),
+  );
+  const recordingMbid = MBID;
+  expect(
+    stageLovePage(w.app.db, {
+      linkId: sourceLinkId,
+      generation: 1,
+      sourceService: 'lastfm',
+      sourceAccount: 'remote-fm',
+      did: ALICE,
+      proposedCursor: null,
+      proposedBoundaryMs: w.clock.nowMs(),
+      proposedBoundaryKey: null,
+      nowMs: w.clock.nowMs(),
+      items: [
+        {
+          itemKey: 'source-projection-love',
+          artist: 'Projection Artist',
+          track: 'Projection Track',
+          recordingMbid,
+          payload: { artist: 'Projection Artist', track: 'Projection Track', recordingMbid },
+        },
+      ],
+    }),
+  ).toEqual(['accepted']);
+  expect(
+    await writePullSlice(w.app.composed.core.deps, {
+      linkId: sourceLinkId,
+      generation: 1,
+      available: async () => ({ available: true }),
+    }),
+  ).toMatchObject({ accepted: 1 });
+  expect(
+    w
+      .rows()
+      .filter((row) => row.kind === 'love')
+      .map((row) => row.link_id),
+  ).toEqual([targetLinkId]);
+  await w.run();
+  expect(w.lb.feedback.map((entry) => entry.json)).toEqual([{ recording_mbid: recordingMbid, score: 1 }]);
+
+  seedUser(w.app.db, ALICE);
+  const repo = new SignedRepo(ALICE, (await fixtureKeys()).alice, { clock: w.clock });
+  const collection = `${PREFIX}.love`;
+  const proofRandom = seededRandom(991);
+  const makeRecord = (createdAt: string) => ({
+    $type: collection,
+    artist: 'Projection Artist',
+    track: 'Projection Track',
+    recordingMbid,
+    createdAt,
+  });
+  const applyVerified = async (
+    proof: Awaited<ReturnType<typeof putProof | typeof deleteProof>>,
+    action: 'create' | 'update' | 'delete',
+    rkey: string,
+  ) => {
+    enqueueHints(w.app.db, [
+      {
+        did: ALICE,
+        collection,
+        rkey,
+        source: 'jetstream',
+        hintRev: proof.commit.rev,
+        live: proof.state === 'absent' ? { operation: 'delete' as const } : { operation: action, cid: proof.cid },
+        receiptMs: w.clock.nowMs(),
+      },
+    ]);
+    w.app.db.tx(() =>
+      applyRecordProof(w.app.db, proof, {
+        ...liveApplyOptions(proof, proofRandom, action),
+        live: {
+          random: proofRandom,
+          evidence: readLiveEvidence(w.app.db, `at://${ALICE}/${collection}/${rkey}`, w.clock.nowMs()),
+          legacyRev: null,
+        },
+      }),
+    );
+  };
+
+  const first = await putProof(repo, collection, 'projection-survivor-a', makeRecord('2026-01-15T12:01:00Z'));
+  await applyVerified(first, 'create', 'projection-survivor-a');
+  const second = await putProof(repo, collection, 'projection-survivor-b', makeRecord('2026-01-15T12:02:00Z'));
+  await applyVerified(second, 'create', 'projection-survivor-b');
+  expect(w.app.db.one("SELECT count(*) AS n FROM forward_outbox WHERE kind='unlove'")).toEqual({ n: 0 });
+  const removeFirst = await deleteProof(repo, collection, 'projection-survivor-a');
+  await applyVerified(removeFirst, 'delete', 'projection-survivor-a');
+  expect(w.app.db.one('SELECT count(*) AS n FROM loves WHERE did=?', ALICE)).toEqual({ n: 1 });
+  expect(
+    w.app.db.one("SELECT count(*) AS n FROM forward_outbox WHERE kind='unlove'"),
+    JSON.stringify({
+      outbox: w.app.db.all("SELECT kind,state,dedupe_key,last_error FROM forward_outbox WHERE kind='unlove'"),
+      loves: w.app.db.all('SELECT rkey,artist,track,recording_mbid FROM loves WHERE did=?', ALICE),
+      intents: w.app.db.all(
+        'SELECT love_key,intent,operation_id,recording_mbid FROM linked_love_intents WHERE did=?',
+        ALICE,
+      ),
+    }),
+  ).toEqual({ n: 0 });
+  await w.run();
+  expect(w.lb.feedback.map((entry) => entry.json)).not.toContainEqual({ recording_mbid: recordingMbid, score: 0 });
+
+  const removeLast = await deleteProof(repo, collection, 'projection-survivor-b');
+  await applyVerified(removeLast, 'delete', 'projection-survivor-b');
+  expect(w.app.db.one('SELECT count(*) AS n FROM loves WHERE did=?', ALICE)).toEqual({ n: 0 });
+  await w.run();
+  expect(w.lb.feedback.map((entry) => entry.json)).toEqual([
+    { recording_mbid: recordingMbid, score: 1 },
+    { recording_mbid: recordingMbid, score: 0 },
+  ]);
+  expect(w.rows().filter((row) => row.kind === 'unlove' && row.state === 'sent')).toHaveLength(1);
+  expect(w.rows().some((row) => row.link_id === sourceLinkId)).toBe(false);
+});

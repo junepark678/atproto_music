@@ -15,7 +15,7 @@ import { runLinkBackfill } from '../../../src/forward/backfill';
 import { expireRows, HELD_RETENTION_MS, holdLinkRows, settleRows } from '../../../src/forward/forward-outbox';
 import { type ForwardRuntime, runForward } from '../../../src/forward/forwarder';
 import { LastfmClient } from '../../../src/forward/lastfm-client';
-import { patchLink, saveLink } from '../../../src/forward/links';
+import { patchLink, revokeLink, saveLink } from '../../../src/forward/links';
 import { ListenbrainzClient } from '../../../src/forward/listenbrainz-client';
 import { conflictDeferredLoveAuthority } from '../../../src/forward/love-coverage-authority';
 import { remoteLoveState } from '../../../src/forward/love-delivery';
@@ -400,37 +400,95 @@ it('resumes a held love through same-remote relink and sends it exactly once', a
   });
 });
 
-it('expires a held row without transport and retains its local receipt', async () => {
+it.each(['listenbrainz', 'lastfm'] as const)(
+  'expires a held %s row without transport and retains its local receipt',
+  async (service) => {
+    await withMigratedDb(async (db) => {
+      seedLink(db);
+      db.run('UPDATE linked_accounts SET service=? WHERE id=?', service, 'replacement-link');
+      const operationId = 'held-expired-unlove';
+      enqueueForwards(db, {
+        did: ALICE,
+        items: [
+          {
+            kind: 'unlove',
+            operationId,
+            payload: { artist: 'Expired Artist', track: 'Expired Track', recordingMbid: REVIVAL_MBID },
+          },
+        ],
+        now: NOW_MS,
+        random: rng,
+      });
+      const row = db.one<{ id: string }>('SELECT id FROM forward_outbox WHERE dedupe_key=?', operationId)!;
+      expect(holdLinkRows(db, 'replacement-link', NOW_MS, 1)).toBe(1);
+      db.run('UPDATE forward_outbox SET updated_at_ms=? WHERE id=?', NOW_MS - HELD_RETENTION_MS - 1, row.id);
+      expect(expireRows(db, NOW_MS).held).toBe(1);
+      expect(db.one('SELECT state,last_error FROM forward_outbox WHERE id=?', row.id)).toEqual({
+        state: 'expired',
+        last_error: 'held_expired',
+      });
+      expect(
+        db.one(
+          "SELECT retired_at_ms FROM forward_receipts WHERE link_id='replacement-link' AND kind='unlove' AND dedupe_key=?",
+          operationId,
+        ),
+      ).toEqual({ retired_at_ms: null });
+      expect((await forward(db)).feedbacks).toEqual([]);
+    });
+  },
+);
+
+it('keeps a revoked ListenBrainz love authoritative while an unlove waits, then sends it once after same-remote relink', async () => {
   await withMigratedDb(async (db) => {
     seedLink(db);
-    const operationId = 'held-expired-unlove';
-    enqueueForwards(db, {
-      did: ALICE,
-      items: [
-        {
-          kind: 'unlove',
-          operationId,
-          payload: { artist: 'Expired Artist', track: 'Expired Track', recordingMbid: REVIVAL_MBID },
-        },
-      ],
-      now: NOW_MS,
-      random: rng,
-    });
-    const row = db.one<{ id: string }>('SELECT id FROM forward_outbox WHERE dedupe_key=?', operationId)!;
-    expect(holdLinkRows(db, 'replacement-link', NOW_MS, 1)).toBe(1);
-    db.run('UPDATE forward_outbox SET updated_at_ms=? WHERE id=?', NOW_MS - HELD_RETENTION_MS - 1, row.id);
-    expect(expireRows(db, NOW_MS).held).toBe(1);
-    expect(db.one('SELECT state,last_error FROM forward_outbox WHERE id=?', row.id)).toEqual({
-      state: 'expired',
-      last_error: 'held_expired',
-    });
+    const payload = { artist: 'Revoked Resume Artist', track: 'Revoked Resume Track', recordingMbid: REVIVAL_MBID };
     expect(
-      db.one(
-        "SELECT retired_at_ms FROM forward_receipts WHERE link_id='replacement-link' AND kind='unlove' AND dedupe_key=?",
-        operationId,
-      ),
-    ).toEqual({ retired_at_ms: null });
-    expect((await forward(db)).feedbacks).toEqual([]);
+      enqueueForwards(db, {
+        did: ALICE,
+        items: [{ kind: 'love', operationId: 'revoked-resume-love', payload }],
+        now: NOW_MS,
+        random: rng,
+      }),
+    ).toBe(1);
+    expect((await forward(db)).feedbacks).toEqual([{ recordingMbid: REVIVAL_MBID, score: 1 }]);
+
+    const link = db.one<{ id: string; generation: number; credential_ciphertext: ArrayBuffer }>(
+      'SELECT id,generation,credential_ciphertext FROM linked_accounts WHERE id=?',
+      'replacement-link',
+    )!;
+    expect(revokeLink(db, link, 'credential_revoked', NOW_MS + 1)).toBe(true);
+    expect(holdLinkRows(db, link.id, NOW_MS + 1)).toBe(0);
+    expect(db.one('SELECT status FROM linked_accounts WHERE id=?', link.id)).toEqual({ status: 'revoked' });
+
+    const unlove = { artist: payload.artist, track: payload.track, recordingMbid: payload.recordingMbid };
+    expect(
+      enqueueForwards(db, {
+        did: ALICE,
+        items: [{ kind: 'unlove', operationId: 'revoked-resume-unlove', payload: unlove }],
+        now: NOW_MS + 2,
+        random: rng,
+      }),
+    ).toBe(0);
+    expect(db.one("SELECT count(*) AS n FROM forward_outbox WHERE kind='unlove'")).toEqual({ n: 0 });
+
+    const relinked = saveLink(
+      {
+        db,
+        clock: { nowMs: () => NOW_MS + 3 },
+        random: rng,
+        box: createBox(testSecrets().encryptionKeys, rng),
+      },
+      { did: ALICE, service: 'listenbrainz', remoteUser: 'alice', credential: 'resumed-token' },
+    );
+    expect(relinked).toMatchObject({ created: false, link: { generation: 1, status: 'active' } });
+    expect(db.one('SELECT count(*) AS n FROM forward_deferred_love_intents')).toEqual({ n: 1 });
+    db.run("UPDATE users SET indexing_state='current' WHERE did=?", ALICE);
+    for (let turn = 0; turn < 8; turn++) await runLinkBackfill(db, rng, NOW_MS + 10 + turn);
+    expect(db.one("SELECT state FROM forward_outbox WHERE kind='unlove'")).toEqual({ state: 'queued' });
+    await forward(db, NOW_MS + 1_000);
+    expect(db.one("SELECT state FROM forward_outbox WHERE kind='unlove'")).toEqual({ state: 'sent' });
+    await forward(db, NOW_MS + 2_000);
+    expect(db.one("SELECT count(*) AS n FROM forward_outbox WHERE kind='unlove' AND state='sent'")).toEqual({ n: 1 });
   });
 });
 
