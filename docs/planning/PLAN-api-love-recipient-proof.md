@@ -544,15 +544,20 @@ controls trip their own guards.
 
 ## Remaining gates
 
-For Sol's fresh reconciliation against the cdb78de audit pin, the exact
-post-cdb production-source diff SHA-256 is
-`4fec39a75cb84187beb34f3613c7c38d554f2ba024ec1f418cc22782e1bd1b55`.
-That source diff is 7 files, 880 insertions and 125 deletions: pending-removal
-producer, apply-record, backfill timer composition, L2 maintenance,
-materializer, recipient leaf, and scheduler. The audit repair code is included
-in that diff; subsequent commits in this continuation add only tests/docs.
-Sol's pinned review must be refreshed against the final head before any
-readiness conclusion.
+For Sol's reconciliation against the cdb78de audit pin, the earlier source
+diff SHA-256 `4fec39a75cb84187beb34f3613c7c38d554f2ba024ec1f418cc22782e1bd1b55`
+is retained as the pre-backfill-fix receipt and is superseded. The current
+working-tree source diff SHA-256 is
+`6c2177fb05a370d66a6ff1ab5caae761e9074f381eac78f2f68aa02980f6e872` across 7
+files, 904 insertions and 125 deletions. It adds 24 net lines to
+`backfill.ts`: an actual scoped run exposed a duplicate synthetic backfill for
+an API incarnation already admitted to the exact current recipient. Backfill
+now skips only when the persisted binding has an exact current-generation
+recipient with that operation as its SENT proof or pending member. A later
+ListenBrainz link without that recipient still receives ordinary backfill; the
+positive and negative cases pass. This production source change is post-cdb and
+must be included in Sol's fresh audit. The other six source files remain as in
+the prior source digest; no schema, DDL, or cap change was made.
 
 Migration57 is registered at the planner-authorized revised hash above. The
 old-hash authorizer/CLI receipts are preserved and explicitly superseded; the

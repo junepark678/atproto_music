@@ -175,6 +175,28 @@ function sourceService(source: string | null): 'lastfm' | 'listenbrainz' | null 
   return null;
 }
 
+function hasCurrentApiRecipientAdmission(db: Db, link: LinkedAccountRow, uri: string, incarnationKey: string): boolean {
+  return (
+    db.one(
+      `SELECT 1 FROM love_api_bindings b
+       JOIN love_api_recipients r ON r.did=b.did AND r.uri=b.uri AND r.incarnation_key=b.incarnation_key
+       WHERE b.did=? AND b.uri=? AND b.incarnation_key=? AND r.link_id=? AND r.generation=?
+         AND r.state IN ('present','sealed') AND (
+           r.sent_operation_id=b.operation_id OR EXISTS(
+             SELECT 1 FROM love_api_recipient_members m
+             WHERE m.link_id=r.link_id AND m.generation=r.generation AND m.operation_id=b.operation_id
+               AND m.did=r.did AND m.uri=r.uri AND m.incarnation_key=r.incarnation_key
+           )
+         ) LIMIT 1`,
+      link.did,
+      uri,
+      incarnationKey,
+      link.id,
+      link.generation,
+    ) !== null
+  );
+}
+
 function payloadForHistoryRow(
   db: Db,
   link: LinkedAccountRow,
@@ -187,6 +209,8 @@ function payloadForHistoryRow(
       row.uri,
     );
     if (incarnation === null || incarnation.incarnation_key !== identityKey) return null;
+    if (incarnation.path === 'api' && hasCurrentApiRecipientAdmission(db, link, row.uri, incarnation.incarnation_key))
+      return null;
     if (incarnation.path === 'import' && sourceService(incarnation.source_service) === null) return null;
     if (incarnation.path === 'import' && sourceService(incarnation.source_service) === link.service) return null;
     const destinationClass = link.service === 'lastfm' ? 1 : 2;

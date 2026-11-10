@@ -277,6 +277,18 @@ describe('backfill love recording eligibility', () => {
         'SELECT incarnation_key,path FROM love_incarnations WHERE uri=?',
         uri,
       );
+      expect(
+        h.db.one(
+          `SELECT b.operation_id FROM love_api_bindings b
+           JOIN love_api_recipients r ON r.did=b.did AND r.uri=b.uri AND r.incarnation_key=b.incarnation_key
+           JOIN love_api_recipient_members m ON m.did=r.did AND m.uri=r.uri AND m.incarnation_key=r.incarnation_key
+             AND m.link_id=r.link_id AND m.generation=r.generation AND m.operation_id=b.operation_id
+           WHERE b.did=? AND b.uri=? AND r.link_id=? AND r.generation=1`,
+          h.alice,
+          uri,
+          link,
+        ),
+      ).toEqual({ operation_id: accepted.operation.id });
 
       for (let turn = 0; turn < 3; turn++) await backfill(h);
 
@@ -288,6 +300,17 @@ describe('backfill love recording eligibility', () => {
           link,
         ),
       ).toHaveLength(0);
+
+      // A later link has no exact current-generation API recipient admission;
+      // ordinary history backfill still covers that newly linked destination.
+      const laterLink = h.link(h.alice, 'listenbrainz');
+      for (let turn = 0; turn < 3; turn++) await backfill(h);
+      expect(
+        h.db.all<{ payload_json: string }>(
+          "SELECT payload_json FROM forward_outbox WHERE link_id=? AND kind='love' AND json_extract(payload_json,'$.origin')='backfill'",
+          laterLink,
+        ),
+      ).toHaveLength(1);
     });
   });
 
