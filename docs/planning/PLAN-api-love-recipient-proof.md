@@ -4,7 +4,7 @@
 
 L2 is stacked on READY PR #209 at `5d573706bf07bb50e0c8b79cf1d34a3f6c56a975`.
 Root orchestration thread: <t3-thread://v2/087fc341-1687-4dc7-ab25-e7c53896db5e/31bac5d7-edc0-4879-af3e-91e9f6e2600c>.
-Migration 57 is allocated but not yet pushed with the planner-authorized
+Migration 57 is registered and pushed with the planner-authorized
 original-origin amendment. Its exact revised proposal is
 [finding32-source-origin-revised57-proposal.sql](finding32-source-origin-revised57-proposal.sql):
 17 statements, eight non-derived tables, and nine indexes.
@@ -15,9 +15,9 @@ Migration 57 adds only `api_origin` to `love_api_bindings`, constrained to
 accepted operation's actual origin, with no default or inferred history.
 Migrations 1–56 remain byte-identical. Superseded proposal SHA-256:
 `8f13e1943e5ad59984c4bd9d783e299cce931963f40643303e0f30cce3768a5d`.
-Its receipts are preserved as superseded evidence. Prior old-hash 56→57 CLI
-receipts do not prove the amended migration; rerun them against the new hash.
-Populated-L2 restore and whole-path readiness remain pending.
+Its receipts are preserved as superseded evidence. New-hash real CLI 56→57
+upgrade and older-live restore passed. Populated-L2 restore and whole-path
+readiness remain pending.
 
 ### Pre-amendment database audit
 
@@ -226,6 +226,28 @@ restore CLI 56→57 plus older-live merge, secret scan, typecheck, scoped Biome,
 and diff check passed for their recorded commits. Full cold/warm/refusal/replay
 handoff combinations, producer-batch pinning, and complete actual whole-path
 traces remain pending.
+The guarded materializer now reconstructs its handoff only from the exact
+sealed recipient, current link generation, persisted SENT API binding,
+immutable payload, retained clean fact, original minimum horizon, and
+alias/session/epoch guards. A production transport regression creates and
+forwards a love through the actual API executor and ListenBrainz fake, applies
+verified present and absent repository proofs, records the retained delete
+comparison, gets a deferred acknowledgement with zero egress while paused,
+then sends one unlove after the same remote resumes and sends nothing on rerun.
+This does not yet cover the whole caller matrix or producer-batch pinning.
+
+The timer now runs a bounded keyset reclamation pass over migration57's
+existing binding/fact sequence frontiers. It retains original API origin while
+an exact selected aggregate/member/decision still depends on it, and keeps
+expired comparison facts while a decision or B2 authority still references
+them. Small Node regressions verify retained-origin and post-release cleanup,
+plus zero-write repeated empty ticks. Large-growth work/fairness controls and
+full maintenance lane accounting remain pending.
+
+The current materializer branch trace from the actual Node DB facade measured
+8 changed rows, 53 read statements, eight mutation statements, and 21 returned
+rows for one created decision. This is a warm created-decision branch only,
+not the hard whole-path proof.
 No whole-path128 or full-L2 budget proof is claimed. The next stages must
 measure actual helper, handoff and whole decision costs, retaining the hard
 96-write/16-visit/DECISION28 limits and provisional whole-read128 gate.
@@ -266,12 +288,12 @@ Those artifacts measured materialization plus one link-scoped enqueue only.
 Migration57 is registered at the planner-authorized revised hash above. The
 old-hash authorizer/CLI receipts are preserved and explicitly superseded; the
 new-hash authorizer, real 56→57 CLI upgrade, and older-live restore passed on
-the amended migration slice. Full L2 behavior, whole-path128 traces and
-countercontrol, fresh Astra review of that gate, populated-L2 restore,
-producer-batch pinning, bounded retention/reclamation, scheduler/maintenance,
-terminal cleanup, and scale gates remain pending. Small behavior fixtures
-belong in `worker-node`; growing fixtures belong in `worker-bench` with
-VM/statement/returned-row bounds, not elapsed-time claims.
+the amended migration slice. Whole-path128 traces and countercontrol, fresh
+Astra review of that gate, populated-L2 restore, producer-batch pinning,
+complete scheduler/maintenance accounting, terminal cleanup, and scale gates
+remain pending. Small behavior fixtures belong in `worker-node`; growing
+fixtures belong in `worker-bench` with VM/statement/returned-row bounds, not
+elapsed-time claims.
 
 
 ## Narrow request-metadata correction

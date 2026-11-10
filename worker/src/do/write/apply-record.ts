@@ -1107,11 +1107,21 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
       priorLove !== null &&
       db.one(
         `SELECT 1 FROM linked_love_intents WHERE did=? AND intent='love'
-         AND (love_key=? OR (? IS NOT NULL AND recording_mbid=?)) LIMIT 1`,
+         AND (love_key=? OR (? IS NOT NULL AND recording_mbid=?))
+         AND NOT EXISTS(
+           SELECT 1 FROM love_api_recipients r
+           JOIN linked_accounts l ON l.id=r.link_id AND l.generation=r.generation
+           JOIN love_api_bindings b ON b.did=r.did AND b.operation_id=r.sent_operation_id
+           WHERE r.did=linked_love_intents.did AND r.uri=? AND r.incarnation_key=?
+             AND r.sent_operation_id=linked_love_intents.operation_id AND r.state IN ('present','sealed')
+             AND b.uri=r.uri AND b.incarnation_key=r.incarnation_key
+         ) LIMIT 1`,
         t.did,
         `${priorArtistKey}\u0000${priorTrackKey}`,
         priorLove.recording_mbid,
         priorLove.recording_mbid,
+        t.uri,
+        loveIncarnation?.incarnation_key ?? '',
       ) !== null;
     if (authRev !== null && t.kind === 'love' && priorLove && !newerLoveIntent && !locallyReloved) {
       const [artistKeyValue, trackKeyValue] = trackKey(priorLove.artist, priorLove.track);

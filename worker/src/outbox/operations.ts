@@ -44,6 +44,7 @@ import { MAX_ATTEMPTS } from '@atmusic/core/write-policy';
 import type { OperationKind, OperationRow, OperationState, Origin } from '../app/rows';
 import type { Db } from '../do/db';
 import { bumpStatsVersion } from '../do/write/account-state';
+import { bumpLoveApiIntentEpoch } from '../forward/love-api-recipients';
 import { indexLoveOperationTarget } from '../forward/love-recording-targets';
 import { releaseForwardAdmission } from '../forward/projection';
 import { deleteQueuedForwardIdentity } from './forward-key';
@@ -397,6 +398,7 @@ export function cancelUnsent(db: Db, id: string, now: number): boolean {
     const op = loadOperation(db, id);
     if (op === null || !isUnsent(op)) return false;
     db.run(`UPDATE operations SET state = 'cancelled', updated_at_ms = ? WHERE id = ?`, now, id);
+    if (op.kind === 'love.put' && op.origin !== 'import') bumpLoveApiIntentEpoch(db, op.did);
     if (op.kind === 'scrobble.delete') bumpStatsVersion(db, op.did);
     const keys = db.all<{ dedupe_key: string }>(
       'SELECT dedupe_key FROM listen_keys WHERE did = ? AND operation_id = ?',

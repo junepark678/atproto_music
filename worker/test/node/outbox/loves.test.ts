@@ -5,9 +5,12 @@ import { verifyRecordProof } from '@atmusic/atproto/verify/record-proof';
 import { seededRandom } from '@atmusic/core/test-support/random';
 import { fromMs } from '@atmusic/core/timestamp';
 import { expect, it } from 'vitest';
+import type { Db, SqlParam } from '../../../src/do/db';
 import { recordLiveEvidence } from '../../../src/do/ingest/live-evidence';
 import { applyRecordProof } from '../../../src/do/write/apply-record';
 import { settleRows } from '../../../src/forward/forward-outbox';
+import { materializeLoveApiRecipientDecisions } from '../../../src/forward/love-api-materializer';
+import { bumpLoveApiIntentEpoch, prepareLoveApiRecipientHandoff } from '../../../src/forward/love-api-recipients';
 import { enqueueForwards } from '../../../src/outbox/forward-enqueue';
 import { enqueueLove, enqueueUnlove } from '../../../src/outbox/love-ops';
 import { authorizedLiveOptions } from '../../write/support';
@@ -18,6 +21,76 @@ function love(artist: string, track: string) {
 }
 
 const projectionRandom = seededRandom(27);
+
+function traceDb(raw: Db): {
+  db: Db;
+  result: () => { reads: number; mutationStatements: number; returnedRows: number; changedRows: number };
+} {
+  let reads = 0;
+  let mutationStatements = 0;
+  let returnedRows = 0;
+  const mutation = /^\s*(?:INSERT|UPDATE|DELETE|REPLACE)\b/i;
+  const before = raw.one<{ n: number }>('SELECT total_changes() AS n')!.n;
+  const db: Db = {
+    all<T>(sql: string, ...params: SqlParam[]): T[] {
+      if (mutation.test(sql)) mutationStatements++;
+      else reads++;
+      const rows = raw.all<T>(sql, ...params);
+      returnedRows += rows.length;
+      return rows;
+    },
+    one<T>(sql: string, ...params: SqlParam[]): T | null {
+      reads++;
+      const row = raw.one<T>(sql, ...params);
+      if (row !== null) returnedRows++;
+      return row;
+    },
+    run(sql: string, ...params: SqlParam[]) {
+      mutationStatements++;
+      return raw.run(sql, ...params);
+    },
+    tx<T>(fn: () => T extends Promise<unknown> ? never : T): T {
+      return raw.tx(fn);
+    },
+  };
+  return {
+    db,
+    result: () => ({
+      reads,
+      mutationStatements,
+      returnedRows,
+      changedRows: raw.one<{ n: number }>('SELECT total_changes() AS n')!.n - before,
+    }),
+  };
+}
+
+it('bumps the durable alias epoch for API love and unlove intents but not imports', async () => {
+  await withHarness(async (h) => {
+    h.seedUser(h.alice);
+    const put = await enqueueLove(h.m, {
+      did: h.alice,
+      input: { artist: 'Alias artist', track: 'Alias track', recordingMbid: '12345678-1234-1234-1234-123456789abc' },
+      origin: 'web',
+    });
+    expect(put.ok).toBe(true);
+    expect(h.db.one('SELECT epoch FROM love_api_intent_epochs WHERE did=?', h.alice)).toEqual({ epoch: 1 });
+    const remove = await enqueueUnlove(h.m, {
+      did: h.alice,
+      artist: 'Alias artist',
+      track: 'Alias track',
+      origin: 'web',
+    });
+    expect(remove.ok).toBe(true);
+    expect(h.db.one('SELECT epoch FROM love_api_intent_epochs WHERE did=?', h.alice)).toEqual({ epoch: 2 });
+    const imported = await enqueueLove(h.m, {
+      did: h.alice,
+      input: { artist: 'Alias artist', track: 'Alias track' },
+      origin: 'import',
+    });
+    expect(imported.ok).toBe(true);
+    expect(h.db.one('SELECT epoch FROM love_api_intent_epochs WHERE did=?', h.alice)).toEqual({ epoch: 2 });
+  });
+});
 
 /** Applies a fake-PDS commit through the production record-proof verifier and projector. */
 async function projectLove(h: Harness, rkey: string, live = false) {
@@ -326,7 +399,12 @@ it('reconstructs API source from L2 after operation and sent-outbox cleanup befo
     const linkId = h.link(h.alice, 'lastfm');
     const created = await enqueueLove(h.m, {
       did: h.alice,
-      input: { artist: 'Proof artist', track: 'Proof track' },
+      input: {
+        artist: 'Proof artist',
+        track: 'Proof track',
+        album: 'Proof album',
+        recordingMbid: '12345678-1234-1234-1234-123456789abc',
+      },
       origin: 'listenbrainz',
     });
     if (!created.ok) throw new Error(JSON.stringify(created.reason));
@@ -360,7 +438,6 @@ it('reconstructs API source from L2 after operation and sent-outbox cleanup befo
     expect(h.db.one('SELECT operation_id FROM love_api_recipient_members')).toEqual({ operation_id: op.id });
     settleRows(h.db, [effect!.id], 'sent', h.m.clock.nowMs(), null, true, effect!.generation);
     expect(h.db.one('SELECT sent_operation_id FROM love_api_recipients')).toEqual({ sent_operation_id: op.id });
-    h.db.run('DELETE FROM linked_love_intents WHERE did=? AND operation_id=?', h.alice, op.id);
     h.db.run('DELETE FROM operations WHERE id=?', op.id);
     h.db.run('DELETE FROM forward_outbox WHERE id=?', effect!.id);
     expect(h.db.one('SELECT 1 FROM operations WHERE id=?', op.id)).toBeNull();
@@ -399,12 +476,63 @@ it('reconstructs API source from L2 after operation and sent-outbox cleanup befo
       authorization_rev: proof.commit.rev,
       fact_action: 'delete',
       fact_cid: '',
-      payload_json: JSON.stringify({ artist: 'Proof artist', track: 'Proof track', origin: 'listenbrainz' }),
+      payload_json: JSON.stringify({
+        artist: 'Proof artist',
+        track: 'Proof track',
+        album: 'Proof album',
+        recordingMbid: '12345678-1234-1234-1234-123456789abc',
+        origin: 'listenbrainz',
+      }),
     });
     expect(
       h.db.one('SELECT 1 FROM love_api_comparison_facts WHERE authorization_rev=?', proof.commit.rev),
     ).not.toBeNull();
     expect(h.db.one('SELECT 1 FROM linked_accounts WHERE id=?', linkId)).not.toBeNull();
+    const alias = await enqueueLove(h.m, {
+      did: h.alice,
+      input: { artist: 'Alias artist', track: 'Alias track', recordingMbid: '12345678-1234-1234-1234-123456789abc' },
+      origin: 'web',
+    });
+    if (!alias.ok) throw new Error(JSON.stringify(alias.reason));
+    const candidate = {
+      did: h.alice,
+      uri,
+      incarnationKey: incarnation!.incarnation_key,
+      linkId,
+      generation: effect!.generation,
+    };
+    expect(prepareLoveApiRecipientHandoff(h.db, candidate, 'composition-after-proof', h.m.clock.nowMs())).toEqual({
+      status: 'awaiting',
+    });
+    h.db.run('DELETE FROM operations WHERE id=?', alias.operation.id);
+    h.db.run("DELETE FROM forward_outbox WHERE link_id=? AND kind='love' AND dedupe_key=?", linkId, alias.operation.id);
+    expect(prepareLoveApiRecipientHandoff(h.db, candidate, 'composition-after-proof', h.m.clock.nowMs())).toEqual({
+      status: 'vetoed',
+    });
+    h.db.run('DELETE FROM linked_love_intents WHERE did=? AND operation_id=?', h.alice, alias.operation.id);
+    bumpLoveApiIntentEpoch(h.db, h.alice);
+    const materializerTrace = traceDb(h.db);
+    const materialized = materializeLoveApiRecipientDecisions(
+      materializerTrace.db,
+      h.m.clock.nowMs(),
+      h.m.random,
+      'composition-after-proof',
+    );
+    const materializerCost = materializerTrace.result();
+    expect(materialized).toMatchObject({ visited: 1, queued: 1, deferred: 0, replay: 0, refused: 0 });
+    expect(materializerCost.changedRows, JSON.stringify(materializerCost)).toBeLessThanOrEqual(28);
+    if (process.env.FINDING32_L2_COST_TRACE === '1')
+      console.info(`L2_ACTUAL_CREATED_DECISION_TRACE ${JSON.stringify({ ...materializerCost, ...materialized })}`);
+    const recipientOperationId = `love-delete:${incarnation!.incarnation_key}:rev:${proof.commit.rev}:api-recipient`;
+    expect(
+      h.db.one<{ kind: string; dedupe_key: string; state: string }>(
+        "SELECT kind,dedupe_key,state FROM forward_outbox WHERE link_id=? AND kind='unlove' AND dedupe_key=?",
+        linkId,
+        recipientOperationId,
+      ),
+    ).toMatchObject({ kind: 'unlove', dedupe_key: recipientOperationId, state: 'queued' });
+    expect(h.db.one('SELECT 1 FROM love_api_unlove_decisions')).toBeNull();
+    expect(h.db.one('SELECT state FROM love_api_recipients')).toEqual({ state: 'released' });
   });
 });
 

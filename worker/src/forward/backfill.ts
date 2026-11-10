@@ -11,6 +11,8 @@ import { matchedRecordingMbid } from '../musicbrainz/store';
 import { enqueueForwards } from '../outbox/forward-enqueue';
 import { closeOpenLinkGap, ownsAdmissionInGap } from './coverage';
 import type { ForwardRuntime } from './forwarder';
+import { reclaimLoveApiProofRows } from './love-api-maintenance';
+import { materializeLoveApiRecipientDecisions } from './love-api-materializer';
 import { runLoveCoverageChunk } from './love-coverage';
 import { LOVE_MAINTENANCE_QUIET_MS, runDeferredLoveMaintenance } from './love-deferral-maintenance';
 import { hasArmedLoveCoverage } from './love-deferral-storage';
@@ -593,6 +595,12 @@ export async function runLinkBackfill(
 }
 
 export function linkBackfillExtension(runtime: () => ForwardRuntime | null): CoreExtension {
+  let sessionToken: string | null = null;
+  const createSessionToken = (rt: ForwardRuntime): string => {
+    const bytes = rt.random.bytes(16);
+    if (bytes.length !== 16) throw new RangeError('Random.bytes(16) returned the wrong length');
+    return Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('');
+  };
   return {
     name: 'link-backfill',
     timers: {
@@ -637,6 +645,25 @@ export function linkBackfillExtension(runtime: () => ForwardRuntime | null): Cor
                 // The maintenance failure remains bounded by the quiet retry.
               }
             }
+            let l2Wake = LOVE_MAINTENANCE_QUIET_MS;
+            let l2Failed = false;
+            try {
+              sessionToken ??= createSessionToken(rt);
+              const materialized = materializeLoveApiRecipientDecisions(rt.db, now, rt.random, sessionToken);
+              const reclaimed = reclaimLoveApiProofRows(rt.db, now);
+              if (materialized.visited + reclaimed.visited > 0) l2Wake = 1_000;
+            } catch (error) {
+              l2Failed = true;
+              try {
+                rt.log.log('warn', 'forward.api_love_materializer_failed', {
+                  error: error instanceof Error ? error.name : 'UnknownError',
+                });
+              } catch {
+                // The materializer failure remains bounded by the quiet retry.
+              }
+            }
+            if (l2Failed) l2Wake = LOVE_MAINTENANCE_QUIET_MS;
+            wake = Math.min(wake, l2Wake);
             ctx.schedule('link-backfill', planned === null ? now + wake : Math.min(planned, now + wake), {
               force: true,
             });
@@ -645,6 +672,8 @@ export function linkBackfillExtension(runtime: () => ForwardRuntime | null): Cor
       },
     },
     start(ctx, now) {
+      const rt = runtime();
+      if (rt !== null) sessionToken = createSessionToken(rt);
       ctx.schedule('link-backfill', now);
     },
   };

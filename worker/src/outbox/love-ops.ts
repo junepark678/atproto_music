@@ -34,7 +34,11 @@ import type { ValidationFailure } from '@atmusic/core/scrobble';
 import { validateDisplayString } from '@atmusic/core/scrobble';
 import type { OperationRow, Origin } from '../app/rows';
 import type { ModuleDeps } from '../do/contracts';
-import { bindApiLoveCreatedOperation, bindApiLoveOperation } from '../forward/love-api-recipients';
+import {
+  bindApiLoveCreatedOperation,
+  bindApiLoveOperation,
+  bumpLoveApiIntentEpoch,
+} from '../forward/love-api-recipients';
 import { admitForwardIdentity } from '../forward/projection';
 import { bindPullLoveAdmission, retirePullLoveAdmissions } from '../sync/pull-love-admissions';
 import { tombstoneLove } from '../sync/tombstones';
@@ -133,6 +137,7 @@ export async function enqueueLove(m: ModuleDeps, args: EnqueueLoveArgs): Promise
         now,
         typeof record.recordingMbid === 'string' ? record.recordingMbid : null,
       );
+    if (args.origin !== 'import') bumpLoveApiIntentEpoch(m.db, args.did);
     admitForwardIdentity(m.db, {
       did: args.did,
       identityKey: `love-uri:${args.did}:${outboxCollections(prefix).love}:${op.rkey}`,
@@ -253,6 +258,7 @@ export async function enqueueUnlove(
         now,
         knownRecordingMbid,
       );
+    if (args.origin !== 'import') bumpLoveApiIntentEpoch(m.db, args.did);
     if (args.origin !== 'import') {
       enqueueForwards(m.db, {
         did: args.did,

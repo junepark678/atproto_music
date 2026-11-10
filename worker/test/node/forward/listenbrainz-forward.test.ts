@@ -13,7 +13,11 @@ import { copyFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as sqlite from 'node:sqlite';
+import { FakePds } from '@atmusic/atproto/test-support/fake-pds';
+import { fixtureKeys } from '@atmusic/atproto/test-support/keys';
 import { routerTransport } from '@atmusic/atproto/test-support/router-transport';
+import { SignedRepo } from '@atmusic/atproto/test-support/signed-repo';
+import { verifyRecordProof } from '@atmusic/atproto/verify/record-proof';
 import { albumKey, trackKey } from '@atmusic/core/music-key';
 import { type FixedClock, fixedClock } from '@atmusic/core/test-support/clock';
 import { seededRandom } from '@atmusic/core/test-support/random';
@@ -23,8 +27,11 @@ import { MemoryRevocations } from '../../../src/app/revocations';
 import type { ForwardOutboxRow } from '../../../src/app/rows';
 import { ensureAccount } from '../../../src/credentials/accounts';
 import type { SqlParam } from '../../../src/do/db';
+import { cachedIdentityResolver } from '../../../src/do/ingest/identity-cache';
+import { recordLiveEvidence } from '../../../src/do/ingest/live-evidence';
 import { migrate } from '../../../src/do/migrate';
 import { MIGRATIONS } from '../../../src/do/schema';
+import { applyRecordProof } from '../../../src/do/write/apply-record';
 import { runLinkBackfill } from '../../../src/forward/backfill';
 import { runDeleteSlice } from '../../../src/forward/delete-forwarder';
 import {
@@ -47,12 +54,14 @@ import {
   runForward,
 } from '../../../src/forward/forwarder';
 import { deleteLink, patchLink, saveLink } from '../../../src/forward/links';
+import { materializeLoveApiRecipientDecisions } from '../../../src/forward/love-api-materializer';
 import { conflictDeferredLoveAuthority, materializeLoveAuthority } from '../../../src/forward/love-coverage-authority';
 import { runDeferredLoveMaintenance } from '../../../src/forward/love-deferral-maintenance';
 import { HEAD_SQL, LANE_PICK_SQL, UNFRAMED_SQL, UNKEYED_SQL } from '../../../src/forward/love-lanes';
 import { UpstreamPacing } from '../../../src/forward/upstream-pacing';
 import { type LinksService, linksFeature } from '../../../src/http/links';
 import { enqueueRevivedLoves } from '../../../src/musicbrainz/revive-loves';
+import { bindPolicyFetch, createPolicyFetch } from '../../../src/node/policy-fetch';
 import { parseSecrets } from '../../../src/node/secrets';
 import { openSqliteDb, type SqliteDb } from '../../../src/node/sqlite-db';
 import {
@@ -64,8 +73,11 @@ import {
 import { PRESENT_TRACK_LOVE_SQL } from '../../../src/outbox/live-track-survivor';
 import { enqueueLove, enqueueUnlove } from '../../../src/outbox/love-ops';
 import { cancelUnsent } from '../../../src/outbox/operations';
+import { PDS_WRITER_CAPS, type PdsWriterSource } from '../../../src/outbox/pds-writer';
+import { runOutbox } from '../../../src/outbox/runner';
 import { stageLovePage } from '../../../src/sync/pull-staging';
 import { writePullSlice } from '../../../src/sync/pull-writer';
+import { authorizedLiveOptions } from '../../write/support';
 import { closeApps, startApp, type TestApp, testSecretsDocument } from '../support/app';
 import { FakeLastfm } from '../support/fake-lastfm';
 import { FakeListenBrainz, type LbSubmission } from '../support/fake-listenbrainz';
@@ -668,6 +680,143 @@ describe('ListenBrainz forwarding', () => {
 
     expect(patchLink({ db: w.app.db, clock: w.clock }, ALICE, linkId, { forwardScrobbles: true })).not.toBeNull();
     w.app.db.run("INSERT INTO users(did,joined_at,indexing_state) VALUES(?,'2026-01-15T00:00:00Z','current')", ALICE);
+    await runLinkBackfill(w.app.db, w.rt.random, w.clock.nowMs());
+    await runLinkBackfill(w.app.db, w.rt.random, w.clock.nowMs());
+    w.clock.advance(SECOND);
+    await w.run();
+    expect(w.lb.feedback.map((entry) => entry.json)).toEqual([
+      { recording_mbid: MBID, score: 1 },
+      { recording_mbid: MBID, score: 0 },
+    ]);
+    const completedAt = w.seen.length;
+    w.clock.advance(SECOND);
+    await w.run();
+    expect(w.seen).toHaveLength(completedAt);
+    expect(w.lb.feedback).toHaveLength(2);
+  });
+
+  it('materializes only actual SENT API proof while paused and sends once after the same remote resumes', async () => {
+    const w = await world();
+    const linkId = w.link();
+    const deps = w.app.composed.core.deps;
+    const artist = 'L2 Paused API Artist';
+    const track = 'L2 Paused API Track';
+    const keys = await fixtureKeys();
+    const repo = new SignedRepo(ALICE, keys.alice, { clock: w.clock });
+    const pds = new FakePds('api-proof-pds.test', { clock: w.clock });
+    const account = await pds.addAccount(repo);
+    const pdsTransport = routerTransport({ hosts: { 'api-proof-pds.test': pds } });
+    const policyFetch = bindPolicyFetch(createPolicyFetch({ transport: pdsTransport }), PDS_WRITER_CAPS);
+    const writers: PdsWriterSource = {
+      async writerFor(did) {
+        if (did !== ALICE) return null;
+        return {
+          did,
+          fetchHandler: (pathname, init) => {
+            const headers = new Headers(init?.headers);
+            headers.set('authorization', `Bearer ${account.token}`);
+            return policyFetch(new URL(pathname, pds.origin), { ...init, headers });
+          },
+        };
+      },
+    };
+    w.app.db.run('UPDATE users SET pds=? WHERE did=?', pds.origin, ALICE);
+    const outboxDeps = {
+      ...deps,
+      config: { ...deps.config, publication: true },
+      transport: pdsTransport,
+      identity: cachedIdentityResolver(w.app.db, { transport: pdsTransport, clock: w.clock }),
+      writers,
+    };
+    const created = await enqueueLove(deps, {
+      did: ALICE,
+      input: { artist, track, recordingMbid: MBID },
+      origin: 'web',
+    });
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    await runOutbox(outboxDeps, w.clock.nowMs());
+    await w.run();
+    expect(w.lb.feedback.map((entry) => entry.json)).toEqual([{ recording_mbid: MBID, score: 1 }]);
+    const binding = w.app.db.one<{ uri: string; incarnation_key: string }>(
+      'SELECT uri,incarnation_key FROM love_api_bindings WHERE did=? AND operation_id=?',
+      ALICE,
+      created.operation.id,
+    );
+    expect(binding).not.toBeNull();
+    expect(
+      w.app.db.one('SELECT sent_operation_id FROM love_api_recipients WHERE link_id=? AND uri=?', linkId, binding!.uri),
+    ).toEqual({ sent_operation_id: created.operation.id });
+    const rkey = binding!.uri.slice(binding!.uri.lastIndexOf('/') + 1);
+    const presentCar = await repo.getRecordCar('com.example.atmusic.love', rkey);
+    const presentProof = await verifyRecordProof(presentCar, {
+      did: ALICE,
+      collection: 'com.example.atmusic.love',
+      rkey,
+      signingKey: keys.alice.didKey,
+    });
+    const presentNs = fromMs(w.clock.nowMs());
+    const presentResult = w.app.db.tx(() =>
+      applyRecordProof(w.app.db, presentProof, {
+        ...authorizedLiveOptions(w.app.db, presentProof, w.rt.random),
+        nowNs: presentNs,
+        receiptNs: presentNs,
+      }),
+    );
+    if (presentResult.outcome !== 'applied' || w.app.db.one('SELECT 1 FROM loves WHERE uri=?', binding!.uri) === null)
+      throw new Error(`API love projection missing: ${JSON.stringify(presentResult)}`);
+
+    expect(patchLink({ db: w.app.db, clock: w.clock }, ALICE, linkId, { forwardScrobbles: false })).not.toBeNull();
+    await repo.delete('com.example.atmusic.love', rkey);
+    const absentCar = await repo.getRecordCar('com.example.atmusic.love', rkey);
+    const absentProof = await verifyRecordProof(absentCar, {
+      did: ALICE,
+      collection: 'com.example.atmusic.love',
+      rkey,
+      signingKey: keys.alice.didKey,
+    });
+    recordLiveEvidence(
+      w.app.db,
+      {
+        uri: binding!.uri,
+        did: ALICE,
+        collection: 'com.example.atmusic.love',
+        rkey,
+        rev: absentProof.commit.rev,
+        action: 'delete',
+      },
+      w.clock.nowMs(),
+    );
+    const absentNs = fromMs(w.clock.nowMs());
+    const absentResult = w.app.db.tx(() =>
+      applyRecordProof(w.app.db, absentProof, {
+        ...authorizedLiveOptions(w.app.db, absentProof, w.rt.random),
+        nowNs: absentNs,
+        receiptNs: absentNs,
+      }),
+    );
+    expect(
+      w.app.db.one('SELECT authorization_rev FROM love_api_unlove_decisions'),
+      JSON.stringify({
+        absentResult,
+        liveEvidence: w.app.db.one('SELECT * FROM live_record_evidence WHERE uri=?', binding!.uri),
+        fact: w.app.db.one('SELECT * FROM love_api_comparison_facts WHERE authorization_uri=?', binding!.uri),
+        recipient: w.app.db.one('SELECT * FROM love_api_recipients WHERE uri=?', binding!.uri),
+        incarnation: w.app.db.one('SELECT * FROM love_incarnations WHERE uri=?', binding!.uri),
+        recordState: w.app.db.one('SELECT * FROM record_state WHERE uri=?', binding!.uri),
+      }),
+    ).toEqual({ authorization_rev: absentProof.commit.rev });
+    const materialized = materializeLoveApiRecipientDecisions(w.app.db, w.clock.nowMs(), w.rt.random, 'paused-world');
+    expect(materialized).toMatchObject({ visited: 1, deferred: 1, queued: 0, replay: 0, refused: 0 });
+    expect(w.app.db.one("SELECT count(*) AS n FROM forward_outbox WHERE kind='unlove'")).toEqual({ n: 0 });
+
+    const pausedRequestCount = w.seen.length;
+    await w.run();
+    expect(w.seen).toHaveLength(pausedRequestCount);
+    expect(w.lb.feedback).toHaveLength(1);
+
+    expect(patchLink({ db: w.app.db, clock: w.clock }, ALICE, linkId, { forwardScrobbles: true })).not.toBeNull();
+    w.app.db.run("UPDATE users SET indexing_state='current' WHERE did=?", ALICE);
     await runLinkBackfill(w.app.db, w.rt.random, w.clock.nowMs());
     await runLinkBackfill(w.app.db, w.rt.random, w.clock.nowMs());
     w.clock.advance(SECOND);

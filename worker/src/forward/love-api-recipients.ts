@@ -2,7 +2,7 @@
 // This leaf has no producer, enqueue, backfill or timer imports.
 
 import { MusicKeyError, trackKey } from '@atmusic/core/music-key';
-import { isTid, parseRecordUri } from '@atmusic/core/syntax';
+import { isDid, isTid, parseRecordUri } from '@atmusic/core/syntax';
 import type { Origin } from '../app/rows';
 import type { Db } from '../do/db';
 import { canonicalForwardDedupeKey } from '../outbox/forward-identity';
@@ -63,6 +63,34 @@ export interface LoveApiSettledRow {
   state: 'sent' | 'ignored' | 'failed' | 'expired';
 }
 
+export interface LoveApiMaterializerCandidate {
+  did: string;
+  uri: string;
+  incarnationKey: string;
+  linkId: string;
+  generation: number;
+}
+
+export type LoveApiHandoffPreparation =
+  | {
+      status: 'ready';
+      envelope: {
+        did: string;
+        recordUri: string;
+        incarnationKey: string;
+        apiOperationId: string;
+        projectionRkey: string;
+        source: Exclude<Origin, 'import'>;
+        sourceExclusions: readonly ('lastfm' | 'listenbrainz')[];
+        projection: { artist: string; track: string; album?: string; recordingMbid?: string };
+        authorization: { uri: string; rev: string };
+      };
+    }
+  | { status: 'awaiting' }
+  | { status: 'vetoed' }
+  | { status: 'expired' }
+  | { status: 'missing' };
+
 const CID = /^b[a-z2-7]{8,256}$/;
 const RECIPIENT_KEY = 'did=? AND uri=? AND incarnation_key=? AND link_id=? AND generation=?';
 
@@ -99,6 +127,25 @@ function allocate(db: Db, column: 'next_binding_seq' | 'next_aggregate_seq' | 'n
   ).rowsWritten;
   if (changed !== 1) throw new Error(`L2 allocator ${column} changed`);
   return value;
+}
+
+/** Fence an in-flight MBID alias scan whenever API love intent membership changes. */
+export function bumpLoveApiIntentEpoch(db: Db, did: string): number {
+  if (!isDid(did)) throw new TypeError('invalid L2 intent DID');
+  db.run('INSERT OR IGNORE INTO love_api_intent_epochs(did,epoch) VALUES(?,0)', did);
+  const row = db.one<{ epoch: number }>('SELECT epoch FROM love_api_intent_epochs WHERE did=?', did);
+  if (row === null || !Number.isSafeInteger(row.epoch) || row.epoch < 0 || row.epoch >= Number.MAX_SAFE_INTEGER)
+    throw new RangeError('L2 intent epoch exhausted');
+  const next = row.epoch + 1;
+  if (!Number.isSafeInteger(next)) throw new RangeError('L2 intent epoch exhausted');
+  const changed = db.run(
+    'UPDATE love_api_intent_epochs SET epoch=? WHERE did=? AND epoch=?',
+    next,
+    did,
+    row.epoch,
+  ).rowsWritten;
+  if (changed !== 1) throw new Error('L2 intent epoch changed concurrently');
+  return next;
 }
 
 /** Retain an exact verified A2 fact before its source event/evidence can be cleaned up. */
@@ -975,6 +1022,307 @@ export function settleApiLoveRecipientRows(db: Db, rows: readonly LoveApiSettled
       row.generation,
     );
   }
+}
+
+/** Validate and reconstruct a handoff only from the persisted recipient proof and decision envelope. */
+export function prepareLoveApiRecipientHandoff(
+  db: Db,
+  candidate: LoveApiMaterializerCandidate,
+  sessionToken: string,
+  nowMs: number,
+  aliasPageSize = 16,
+): LoveApiHandoffPreparation {
+  if (
+    !Number.isSafeInteger(candidate.generation) ||
+    candidate.generation < 1 ||
+    !Number.isSafeInteger(nowMs) ||
+    nowMs < 0 ||
+    sessionToken.length === 0 ||
+    !Number.isSafeInteger(aliasPageSize) ||
+    aliasPageSize < 1 ||
+    aliasPageSize > 16
+  )
+    return { status: 'missing' };
+  const row = db.one<{
+    artist: string;
+    track: string;
+    artist_key: string;
+    track_key: string;
+    recording_mbid: string | null;
+    payload_json: string;
+    authorization_uri: string;
+    authorization_rev: string;
+    fact_action: LoveApiFactAction;
+    fact_cid: string;
+    expires_at_ms: number;
+    scan_session: string | null;
+    alias_epoch: number | null;
+    alias_cursor: string | null;
+    sent_operation_id: string | null;
+    recipient_state: string;
+    pending_members: number;
+    current_generation: number | null;
+  }>(
+    `SELECT d.artist,d.track,d.artist_key,d.track_key,d.recording_mbid,d.payload_json,d.authorization_uri,d.authorization_rev,
+       d.fact_action,d.fact_cid,d.expires_at_ms,d.scan_session,d.alias_epoch,d.alias_cursor,
+       r.sent_operation_id,r.state AS recipient_state,
+       (SELECT count(*) FROM love_api_recipient_members m WHERE m.did=d.did AND m.uri=d.uri
+         AND m.incarnation_key=d.incarnation_key AND m.link_id=d.link_id AND m.generation=d.generation) AS pending_members,
+       l.generation AS current_generation
+     FROM love_api_unlove_decisions d
+     JOIN love_api_recipients r ON r.did=d.did AND r.uri=d.uri AND r.incarnation_key=d.incarnation_key
+       AND r.link_id=d.link_id AND r.generation=d.generation
+     LEFT JOIN linked_accounts l ON l.id=d.link_id AND l.did=d.did
+     WHERE d.did=? AND d.uri=? AND d.incarnation_key=? AND d.link_id=? AND d.generation=?`,
+    candidate.did,
+    candidate.uri,
+    candidate.incarnationKey,
+    candidate.linkId,
+    candidate.generation,
+  );
+  if (row === null || row.current_generation !== candidate.generation || row.recipient_state !== 'sealed')
+    return { status: 'missing' };
+  if (row.sent_operation_id === null) return row.pending_members > 0 ? { status: 'awaiting' } : { status: 'vetoed' };
+  if (row.pending_members > 0) return { status: 'awaiting' };
+  const parsed = parseRecordUri(candidate.uri);
+  const keys = loveApiTrackKeys(row.artist, row.track);
+  if (
+    parsed === null ||
+    parsed.did !== candidate.did ||
+    parsed.rkey === null ||
+    keys === null ||
+    keys.artistKey !== row.artist_key ||
+    keys.trackKey !== row.track_key ||
+    row.authorization_uri !== candidate.uri ||
+    !isTid(row.authorization_rev) ||
+    !validFact({
+      uri: row.authorization_uri,
+      rev: row.authorization_rev,
+      action: row.fact_action,
+      cid: row.fact_cid,
+      horizonMs: row.expires_at_ms,
+    })
+  )
+    return { status: 'vetoed' };
+  const binding = db.one<{ uri: string; incarnation_key: string; api_origin: string }>(
+    'SELECT uri,incarnation_key,api_origin FROM love_api_bindings WHERE did=? AND operation_id=?',
+    candidate.did,
+    row.sent_operation_id,
+  );
+  if (
+    binding === null ||
+    binding.uri !== candidate.uri ||
+    binding.incarnation_key !== candidate.incarnationKey ||
+    !bindingOrigin(binding.api_origin)
+  )
+    return { status: 'vetoed' };
+  let payloadValue: unknown;
+  try {
+    payloadValue = JSON.parse(row.payload_json);
+  } catch {
+    return { status: 'vetoed' };
+  }
+  if (payloadValue === null || typeof payloadValue !== 'object' || Array.isArray(payloadValue))
+    return { status: 'vetoed' };
+  const payload = payloadValue as Record<string, unknown>;
+  const projectionKeys = ['artist', 'track'];
+  if (typeof payload.album === 'string') projectionKeys.push('album');
+  if (typeof payload.recordingMbid === 'string') projectionKeys.push('recordingMbid');
+  projectionKeys.push('origin');
+  if (
+    Object.keys(payload).length !== projectionKeys.length ||
+    projectionKeys.some((key) => !Object.hasOwn(payload, key)) ||
+    payload.artist !== row.artist ||
+    payload.track !== row.track ||
+    (row.recording_mbid === null
+      ? Object.hasOwn(payload, 'recordingMbid')
+      : payload.recordingMbid !== row.recording_mbid) ||
+    (typeof payload.album !== 'undefined' && typeof payload.album !== 'string') ||
+    payload.origin !== binding.api_origin ||
+    JSON.stringify(payload) !== row.payload_json
+  )
+    return { status: 'vetoed' };
+  const fact = db.one<{ action: string; cid: string; horizon_ms: number; conflicted: number }>(
+    'SELECT action,cid,horizon_ms,conflicted FROM love_api_comparison_facts WHERE authorization_uri=? AND authorization_rev=?',
+    row.authorization_uri,
+    row.authorization_rev,
+  );
+  if (fact === null || fact.conflicted !== 0 || fact.action !== row.fact_action || fact.cid !== row.fact_cid)
+    return { status: 'vetoed' };
+  const horizon = Math.min(row.expires_at_ms, fact.horizon_ms);
+  if (!Number.isSafeInteger(horizon) || horizon <= 0) return { status: 'vetoed' };
+  if (horizon !== row.expires_at_ms) {
+    db.run(
+      `UPDATE love_api_unlove_decisions SET expires_at_ms=?
+       WHERE did=? AND uri=? AND incarnation_key=? AND link_id=? AND generation=? AND expires_at_ms>?`,
+      horizon,
+      candidate.did,
+      candidate.uri,
+      candidate.incarnationKey,
+      candidate.linkId,
+      candidate.generation,
+      horizon,
+    );
+    const persisted = db.one<{ expires_at_ms: number }>(
+      `SELECT expires_at_ms FROM love_api_unlove_decisions
+       WHERE did=? AND uri=? AND incarnation_key=? AND link_id=? AND generation=?`,
+      candidate.did,
+      candidate.uri,
+      candidate.incarnationKey,
+      candidate.linkId,
+      candidate.generation,
+    );
+    if (persisted?.expires_at_ms !== horizon) return { status: 'missing' };
+  }
+  if (horizon <= nowMs) return { status: 'expired' };
+
+  if (
+    db.one(
+      `SELECT 1 FROM operations INDEXED BY love_api_active_love_put
+       WHERE did=? AND kind='love.put' AND state IN ('queued','blocked','running')
+         AND (CASE WHEN json_valid(record_json) THEN json_extract(record_json,'$.artist') END)=?
+         AND (CASE WHEN json_valid(record_json) THEN json_extract(record_json,'$.track') END)=? LIMIT 1`,
+      candidate.did,
+      row.artist,
+      row.track,
+    ) !== null ||
+    db.one(
+      `SELECT 1 FROM operations INDEXED BY love_api_active_love_put_malformed
+       WHERE did=? AND kind='love.put' AND state IN ('queued','blocked','running')
+         AND (record_json IS NULL OR NOT json_valid(record_json)) LIMIT 1`,
+      candidate.did,
+    ) !== null
+  )
+    return { status: 'awaiting' };
+  if (
+    db.one(
+      `SELECT 1 FROM loves INDEXED BY loves_newer_by_track
+       WHERE did=? AND artist_key=? AND track_key=? AND revision>? LIMIT 1`,
+      candidate.did,
+      row.artist_key,
+      row.track_key,
+      row.authorization_rev,
+    ) !== null
+  )
+    return { status: 'vetoed' };
+  const current = db.one<{ incarnation_key: string; state: string }>(
+    'SELECT incarnation_key,state FROM love_incarnations WHERE uri=?',
+    candidate.uri,
+  );
+  if (current?.state === 'present' && current.incarnation_key !== candidate.incarnationKey) return { status: 'vetoed' };
+  const exactIntent = db.one<{
+    operation_id: string;
+    state: string | null;
+    attempts: number | null;
+    send_state: string | null;
+    send_started_at_ms: number | null;
+    legacy_absent_at_ms: number | null;
+  }>(
+    `SELECT i.operation_id,o.state,o.attempts,o.send_state,o.send_started_at_ms,o.legacy_absent_at_ms
+     FROM linked_love_intents i LEFT JOIN operations o ON o.id=i.operation_id
+     WHERE i.did=? AND i.love_key=? AND i.intent='love'`,
+    candidate.did,
+    `${row.artist_key}\u0000${row.track_key}`,
+  );
+  if (exactIntent !== null && exactIntent.operation_id !== row.sent_operation_id) {
+    if (exactIntent.state === 'cancelled') {
+      // A withdrawn, never-sent love no longer blocks this target.
+    } else if (
+      (exactIntent.state === 'queued' || exactIntent.state === 'blocked') &&
+      exactIntent.send_state === 'unsent' &&
+      exactIntent.attempts === 0 &&
+      exactIntent.send_started_at_ms === null &&
+      exactIntent.legacy_absent_at_ms === null
+    ) {
+      return { status: 'awaiting' };
+    } else {
+      return { status: 'vetoed' };
+    }
+  }
+
+  if (row.recording_mbid !== null) {
+    const epochRow = db.one<{ epoch: number }>('SELECT epoch FROM love_api_intent_epochs WHERE did=?', candidate.did);
+    const epoch = epochRow?.epoch ?? 0;
+    if (!Number.isSafeInteger(epoch) || epoch < 0 || epoch >= Number.MAX_SAFE_INTEGER) return { status: 'vetoed' };
+    const cursor = row.scan_session === sessionToken && row.alias_epoch === epoch ? (row.alias_cursor ?? '') : '';
+    if (cursor === '' && (row.scan_session !== sessionToken || row.alias_epoch !== epoch))
+      db.run(
+        `UPDATE love_api_unlove_decisions SET scan_session=?,alias_epoch=?,alias_cursor=''
+         WHERE did=? AND uri=? AND incarnation_key=? AND link_id=? AND generation=?`,
+        sessionToken,
+        epoch,
+        candidate.did,
+        candidate.uri,
+        candidate.incarnationKey,
+        candidate.linkId,
+        candidate.generation,
+      );
+    const aliases = db.all<{
+      love_key: string;
+      operation_id: string;
+      state: string | null;
+      attempts: number | null;
+      send_state: string | null;
+      send_started_at_ms: number | null;
+      legacy_absent_at_ms: number | null;
+    }>(
+      `SELECT i.love_key,i.operation_id,o.state,o.attempts,o.send_state,o.send_started_at_ms,o.legacy_absent_at_ms
+       FROM linked_love_intents i INDEXED BY love_api_intent_alias_scan
+       LEFT JOIN operations o ON o.id=i.operation_id
+       WHERE i.did=? AND i.recording_mbid=? AND i.intent='love' AND i.love_key>?
+       ORDER BY i.love_key LIMIT ?`,
+      candidate.did,
+      row.recording_mbid,
+      cursor,
+      aliasPageSize,
+    );
+    for (const alias of aliases) {
+      if (alias.operation_id === row.sent_operation_id || alias.state === 'cancelled') continue;
+      if (
+        (alias.state === 'queued' || alias.state === 'blocked') &&
+        alias.send_state === 'unsent' &&
+        alias.attempts === 0 &&
+        alias.send_started_at_ms === null &&
+        alias.legacy_absent_at_ms === null
+      )
+        return { status: 'awaiting' };
+      return { status: 'vetoed' };
+    }
+    if (aliases.length === aliasPageSize) {
+      db.run(
+        `UPDATE love_api_unlove_decisions SET scan_session=?,alias_epoch=?,alias_cursor=?
+         WHERE did=? AND uri=? AND incarnation_key=? AND link_id=? AND generation=?`,
+        sessionToken,
+        epoch,
+        aliases.at(-1)!.love_key,
+        candidate.did,
+        candidate.uri,
+        candidate.incarnationKey,
+        candidate.linkId,
+        candidate.generation,
+      );
+      return { status: 'awaiting' };
+    }
+  }
+  return {
+    status: 'ready',
+    envelope: {
+      did: candidate.did,
+      recordUri: candidate.uri,
+      incarnationKey: candidate.incarnationKey,
+      apiOperationId: row.sent_operation_id,
+      projectionRkey: parsed.rkey,
+      source: binding.api_origin,
+      sourceExclusions: [],
+      projection: {
+        artist: row.artist,
+        track: row.track,
+        ...(typeof payload.album === 'string' ? { album: payload.album } : {}),
+        ...(row.recording_mbid === null ? {} : { recordingMbid: row.recording_mbid }),
+      },
+      authorization: { uri: row.authorization_uri, rev: row.authorization_rev },
+    },
+  };
 }
 
 /** Shared key validation used when the removal transaction captures a projection envelope. */

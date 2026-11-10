@@ -18,6 +18,7 @@ const entries = [
   './worker/src/outbox/forward-receipts.ts',
   './worker/src/forward/love-coverage-authority.ts',
   './worker/src/forward/love-api-recipients.ts',
+  './worker/src/forward/love-api-materializer.ts',
   './worker/src/forward/forward-outbox.ts',
   './worker/src/outbox/operation-certainty.ts',
   './worker/src/forward/backfill.ts',
