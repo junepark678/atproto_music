@@ -10,6 +10,7 @@ import {
   replacementAuthority,
 } from '../../src/do/ingest/live-evidence';
 import { applyRecordProof } from '../../src/do/write/apply-record';
+import { runLinkBackfill } from '../../src/forward/backfill';
 import { lateAccept } from '../../src/forward/live-acceptance';
 import { withMigratedDb } from '../node/support/node-db';
 import { ALICE, fixtureScrobble, NOW_MS, OPTS, PREFIX, putProof, repoFor, SCROBBLE, seedUser } from './support';
@@ -170,6 +171,79 @@ describe('live evidence authority', () => {
       expect(db.all('SELECT * FROM live_acceptance_candidates')).toHaveLength(0);
       expect(lateAccept(db, args)).toBe(0);
       expect(db.all('SELECT kind FROM forward_outbox')).toHaveLength(1);
+    });
+  });
+
+  it('keeps late scrobble and love acceptance snapshot-owned while forwarding is disabled, then backfills once', async () => {
+    const repo = await repoFor('alice');
+    const scrobbleProof = await putProof(repo, SCROBBLE, 'disabled-late-scrobble', fixtureScrobble('r03'));
+    const loveCollection = `${PREFIX}.love`;
+    const loveProof = await putProof(repo, loveCollection, 'disabled-late-love', {
+      $type: loveCollection,
+      artist: 'Björk',
+      track: 'Jóga',
+      createdAt: '2026-01-15T11:00:00Z',
+    });
+    if (scrobbleProof.state !== 'present' || loveProof.state !== 'present') throw new Error('expected signed proofs');
+    const scrobbleUri = `at://${ALICE}/${SCROBBLE}/disabled-late-scrobble`;
+    const loveUri = `at://${ALICE}/${loveCollection}/disabled-late-love`;
+    const random = seededRandom(0xb10);
+    await withMigratedDb(async (db) => {
+      seedUser(db, ALICE);
+      db.run(
+        `INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,forward_scrobbles,created_at_ms,updated_at_ms)
+         VALUES('disabled-late-link',?,'lastfm','remote',X'00','fixture',0,?,?)`,
+        ALICE,
+        NOW_MS,
+        NOW_MS,
+      );
+      for (const proof of [scrobbleProof, loveProof])
+        db.tx(() =>
+          applyRecordProof(db, proof, {
+            ...OPTS,
+            live: { random, evidence: null, legacyRev: null },
+            liveCandidates: true,
+          }),
+        );
+
+      expect(
+        db.all<{ path: string }>('SELECT path FROM forward_admissions WHERE did=? ORDER BY identity_key', ALICE),
+      ).toEqual([{ path: 'snapshot' }, { path: 'snapshot' }]);
+      expect(db.all('SELECT * FROM forward_outbox')).toEqual([]);
+      expect(db.all('SELECT * FROM forward_receipts')).toEqual([]);
+      for (const [collection, rkey, proof, candidateUri] of [
+        [SCROBBLE, 'disabled-late-scrobble', scrobbleProof, scrobbleUri],
+        [loveCollection, 'disabled-late-love', loveProof, loveUri],
+      ] as const) {
+        const evidence = {
+          up_rev: proof.commit.rev,
+          up_action: 'create' as const,
+          up_cid: proof.cid,
+          del_rev: null,
+          conflict_rev: null,
+        };
+        expect(
+          lateAccept(db, { uri: candidateUri, did: ALICE, collection, rkey, evidence, nowMs: NOW_MS, random }),
+        ).toBe(1);
+      }
+      expect(db.all('SELECT * FROM forward_outbox')).toEqual([]);
+      expect(db.all('SELECT * FROM forward_receipts')).toEqual([]);
+      expect(
+        db.all<{ path: string }>('SELECT path FROM forward_admissions WHERE did=? ORDER BY identity_key', ALICE),
+      ).toEqual([{ path: 'snapshot' }, { path: 'snapshot' }]);
+
+      db.run(
+        "UPDATE linked_accounts SET forward_scrobbles=1,backfill_state='pending' WHERE id=?",
+        'disabled-late-link',
+      );
+      for (let i = 0; i < 5; i++) await runLinkBackfill(db, seededRandom(0xb11 + i), NOW_MS);
+      expect(db.all('SELECT kind FROM forward_outbox ORDER BY kind')).toEqual([{ kind: 'love' }, { kind: 'scrobble' }]);
+      expect(db.all('SELECT kind FROM forward_receipts ORDER BY kind')).toEqual([
+        { kind: 'love' },
+        { kind: 'scrobble' },
+      ]);
+      for (let i = 0; i < 5; i++) await runLinkBackfill(db, seededRandom(0xb21 + i), NOW_MS);
+      expect(db.all('SELECT kind FROM forward_outbox ORDER BY kind')).toEqual([{ kind: 'love' }, { kind: 'scrobble' }]);
     });
   });
 
