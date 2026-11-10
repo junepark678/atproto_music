@@ -152,12 +152,12 @@ export function enqueueRevivedLoves(
         return 0;
       const parentOperationId = canonicalForwardDedupeKey(row.generation, row.dedupe_key);
       if (parentOperationId === null) return 0;
-      const parentWitness = db.one<RevivalWitness>(
-        REVIVAL_WITNESS_LOOKUP_SQL,
-        row.link_id,
-        row.generation,
-        parentOperationId,
-      );
+      // Ownership gates protect destructive unlove. Love revival keeps its
+      // existing semantics even when a synthetic key has an unlove witness.
+      const parentWitness =
+        kind === 'unlove'
+          ? db.one<RevivalWitness>(REVIVAL_WITNESS_LOOKUP_SQL, row.link_id, row.generation, parentOperationId)
+          : null;
       if (
         parentWitness !== null &&
         (parentWitness.kind !== 'unlove' ||
@@ -177,12 +177,10 @@ export function enqueueRevivedLoves(
         (parentWitness !== null && authorization !== null && authorityStatus !== 'active')
       )
         return 0;
-      const childWitness = db.one<RevivalWitness>(
-        REVIVAL_WITNESS_LOOKUP_SQL,
-        row.link_id,
-        row.generation,
-        childOperationId,
-      );
+      const childWitness =
+        kind === 'unlove'
+          ? db.one<RevivalWitness>(REVIVAL_WITNESS_LOOKUP_SQL, row.link_id, row.generation, childOperationId)
+          : null;
       if (
         childWitness !== null &&
         (childWitness.kind !== kind ||

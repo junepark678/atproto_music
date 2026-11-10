@@ -209,6 +209,50 @@ it.each(['listenbrainz', 'lastfm'])('independent direct and delayed dispatch %s'
 });
 
 for (const error of ['no_recording_mbid', 'mbid_unresolved'] as const) {
+  for (const ownership of ['parent-love-witness', 'owned-unlove-child-key'] as const) {
+    it(`preserves ${error} love revival with ${ownership}`, async () => {
+      await withMigratedDb(async (db) => {
+        if (ownership === 'owned-unlove-child-key') {
+          enqueueOwnedRevivalParent(db, error);
+          expect(reviveOwnedParent(db).enqueued).toBe(1);
+          expect((await forward(db)).feedbacks).toEqual([{ recordingMbid: REVIVAL_MBID, score: 0 }]);
+        } else {
+          seedLink(db);
+          db.run("UPDATE linked_accounts SET forward_scrobbles=0 WHERE id='replacement-link'");
+        }
+        const item = {
+          kind: 'love' as const,
+          operationId: 'preserved-love-parent',
+          payload: { artist: 'Revival Artist', track: 'Revival Track', origin: 'web' },
+        };
+        if (ownership === 'parent-love-witness') {
+          enqueueForwards(db, { did: ALICE, now: NOW_MS, random: rng, items: [item] });
+          expect(
+            db.one("SELECT kind FROM forward_deferred_love_witnesses WHERE operation_id='preserved-love-parent'"),
+          ).toEqual({ kind: 'love' });
+          db.run("UPDATE linked_accounts SET forward_scrobbles=1 WHERE id='replacement-link'");
+        }
+        enqueueForwards(db, { did: ALICE, now: NOW_MS, random: rng, items: [item] });
+        db.run(
+          "UPDATE forward_outbox SET state='ignored',last_error=? WHERE dedupe_key='preserved-love-parent'",
+          error,
+        );
+        expect(reviveOwnedParent(db).enqueued).toBe(1);
+        expect((await forward(db)).feedbacks).toEqual([{ recordingMbid: REVIVAL_MBID, score: 1 }]);
+        if (ownership === 'owned-unlove-child-key') {
+          expect(
+            db.one(
+              'SELECT kind,authorization_uri,authorization_rev FROM forward_deferred_love_witnesses WHERE operation_id=?',
+              `mb-match:${REVIVAL_MBID}:replacement-link:${REVIVAL_ARTIST_KEY}:${REVIVAL_TRACK_KEY}`,
+            ),
+          ).toEqual({ kind: 'unlove', authorization_uri: REVIVAL_URI, authorization_rev: REVIVAL_REV });
+        }
+      });
+    });
+  }
+}
+
+for (const error of ['no_recording_mbid', 'mbid_unresolved'] as const) {
   it(`revives an owned ${error} unlove with an exact child witness and one ListenBrainz effect`, async () => {
     await withMigratedDb(async (db) => {
       const parent = enqueueOwnedRevivalParent(db, error);
