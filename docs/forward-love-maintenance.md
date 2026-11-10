@@ -25,13 +25,22 @@ ceilings, not independent quotas.
 
 At most 18 changed rows are reserved for metadata: one singleton initialization,
 six maintenance-cursor finalizations (RR, WIT, and AUTH once in each phase),
-ten lane-counter upserts, and one lane-turn update. Each cursor, counter, initialization and lane-turn statement reserves at most one
-metadata write and measures its actual SQLite change delta before commit. Spare
-unit allowance cannot cover metadata expansion. Cursor and counter writes
-are in the lane transaction. Empty initialized runs write zero rows. The
+ten lane-counter upserts, and one lane-turn update. Each cursor, counter,
+initialization, and lane-turn statement reserves at most one metadata write
+and measures its actual SQLite change delta before commit. Spare unit allowance
+cannot cover metadata expansion. Cursor and counter writes are in the lane
+transaction. Empty initialized runs write zero rows. The
 combined charged-work and metadata ceilings are 128 changed rows. A failed
 lane rolls back its data, cursor, and counter; earlier lane transactions remain
 committed, and the next timer invocation starts with a fresh budget.
+
+`worker/test/node/forward/love-maintenance-accounting.test.ts` contains seven
+regressions for the production DUE 20/21-write cases and metadata amplification
+at singleton initialization, cursor finalization, lane counters, and final-turn
+update. Each verifies transactional rollback on an over-reservation; the
+earlier AUTH lane remains committed when a later transaction fails. The
+benchmarks also meter the actual statement deltas and retain a 20-row per-step
+and 80-statement per-phase guard alongside the whole-call budget assertions.
 
 INV uses the existing partial authorization index and a full tuple seek on
 `(link_id,generation,operation_id)`. The worker-bench exercises the production
@@ -70,8 +79,11 @@ Focused commands for the new restore and wire rows:
 ```sh
 taskset -c 8-11 npx vitest run scripts/test/restore.test.ts -t "migrates a real schema-55 backup|merges populated schema-56 love state|unreadable live db, every web session" --maxWorkers=1
 taskset -c 8-11 npx vitest run --config vitest.node.config.ts test/node/outbox/astra-d050-independent.test.ts --maxWorkers=1
+taskset -c 8-11 npx vitest run --config vitest.node.config.ts test/node/forward/love-maintenance-accounting.test.ts test/node/forward/love-deferral-maintenance.test.ts test/node/forward/love-deferral.test.ts --maxWorkers=1
 ```
 
-The commands above passed 3 restore tests and 36 transport tests respectively.
+The restore command passed 3 tests, the transport command passed 36 tests, and
+the maintenance command passed 35 tests (including the seven accounting
+regressions).
 These are scoped evidence only; exact-head full and hosted gates plus fresh
 acceptance review remain outstanding.
