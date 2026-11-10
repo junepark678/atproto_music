@@ -2,6 +2,7 @@ import type { Random } from '@atmusic/core/deps';
 import type { Db } from '../do/db';
 import { type ApiRecipientUnloveAck, enqueueApiRecipientUnlove } from '../outbox/forward-enqueue';
 import { type LoveApiMaterializerCandidate, prepareLoveApiRecipientHandoff } from './love-api-recipients';
+import { recordVerifiedDeferredLoveAuthority } from './love-coverage-authority';
 
 export const LOVE_API_MATERIALIZER_PAGE = 8;
 export const LOVE_API_MATERIALIZER_RETRY_MS = 1_000;
@@ -99,6 +100,17 @@ export function materializeLoveApiRecipientDecisions(
         continue;
       }
       const authorization = prepared.envelope.authorization;
+      const retained = recordVerifiedDeferredLoveAuthority(
+        db,
+        authorization,
+        { action: prepared.envelope.action, cid: prepared.envelope.cid },
+        nowMs,
+      );
+      if (retained !== 'active') {
+        result.refused++;
+        releaseDecision(db, candidate, nowMs);
+        continue;
+      }
       const broadOperationId = `love-delete:${prepared.envelope.incarnationKey}:rev:${authorization.rev}`;
       const ack: ApiRecipientUnloveAck = enqueueApiRecipientUnlove(db, {
         did: candidate.did,

@@ -744,16 +744,45 @@ function processGroup(db: Db, group: PendingGroup, nowMs: number, random: Random
       row.track,
     ) !== null;
   const [artistKey, trackKeyValue] = trackKey(row.artist, row.track);
+  const exactPendingApiIntent =
+    db.one(
+      `SELECT 1 FROM linked_love_intents i
+       JOIN love_api_recipient_members m ON m.did=i.did AND m.operation_id=i.operation_id
+       JOIN love_api_recipients r ON r.did=m.did AND r.uri=m.uri AND r.incarnation_key=m.incarnation_key
+         AND r.link_id=m.link_id AND r.generation=m.generation
+       JOIN linked_accounts l ON l.id=r.link_id AND l.generation=r.generation
+       JOIN love_api_bindings b ON b.did=i.did AND b.operation_id=i.operation_id
+       WHERE i.did=? AND i.intent='love' AND i.love_key=? AND m.uri=? AND m.incarnation_key=?
+         AND r.state IN ('present','sealed') AND b.uri=m.uri AND b.incarnation_key=m.incarnation_key LIMIT 1`,
+      did,
+      `${artistKey}\u0000${trackKeyValue}`,
+      row.uri,
+      row.identity_key,
+    ) !== null;
   const locallyReloved =
     db.one(
       `SELECT 1 FROM linked_love_intents WHERE did=? AND intent='love'
-       AND (love_key=? OR (? IS NOT NULL AND recording_mbid=?)) LIMIT 1`,
+       AND (love_key=? OR (? IS NOT NULL AND recording_mbid=?))
+       AND NOT EXISTS(
+         SELECT 1 FROM love_api_recipients r
+         JOIN linked_accounts l ON l.id=r.link_id AND l.generation=r.generation
+         JOIN love_api_bindings b ON b.did=linked_love_intents.did AND b.operation_id=linked_love_intents.operation_id
+         WHERE r.did=linked_love_intents.did AND r.uri=? AND r.incarnation_key=?
+           AND (r.sent_operation_id=linked_love_intents.operation_id OR EXISTS(
+             SELECT 1 FROM love_api_recipient_members m WHERE m.did=r.did AND m.uri=r.uri
+               AND m.incarnation_key=r.incarnation_key AND m.link_id=r.link_id AND m.generation=r.generation
+               AND m.operation_id=linked_love_intents.operation_id))
+           AND r.state IN ('present','sealed') AND b.uri=r.uri AND b.incarnation_key=r.incarnation_key
+       ) LIMIT 1`,
       did,
       `${artistKey}\u0000${trackKeyValue}`,
       row.recording_mbid,
       row.recording_mbid,
+      row.uri,
+      row.identity_key,
     ) !== null;
-  if (!newerLoveIntent && !locallyReloved && !newerProjectedLove && !sameUriNewerIncarnation) {
+  const sealPendingApiOnly = exactPendingApiIntent && !locallyReloved;
+  if (!newerLoveIntent && (!locallyReloved || sealPendingApiOnly) && !newerProjectedLove && !sameUriNewerIncarnation) {
     const authorizationEvent = db.one<{ action: string; cid: string }>(
       'SELECT action,cid FROM live_pending_removal_events WHERE uri=? AND rev=? AND conflicted=0',
       group.uri,
@@ -797,6 +826,10 @@ function processGroup(db: Db, group: PendingGroup, nowMs: number, random: Random
             recordingMbid: row.recording_mbid,
           });
       }
+    }
+    if (sealPendingApiOnly) {
+      deleteGroup(db, group);
+      return 0;
     }
     const identity = `love-delete:${row.identity_key}`;
     tombstoneLove(db, {

@@ -18,6 +18,64 @@ type ProofState = {
   reclaim_passes: number;
 };
 
+type ReclaimCursor = Pick<
+  ProofState,
+  'reclaim_kind' | 'binding_cursor' | 'binding_frontier' | 'fact_cursor' | 'fact_frontier'
+>;
+
+type ReclaimState = ReclaimCursor & {
+  reclaim_passes: number;
+};
+
+type BindingRow = {
+  did: string;
+  operation_id: string;
+  uri: string;
+  incarnation_key: string;
+  binding_seq: number;
+};
+
+type FactRow = {
+  authorization_uri: string;
+  authorization_rev: string;
+  fact_seq: number;
+  horizon_ms: number;
+};
+
+function successor(value: number, name: string): number {
+  checked(value, name);
+  if (value >= Number.MAX_SAFE_INTEGER) throw new RangeError(`L2 ${name} successor is unsafe`);
+  return value + 1;
+}
+
+function safeState(db: Db): ProofState {
+  const state = db.one<ProofState>(
+    `SELECT reclaim_kind,binding_cursor,binding_frontier,fact_cursor,fact_frontier,reclaim_passes
+     FROM love_api_proof_state WHERE singleton=1`,
+  );
+  if (state === null) throw new Error('missing L2 proof maintenance state');
+  checked(state.binding_cursor, 'binding cursor');
+  checked(state.binding_frontier, 'binding frontier');
+  checked(state.fact_cursor, 'fact cursor');
+  checked(state.fact_frontier, 'fact frontier');
+  checked(state.reclaim_passes, 'reclaim passes');
+  return state;
+}
+
+function writeState(db: Db, state: ReclaimState, nowMs: number): void {
+  db.run(
+    `UPDATE love_api_proof_state SET reclaim_kind=?,binding_cursor=?,binding_frontier=?,fact_cursor=?,fact_frontier=?,
+       reclaim_passes=?,updated_at_ms=? WHERE singleton=1`,
+    state.reclaim_kind,
+    state.binding_cursor,
+    state.binding_frontier,
+    state.fact_cursor,
+    state.fact_frontier,
+    state.reclaim_passes,
+    nowMs,
+  );
+}
+
 function checked(value: number, name: string): number {
   if (!Number.isSafeInteger(value) || value < 0) throw new RangeError(`invalid L2 ${name}`);
   return value;
@@ -35,21 +93,12 @@ export function reclaimLoveApiProofRows(db: Db, nowMs: number, limit = LOVE_API_
     throw new RangeError('invalid L2 reclaim bounds');
   return db.tx(() => {
     db.run('INSERT OR IGNORE INTO love_api_proof_state(singleton) VALUES(1)');
-    const state = db.one<ProofState>(
-      `SELECT reclaim_kind,binding_cursor,binding_frontier,fact_cursor,fact_frontier,reclaim_passes
-       FROM love_api_proof_state WHERE singleton=1`,
-    );
-    if (state === null) throw new Error('missing L2 proof maintenance state');
-    checked(state.binding_cursor, 'binding cursor');
-    checked(state.binding_frontier, 'binding frontier');
-    checked(state.fact_cursor, 'fact cursor');
-    checked(state.fact_frontier, 'fact frontier');
-    checked(state.reclaim_passes, 'reclaim passes');
+    const state = safeState(db);
     const lane = state.reclaim_kind;
-    const cursor = lane === 'binding' ? state.binding_cursor : state.fact_cursor;
-    let frontier = lane === 'binding' ? state.binding_frontier : state.fact_frontier;
+    const next: ReclaimState = { ...state };
+    let cursor = lane === 'binding' ? next.binding_cursor : next.fact_cursor;
+    let frontier = lane === 'binding' ? next.binding_frontier : next.fact_frontier;
     if (cursor === frontier) {
-      if (state.reclaim_passes >= Number.MAX_SAFE_INTEGER) throw new RangeError('L2 reclaim pass exhausted');
       const max = db.one<{ value: number }>(
         lane === 'binding'
           ? 'SELECT coalesce(max(binding_seq),0) AS value FROM love_api_bindings'
@@ -64,68 +113,61 @@ export function reclaimLoveApiProofRows(db: Db, nowMs: number, limit = LOVE_API_
             : 'SELECT coalesce(max(binding_seq),0) AS value FROM love_api_bindings',
         )?.value;
         if (otherMax === undefined) throw new Error('missing L2 alternate reclaim frontier');
-        if (checked(otherMax, 'alternate reclaim maximum') > 0)
-          db.run(
-            'UPDATE love_api_proof_state SET reclaim_kind=?,updated_at_ms=? WHERE singleton=1',
-            lane === 'binding' ? 'fact' : 'binding',
-            nowMs,
-          );
+        if (checked(otherMax, 'alternate reclaim maximum') > 0) {
+          next.reclaim_kind = lane === 'binding' ? 'fact' : 'binding';
+          writeState(db, next, nowMs);
+        }
         return { visited: 0, bindingsDeleted: 0, factsDeleted: 0, lane };
       }
-      if (lane === 'binding')
-        db.run(
-          'UPDATE love_api_proof_state SET binding_cursor=0,binding_frontier=?,reclaim_passes=reclaim_passes+1 WHERE singleton=1',
-          frontier,
-        );
-      else
-        db.run(
-          'UPDATE love_api_proof_state SET fact_cursor=0,fact_frontier=?,reclaim_passes=reclaim_passes+1 WHERE singleton=1',
-          frontier,
-        );
+      next.reclaim_passes = successor(next.reclaim_passes, 'reclaim passes');
+      cursor = 0;
+      if (lane === 'binding') {
+        next.binding_cursor = 0;
+        next.binding_frontier = frontier;
+      } else {
+        next.fact_cursor = 0;
+        next.fact_frontier = frontier;
+      }
     }
 
     let visited = 0;
     let bindingsDeleted = 0;
     let factsDeleted = 0;
+    let lastSeq = cursor;
+    let rowCount = 0;
     if (lane === 'binding') {
-      const rows = db.all<{
-        did: string;
-        operation_id: string;
-        uri: string;
-        incarnation_key: string;
-        binding_seq: number;
-      }>(
+      const rows = db.all<BindingRow>(
         `SELECT did,operation_id,uri,incarnation_key,binding_seq FROM love_api_bindings
          WHERE binding_seq>? AND binding_seq<=? ORDER BY binding_seq LIMIT ?`,
         cursor,
         frontier,
         limit,
       );
+      rowCount = rows.length;
       for (const row of rows) {
         const seq = checked(row.binding_seq, 'binding sequence');
-        if (seq <= cursor || seq > frontier) throw new Error('L2 binding cursor escaped frontier');
+        if (seq <= lastSeq || seq > frontier) throw new Error('L2 binding cursor escaped frontier');
         visited++;
         const used = db.one(
-          `SELECT 1 FROM love_api_recipients r
-           WHERE r.did=? AND r.uri=? AND r.incarnation_key=? AND r.sent_operation_id=?
-             AND r.state IN ('present','sealed')
-           UNION ALL
-           SELECT 1 FROM love_api_recipients r
-           JOIN love_api_recipient_members m ON m.link_id=r.link_id AND m.generation=r.generation
-             AND m.operation_id=? AND m.did=r.did AND m.uri=r.uri AND m.incarnation_key=r.incarnation_key
-           WHERE r.did=? AND r.uri=? AND r.incarnation_key=? AND r.state IN ('present','sealed')
-           LIMIT 1`,
+          `SELECT 1 FROM linked_accounts l
+           CROSS JOIN love_api_recipients r ON r.did=? AND r.uri=? AND r.incarnation_key=?
+             AND r.link_id=l.id AND r.generation=l.generation
+           WHERE l.did=? AND r.state IN ('present','sealed') AND (
+             r.sent_operation_id=? OR EXISTS(
+               SELECT 1 FROM love_api_recipient_members m
+               WHERE m.link_id=r.link_id AND m.generation=r.generation AND m.operation_id=?
+                 AND m.did=r.did AND m.uri=r.uri AND m.incarnation_key=r.incarnation_key
+             )
+           ) LIMIT 1`,
           row.did,
           row.uri,
           row.incarnation_key,
-          row.operation_id,
-          row.operation_id,
           row.did,
-          row.uri,
-          row.incarnation_key,
+          row.operation_id,
+          row.operation_id,
         );
-        if (used === null) {
-          const deleted = db.run(
+        if (used === null)
+          bindingsDeleted += db.run(
             `DELETE FROM love_api_bindings WHERE did=? AND operation_id=? AND binding_seq=?
              AND NOT EXISTS(SELECT 1 FROM love_api_unlove_decisions d
                JOIN love_api_recipients r ON r.did=d.did AND r.uri=d.uri AND r.incarnation_key=d.incarnation_key
@@ -138,32 +180,26 @@ export function reclaimLoveApiProofRows(db: Db, nowMs: number, limit = LOVE_API_
             row.uri,
             row.incarnation_key,
             row.operation_id,
-          );
-          bindingsDeleted += deleted.rowsWritten;
-        }
-        db.run('UPDATE love_api_proof_state SET binding_cursor=? WHERE singleton=1', seq);
+          ).rowsWritten;
+        lastSeq = seq;
       }
-      if (rows.length < limit || rows.length === 0 || rows.at(-1)!.binding_seq >= frontier)
-        db.run(
-          "UPDATE love_api_proof_state SET reclaim_kind='fact',binding_cursor=0,binding_frontier=0,updated_at_ms=? WHERE singleton=1",
-          nowMs,
-        );
+      if (rows.length < limit || rows.length === 0 || rows.at(-1)!.binding_seq >= frontier) {
+        next.reclaim_kind = 'fact';
+        next.binding_cursor = 0;
+        next.binding_frontier = 0;
+      } else next.binding_cursor = lastSeq;
     } else {
-      const rows = db.all<{
-        authorization_uri: string;
-        authorization_rev: string;
-        fact_seq: number;
-        horizon_ms: number;
-      }>(
+      const rows = db.all<FactRow>(
         `SELECT authorization_uri,authorization_rev,fact_seq,horizon_ms FROM love_api_comparison_facts
          WHERE fact_seq>? AND fact_seq<=? ORDER BY fact_seq LIMIT ?`,
         cursor,
         frontier,
         limit,
       );
+      rowCount = rows.length;
       for (const row of rows) {
         const seq = checked(row.fact_seq, 'fact sequence');
-        if (seq <= cursor || seq > frontier) throw new Error('L2 fact cursor escaped frontier');
+        if (seq <= lastSeq || seq > frontier) throw new Error('L2 fact cursor escaped frontier');
         visited++;
         if (row.horizon_ms <= nowMs) {
           const held = db.one(
@@ -183,14 +219,25 @@ export function reclaimLoveApiProofRows(db: Db, nowMs: number, limit = LOVE_API_
               nowMs,
             ).rowsWritten;
         }
-        db.run('UPDATE love_api_proof_state SET fact_cursor=? WHERE singleton=1', seq);
+        lastSeq = seq;
       }
-      if (rows.length < limit || rows.length === 0 || rows.at(-1)!.fact_seq >= frontier)
-        db.run(
-          "UPDATE love_api_proof_state SET reclaim_kind='binding',fact_cursor=0,fact_frontier=0,updated_at_ms=? WHERE singleton=1",
-          nowMs,
-        );
+      if (rows.length < limit || rows.length === 0 || rows.at(-1)!.fact_seq >= frontier) {
+        next.reclaim_kind = 'binding';
+        next.fact_cursor = 0;
+        next.fact_frontier = 0;
+      } else next.fact_cursor = lastSeq;
     }
+    if (
+      visited > 0 ||
+      rowCount > 0 ||
+      next.reclaim_kind !== state.reclaim_kind ||
+      next.binding_cursor !== state.binding_cursor ||
+      next.binding_frontier !== state.binding_frontier ||
+      next.fact_cursor !== state.fact_cursor ||
+      next.fact_frontier !== state.fact_frontier ||
+      next.reclaim_passes !== state.reclaim_passes
+    )
+      writeState(db, next, nowMs);
     return { visited, bindingsDeleted, factsDeleted, lane };
   });
 }

@@ -55,6 +55,8 @@ export interface PreparedLoveApiAbsence {
     generation: number;
     sentOperationId: string | null;
     sentOrigin: Exclude<Origin, 'import'> | null;
+    pendingApiOperationId: string | null;
+    pendingApiOrigin: Exclude<Origin, 'import'> | null;
     hasPendingMembers: boolean;
   }>;
 }
@@ -86,6 +88,8 @@ export type LoveApiHandoffPreparation =
         incarnationKey: string;
         apiOperationId: string;
         projectionRkey: string;
+        action: LoveApiFactAction;
+        cid: string;
         source: Exclude<Origin, 'import'>;
         sourceExclusions: readonly ('lastfm' | 'listenbrainz')[];
         projection: { artist: string; track: string; album?: string; recordingMbid?: string };
@@ -295,6 +299,8 @@ export function prepareLoveApiDirectAbsence(
     binding_uri: string | null;
     binding_incarnation_key: string | null;
     binding_origin: string | null;
+    pending_api_operation_id: string | null;
+    pending_api_origin: string | null;
   }>(
     `SELECT r.link_id,r.generation,r.sent_operation_id,r.state,
             e.did AS evidence_did,e.collection AS evidence_collection,e.rkey AS evidence_rkey,
@@ -304,6 +310,16 @@ export function prepareLoveApiDirectAbsence(
                    WHERE m.link_id=r.link_id AND m.generation=r.generation AND m.did=r.did
                      AND m.uri=r.uri AND m.incarnation_key=r.incarnation_key) AS has_pending_members,
             b.uri AS binding_uri,b.incarnation_key AS binding_incarnation_key,b.api_origin AS binding_origin
+            ,(SELECT b2.operation_id FROM love_api_recipient_members m2
+               JOIN love_api_bindings b2 ON b2.did=m2.did AND b2.operation_id=m2.operation_id
+               WHERE m2.did=r.did AND m2.uri=r.uri AND m2.incarnation_key=r.incarnation_key
+                 AND m2.link_id=r.link_id AND m2.generation=r.generation
+                 AND b2.uri=r.uri AND b2.incarnation_key=r.incarnation_key LIMIT 1) AS pending_api_operation_id,
+            (SELECT b2.api_origin FROM love_api_recipient_members m2
+               JOIN love_api_bindings b2 ON b2.did=m2.did AND b2.operation_id=m2.operation_id
+               WHERE m2.did=r.did AND m2.uri=r.uri AND m2.incarnation_key=r.incarnation_key
+                 AND m2.link_id=r.link_id AND m2.generation=r.generation
+                 AND b2.uri=r.uri AND b2.incarnation_key=r.incarnation_key LIMIT 1) AS pending_api_origin
      FROM love_api_recipients r JOIN linked_accounts l ON l.id=r.link_id AND l.generation=r.generation
      JOIN live_record_evidence e ON e.uri=r.uri
      LEFT JOIN love_api_bindings b ON b.did=r.did AND b.operation_id=r.sent_operation_id
@@ -367,6 +383,9 @@ export function prepareLoveApiDirectAbsence(
       generation: row.generation,
       sentOperationId: row.sent_operation_id,
       sentOrigin,
+      pendingApiOperationId: row.pending_api_operation_id,
+      pendingApiOrigin:
+        row.pending_api_origin !== null && bindingOrigin(row.pending_api_origin) ? row.pending_api_origin : null,
       hasPendingMembers: row.has_pending_members === 1,
     });
   }
@@ -529,6 +548,30 @@ export function prepareLoveApiWindowAbsence(
         generation: args.generation,
         sentOperationId: recipient.sent_operation_id,
         sentOrigin,
+        pendingApiOperationId:
+          db.one<{ operation_id: string }>(
+            `SELECT b.operation_id FROM love_api_recipient_members m JOIN love_api_bindings b
+             ON b.did=m.did AND b.operation_id=m.operation_id
+           WHERE m.did=? AND m.uri=? AND m.incarnation_key=? AND m.link_id=? AND m.generation=?
+             AND b.uri=m.uri AND b.incarnation_key=m.incarnation_key LIMIT 1`,
+            args.did,
+            args.uri,
+            args.incarnationKey,
+            args.linkId,
+            args.generation,
+          )?.operation_id ?? null,
+        pendingApiOrigin:
+          (db.one<{ api_origin: string }>(
+            `SELECT b.api_origin FROM love_api_recipient_members m JOIN love_api_bindings b
+             ON b.did=m.did AND b.operation_id=m.operation_id
+           WHERE m.did=? AND m.uri=? AND m.incarnation_key=? AND m.link_id=? AND m.generation=?
+             AND b.uri=m.uri AND b.incarnation_key=m.incarnation_key LIMIT 1`,
+            args.did,
+            args.uri,
+            args.incarnationKey,
+            args.linkId,
+            args.generation,
+          )?.api_origin as Exclude<Origin, 'import'> | undefined) ?? null,
         hasPendingMembers,
       },
     ],
@@ -574,7 +617,7 @@ export function sealLoveApiDirectAbsence(
   const keys = loveApiTrackKeys(love.artist, love.track);
   if (keys === null) return false;
   for (const recipient of prepared.recipients) {
-    const hasProof = recipient.sentOperationId !== null;
+    const hasProof = recipient.sentOperationId !== null || recipient.pendingApiOperationId !== null;
     if (!hasProof && !recipient.hasPendingMembers) {
       db.run(
         `UPDATE love_api_recipients SET state='released',updated_at_ms=?
@@ -588,7 +631,7 @@ export function sealLoveApiDirectAbsence(
       );
       continue;
     }
-    const payload = JSON.stringify(lovePayload(love, recipient.sentOrigin ?? undefined));
+    const payload = JSON.stringify(lovePayload(love, recipient.sentOrigin ?? recipient.pendingApiOrigin ?? undefined));
     const existing = db.one<{
       authorization_uri: string;
       authorization_rev: string;
@@ -605,15 +648,28 @@ export function sealLoveApiDirectAbsence(
       recipient.linkId,
       recipient.generation,
     );
+    if (existing !== null && prepared.horizonMs < existing.expires_at_ms)
+      db.run(
+        `UPDATE love_api_unlove_decisions SET expires_at_ms=?,due_at_ms=min(due_at_ms,?)
+         WHERE did=? AND uri=? AND incarnation_key=? AND link_id=? AND generation=? AND expires_at_ms>?`,
+        prepared.horizonMs,
+        prepared.nowMs,
+        prepared.did,
+        prepared.uri,
+        prepared.incarnationKey,
+        recipient.linkId,
+        recipient.generation,
+        prepared.horizonMs,
+      );
     if (
       existing !== null &&
       (existing.authorization_uri !== prepared.uri ||
         existing.authorization_rev !== prepared.rev ||
-        existing.fact_action !== prepared.action ||
-        existing.fact_cid !== prepared.cid ||
         !sameLovePayload(existing.payload_json, love) ||
         (recipient.sentOrigin !== null && JSON.parse(existing.payload_json).origin !== recipient.sentOrigin))
-    ) {
+    )
+      return false;
+    if (existing !== null && (existing.fact_action !== prepared.action || existing.fact_cid !== prepared.cid)) {
       recordLoveApiComparisonFact(
         db,
         {
@@ -1107,8 +1163,42 @@ export function prepareLoveApiRecipientHandoff(
     candidate.linkId,
     candidate.generation,
   );
-  if (row === null || row.current_generation !== candidate.generation || row.recipient_state !== 'sealed')
-    return { status: 'missing' };
+  if (row === null) return { status: 'missing' };
+  const fact = db.one<{ action: string; cid: string; horizon_ms: number; conflicted: number }>(
+    'SELECT action,cid,horizon_ms,conflicted FROM love_api_comparison_facts WHERE authorization_uri=? AND authorization_rev=?',
+    row.authorization_uri,
+    row.authorization_rev,
+  );
+  if (fact === null || !Number.isSafeInteger(fact.horizon_ms) || fact.horizon_ms <= 0) return { status: 'vetoed' };
+  const factMismatch = fact.conflicted !== 0 || fact.action !== row.fact_action || fact.cid !== row.fact_cid;
+  const horizon = Math.min(row.expires_at_ms, fact.horizon_ms);
+  if (horizon < row.expires_at_ms) {
+    db.run(
+      `UPDATE love_api_unlove_decisions SET expires_at_ms=?,due_at_ms=min(due_at_ms,?)
+       WHERE did=? AND uri=? AND incarnation_key=? AND link_id=? AND generation=? AND expires_at_ms>?`,
+      horizon,
+      nowMs,
+      candidate.did,
+      candidate.uri,
+      candidate.incarnationKey,
+      candidate.linkId,
+      candidate.generation,
+      horizon,
+    );
+    const persisted = db.one<{ expires_at_ms: number }>(
+      `SELECT expires_at_ms FROM love_api_unlove_decisions
+       WHERE did=? AND uri=? AND incarnation_key=? AND link_id=? AND generation=?`,
+      candidate.did,
+      candidate.uri,
+      candidate.incarnationKey,
+      candidate.linkId,
+      candidate.generation,
+    );
+    if (persisted?.expires_at_ms !== horizon) return { status: 'missing' };
+  }
+  if (horizon <= nowMs) return { status: 'expired' };
+  if (factMismatch) return { status: 'vetoed' };
+  if (row.current_generation !== candidate.generation || row.recipient_state !== 'sealed') return { status: 'missing' };
   if (row.sent_operation_id === null) return row.pending_members > 0 ? { status: 'awaiting' } : { status: 'vetoed' };
   if (row.pending_members > 0) return { status: 'awaiting' };
   const parsed = parseRecordUri(candidate.uri);
@@ -1169,40 +1259,6 @@ export function prepareLoveApiRecipientHandoff(
     JSON.stringify(payload) !== row.payload_json
   )
     return { status: 'vetoed' };
-  const fact = db.one<{ action: string; cid: string; horizon_ms: number; conflicted: number }>(
-    'SELECT action,cid,horizon_ms,conflicted FROM love_api_comparison_facts WHERE authorization_uri=? AND authorization_rev=?',
-    row.authorization_uri,
-    row.authorization_rev,
-  );
-  if (fact === null || fact.conflicted !== 0 || fact.action !== row.fact_action || fact.cid !== row.fact_cid)
-    return { status: 'vetoed' };
-  const horizon = Math.min(row.expires_at_ms, fact.horizon_ms);
-  if (!Number.isSafeInteger(horizon) || horizon <= 0) return { status: 'vetoed' };
-  if (horizon !== row.expires_at_ms) {
-    db.run(
-      `UPDATE love_api_unlove_decisions SET expires_at_ms=?
-       WHERE did=? AND uri=? AND incarnation_key=? AND link_id=? AND generation=? AND expires_at_ms>?`,
-      horizon,
-      candidate.did,
-      candidate.uri,
-      candidate.incarnationKey,
-      candidate.linkId,
-      candidate.generation,
-      horizon,
-    );
-    const persisted = db.one<{ expires_at_ms: number }>(
-      `SELECT expires_at_ms FROM love_api_unlove_decisions
-       WHERE did=? AND uri=? AND incarnation_key=? AND link_id=? AND generation=?`,
-      candidate.did,
-      candidate.uri,
-      candidate.incarnationKey,
-      candidate.linkId,
-      candidate.generation,
-    );
-    if (persisted?.expires_at_ms !== horizon) return { status: 'missing' };
-  }
-  if (horizon <= nowMs) return { status: 'expired' };
-
   if (
     db.one(
       `SELECT 1 FROM operations INDEXED BY love_api_active_love_put
@@ -1339,6 +1395,8 @@ export function prepareLoveApiRecipientHandoff(
       incarnationKey: candidate.incarnationKey,
       apiOperationId: row.sent_operation_id,
       projectionRkey: parsed.rkey,
+      action: row.fact_action,
+      cid: row.fact_cid,
       source: binding.api_origin,
       sourceExclusions: [],
       projection: {

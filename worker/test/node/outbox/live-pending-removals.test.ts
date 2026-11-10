@@ -16,6 +16,7 @@ import { applyRecordProof } from '../../../src/do/write/apply-record';
 import { enqueueListenDelete, hasCanonicalListenSurvivor } from '../../../src/forward/delete-enqueue';
 import { settleRows } from '../../../src/forward/forward-outbox';
 import { executeListenRemovals, type LiveRemovedListen } from '../../../src/forward/live-removal-effects';
+import { materializeLoveApiRecipientDecisions } from '../../../src/forward/love-api-materializer';
 import { bindApiLoveOperation, prepareLoveApiWindowAbsence } from '../../../src/forward/love-api-recipients';
 import {
   admitForwardIdentity,
@@ -513,10 +514,13 @@ it('owns a pending API-love window only for the exact current recipient generati
         nowMs: NOW,
       }),
     ).toBe(true);
-    settleRows(db, ['api-window-effect'], 'sent', NOW + 1, null, true, 1);
-    expect(db.one('SELECT sent_operation_id FROM love_api_recipients WHERE uri=?', loveUri)).toEqual({
-      sent_operation_id: 'api-window-op',
-    });
+    db.run(
+      `INSERT INTO linked_love_intents(did,love_key,intent,operation_id,updated_at_ms)
+       VALUES(?,?,'love','api-window-op',?)`,
+      DID,
+      'artist\u0000track',
+      NOW,
+    );
     const window: PendingRemovalInput = {
       did: DID,
       uri: loveUri,
@@ -596,7 +600,19 @@ it('owns a pending API-love window only for the exact current recipient generati
       authorization_rev: window.windowHi,
       payload_json: JSON.stringify({ artist: 'Artist', track: 'Track', origin: 'web' }),
     });
+    expect(db.one('SELECT sent_operation_id FROM love_api_recipients WHERE uri=?', loveUri)).toEqual({
+      sent_operation_id: null,
+    });
+    expect(db.all("SELECT id FROM forward_outbox WHERE kind='unlove'")).toHaveLength(0);
     expect(db.one('SELECT 1 FROM love_api_window_owners WHERE uri=?', loveUri)).toBeNull();
+    settleRows(db, ['api-window-effect'], 'sent', NOW + 3, null, true, 1);
+    expect(db.one('SELECT sent_operation_id FROM love_api_recipients WHERE uri=?', loveUri)).toEqual({
+      sent_operation_id: 'api-window-op',
+    });
+    expect(materializeLoveApiRecipientDecisions(db, NOW + 3, random, 'delayed-api-window')).toMatchObject({
+      deferred: 0,
+      queued: 1,
+    });
 
     const nextUri = `at://${DID}/com.example.atmusic.love/window-generation`;
     db.run("UPDATE linked_accounts SET generation=2 WHERE id='pending-link'");

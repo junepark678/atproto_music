@@ -239,13 +239,9 @@ function traceDb(raw: Db): {
   };
 }
 
-function assertL2DecisionBudget(
-  transaction: { reads: number; mutationStatements: number; changedRows: number },
-  visits: number,
-): void {
+function assertL2DecisionBudget(transaction: { reads: number; changedRows: number }, visits: number): void {
   if (transaction.reads > 128) throw new Error('L2 decision read budget exceeded');
-  if (transaction.changedRows > 96) throw new Error('L2 decision changed-row budget exceeded');
-  if (transaction.mutationStatements > 28) throw new Error('L2 decision DECISION budget exceeded');
+  if (transaction.changedRows > 28) throw new Error('L2 decision DECISION changed-row budget exceeded');
   if (visits > 16) throw new Error('L2 decision visit budget exceeded');
 }
 
@@ -970,19 +966,15 @@ describe('ListenBrainz forwarding', () => {
     );
     expect(decisionTransaction, JSON.stringify(wholeDecisionCost)).toBeDefined();
     expect(decisionTransaction!.reads, JSON.stringify(decisionTransaction)).toBeLessThanOrEqual(128);
-    expect(decisionTransaction!.changedRows, JSON.stringify(decisionTransaction)).toBeLessThanOrEqual(96);
-    expect(decisionTransaction!.mutationStatements, JSON.stringify(decisionTransaction)).toBeLessThanOrEqual(28);
+    expect(decisionTransaction!.changedRows, JSON.stringify(decisionTransaction)).toBeLessThanOrEqual(28);
     expect(materialized.visited).toBeLessThanOrEqual(16);
     assertL2DecisionBudget(decisionTransaction!, materialized.visited);
     expect(() => assertL2DecisionBudget({ ...decisionTransaction!, reads: 129 }, materialized.visited)).toThrow(
       'read budget exceeded',
     );
-    expect(() => assertL2DecisionBudget({ ...decisionTransaction!, changedRows: 97 }, materialized.visited)).toThrow(
-      'changed-row budget exceeded',
+    expect(() => assertL2DecisionBudget({ ...decisionTransaction!, changedRows: 29 }, materialized.visited)).toThrow(
+      'DECISION changed-row budget exceeded',
     );
-    expect(() =>
-      assertL2DecisionBudget({ ...decisionTransaction!, mutationStatements: 29 }, materialized.visited),
-    ).toThrow('DECISION budget exceeded');
     expect(() => assertL2DecisionBudget(decisionTransaction!, 17)).toThrow('visit budget exceeded');
     expect(materialized).toMatchObject({ visited: 1, deferred: 1, queued: 0, replay: 0, refused: 0 });
     expect(w.app.db.one("SELECT count(*) AS n FROM forward_outbox WHERE kind='unlove'")).toEqual({ n: 0 });

@@ -1111,10 +1111,13 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
          AND NOT EXISTS(
            SELECT 1 FROM love_api_recipients r
            JOIN linked_accounts l ON l.id=r.link_id AND l.generation=r.generation
-           JOIN love_api_bindings b ON b.did=r.did AND b.operation_id=r.sent_operation_id
+           JOIN love_api_bindings b ON b.did=linked_love_intents.did AND b.operation_id=linked_love_intents.operation_id
            WHERE r.did=linked_love_intents.did AND r.uri=? AND r.incarnation_key=?
-             AND r.sent_operation_id=linked_love_intents.operation_id AND r.state IN ('present','sealed')
-             AND b.uri=r.uri AND b.incarnation_key=r.incarnation_key
+             AND (r.sent_operation_id=linked_love_intents.operation_id OR EXISTS(
+               SELECT 1 FROM love_api_recipient_members m WHERE m.did=r.did AND m.uri=r.uri
+                 AND m.incarnation_key=r.incarnation_key AND m.link_id=r.link_id AND m.generation=r.generation
+                 AND m.operation_id=linked_love_intents.operation_id))
+             AND r.state IN ('present','sealed') AND b.uri=r.uri AND b.incarnation_key=r.incarnation_key
          ) LIMIT 1`,
         t.did,
         `${priorArtistKey}\u0000${priorTrackKey}`,

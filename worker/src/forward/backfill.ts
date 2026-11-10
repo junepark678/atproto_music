@@ -11,8 +11,7 @@ import { matchedRecordingMbid } from '../musicbrainz/store';
 import { enqueueForwards } from '../outbox/forward-enqueue';
 import { closeOpenLinkGap, ownsAdmissionInGap } from './coverage';
 import type { ForwardRuntime } from './forwarder';
-import { reclaimLoveApiProofRows } from './love-api-maintenance';
-import { materializeLoveApiRecipientDecisions } from './love-api-materializer';
+import { runLoveApiMaintenance } from './love-api-scheduler';
 import { runLoveCoverageChunk } from './love-coverage';
 import { LOVE_MAINTENANCE_QUIET_MS, runDeferredLoveMaintenance } from './love-deferral-maintenance';
 import { hasArmedLoveCoverage } from './love-deferral-storage';
@@ -649,13 +648,12 @@ export function linkBackfillExtension(runtime: () => ForwardRuntime | null): Cor
             let l2Failed = false;
             try {
               sessionToken ??= createSessionToken(rt);
-              const materialized = materializeLoveApiRecipientDecisions(rt.db, now, rt.random, sessionToken);
-              const reclaimed = reclaimLoveApiProofRows(rt.db, now);
-              if (materialized.visited + reclaimed.visited > 0) l2Wake = 1_000;
+              const maintenance = runLoveApiMaintenance(rt.db, now, rt.random, sessionToken);
+              l2Wake = maintenance.wakeMs;
             } catch (error) {
               l2Failed = true;
               try {
-                rt.log.log('warn', 'forward.api_love_materializer_failed', {
+                rt.log.log('warn', 'forward.api_love_maintenance_failed', {
                   error: error instanceof Error ? error.name : 'UnknownError',
                 });
               } catch {

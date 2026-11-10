@@ -399,6 +399,86 @@ Probe artifacts: `/tmp/atproto-followup-sol/finding32-sol-actual209-cost-probe.t
 `finding32-sol-actual209-cost-results.json`, and `finding32-sol-actual209-cost-probe.log`.
 Those artifacts measured materialization plus one link-scoped enqueue only.
 
+## Independent CORE audit repairs (pinned `cdb78de`)
+
+The independent Astra CORE/runtime/accounting audit found seven source defects;
+Sol accepted all seven. This work repairs those findings on top of the
+preserved `cdb78def7e4d7abf832bfe7a9587c9bc1c1f0af3` head. It does not claim
+whole-L2 acceptance or readiness. The audit and repair direction are
+`/tmp/atproto-followup-sol/pr210-astra-core-cdb78de.md` and
+`/tmp/atproto-followup-sol/pr210-sol-core-cdb-repair-direction.md`.
+
+1. A shared production maintenance scheduler now runs decision, stale-owner
+   sweep, and binding/fact reclamation under one 96 changed-row/16-visit
+   invocation budget, reserving 12 rows for metadata. It includes cold
+   singleton initialization, counter/cursor changes, nested savepoints, and
+   actual SQLite `total_changes()` checks before each phase commit. Each
+   decision remains at most 28 changed rows and 128 reads; sweep/reclaim use
+   finite cursors and bounded rows. A real injected trigger-like 40-row
+   amplification makes the decision exceed 28, throws before commit, and
+   proves the recipient, decision, outbox, and amplification rows all roll
+   back. The prior audit's real 90+18=108 timer reproduction is not relabeled
+   as a lifecycle-meter issue; the scheduler now splits work over bounded
+   invocations. Current measured fixtures show cold one-decision invocation
+   25 changed rows/1 visit (including singleton initialization), warm
+   one-decision 24/2, and eight acknowledgements across bounded invocations.
+   Full cold/partial-delete/replay/refusal/completion/cleanup decision matrix
+   and one negative control for every whole-invocation bound remain required.
+2. Direct and delayed local re-love checks now recognize only the exact bound
+   current-generation API operation/member, including while it is pending.
+   The direct producer test proves signed SENT before absence and SENT after
+   absence; in the latter order the sealed decision first returns awaiting
+   with no unlove effect, then queues after the exact SENT settlement. The
+   delayed producer test likewise checks zero effect before SENT and queued
+   handoff afterward. This does not authorize arbitrary unbound or alias
+   intent.
+3. Materialization now connects the validated persisted comparison fact to
+   `recordVerifiedDeferredLoveAuthority` inside the same handoff transaction,
+   before the adapter. Missing, corrupt, conflict, and expired facts still
+   fail closed; there is no A2 reconstruction or horizon extension. Existing
+   sticky-fact, sibling rollback, no-A2-source, and clean retained-fact tests
+   cover the seam. More full real producer-batch coverage remains pending.
+4. Handoff loads and persists the minimum original horizon before pending
+   member, payload, generation, alias, and replay guards. Expired pending
+   members complete as expired and the bounded sweep reclaims stale children
+   before their aggregate; current-generation recipients survive. Envelope
+   mismatch shortens an existing deadline and refuses without rebinding or
+   inventing a sticky authority conflict. Missing/corrupt/conflict and all
+   horizon ordering combinations still need the complete producer matrix.
+5. Origin-retention lookup now joins exact current link generation and uses
+   composite primary-key member seeks; it no longer scans every old recipient
+   prefix or unions current and obsolete generations. Production SQL in the
+   direct-SQL worker-bench fixture is flat with 100/1k/10k matching released
+   history: current-dependent VM steps 71/71/71, released-only 53/53/53,
+   while the deliberate old-query control grows 1,294/12,094/120,094. EQP
+   shows indexed link and recipient/member seeks without a scan or temp
+   B-tree. The production materializer and cleanup use finite aggregate
+   cursors; full restored-origin cleanup/reconstruction coverage remains
+   pending. Migration57 remains frozen at the approved hash above.
+6. Timer wake classification now uses useful semantic outcomes, not visits,
+   due rows, or cursor movement: useful L2 work requests a 1-second wake and
+   quiet/metadata-only work requests 30 seconds. The metadata-only timer test
+   records the 30,100 ms schedule. Full useful-mutation, failure-after-earlier-
+   lane-commit, B2 independence, and preserved earlier-deadline timer cases
+   remain pending.
+7. A replay mismatch now persists a shorter existing horizon before refusing.
+   Payload-only mismatch does not create an authorization comparison conflict;
+   only an actual action/CID disagreement records sticky negative authority.
+   The regression checks the shorter stored horizon and unchanged clean fact.
+
+Scoped evidence for this repair slice: six worker-node files / 72 tests pass;
+four worker-bench files / 16 tests pass; `npm run typecheck`, scoped Biome,
+`git diff --check`, and `scripts/test/secret-scan.test.ts` pass. The audit's
+archived red tests remain the source for the findings; no failing control is
+weakened. The whole restoration/caller matrix is still in progress: populate
+all eight L2 tables from real API admission, exact PDS/SENT and verified
+absence producers, clean operation/outbox rows, then exercise actual CLI
+restore into schema56/57 and real timer/backfill/dispatch/resume with fresh
+session state and both fake transports. Direct SQL remains limited to
+legacy/rollback/corruption setup and growth fixtures. Whole-decision cold,
+partial-delete, two-recipient, all outcomes, over-128 negative control,
+fresh Astra review, and populated real restore acceptance remain gates.
+
 The direct-SQL worker-bench retention proof runs the production reclaimer over
 100/1,000/10,000 same-DID API bindings with one selected SENT aggregate held at
 the final sequence. Each page is fixed at 10 reads, 17 mutation statements, 16
