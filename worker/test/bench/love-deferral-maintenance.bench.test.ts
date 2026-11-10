@@ -18,20 +18,44 @@ const SIZE = 100_000;
 function observedDb(db: Db) {
   let statements = 0;
   let returnedRows = 0;
+  let unit: { statements: number; returnedRows: number } | null = null;
+  const units: { statements: number; returnedRows: number }[] = [];
+  const beginUnit = (sql: string) => {
+    if (
+      sql.includes("WHERE state='conflicted' AND due_seq IS NOT NULL ORDER BY") ||
+      sql.includes('WHERE maintenance_seq IS NOT NULL ORDER BY') ||
+      sql.includes('WHERE head_seq>? AND head_seq<=? ORDER BY') ||
+      sql.includes('WHERE group_seq>? AND group_seq<=? ORDER BY') ||
+      sql.includes('WHERE authority_seq>? AND authority_seq<=? ORDER BY') ||
+      sql.startsWith('DELETE FROM forward_deferred_love_witnesses WHERE rowid IN')
+    ) {
+      expect(unit).toBeNull();
+      unit = { statements, returnedRows };
+    }
+  };
   const observed: Db = {
     all<T>(sql: string, ...params: SqlParam[]): T[] {
+      beginUnit(sql);
       statements++;
       const rows = db.all<T>(sql, ...params);
       returnedRows += rows.length;
       return rows;
     },
     one<T>(sql: string, ...params: SqlParam[]): T | null {
+      beginUnit(sql);
       statements++;
       const row = db.one<T>(sql, ...params);
       if (row !== null) returnedRows++;
+      // Each real lane step ends at the scheduler's SQLite change-counter
+      // read. Metadata accounting happens outside these step boundaries.
+      if (sql === 'SELECT total_changes() AS changes' && unit !== null) {
+        units.push({ statements: statements - unit.statements, returnedRows: returnedRows - unit.returnedRows });
+        unit = null;
+      }
       return row;
     },
     run(sql: string, ...params: SqlParam[]) {
+      beginUnit(sql);
       statements++;
       return db.run(sql, ...params);
     },
@@ -39,7 +63,7 @@ function observedDb(db: Db) {
       return db.tx(fn);
     },
   };
-  return { db: observed, counts: () => ({ statements, returnedRows }) };
+  return { db: observed, counts: () => ({ statements, returnedRows }), units };
 }
 
 it('keeps RR, WIT, AUTH plans and maintenance result work bounded at 1k and 100k direct rows', async () => {
@@ -151,6 +175,13 @@ it('keeps RR, WIT, AUTH plans and maintenance result work bounded at 1k and 100k
     expect(result.unitCosts.every((unit) => unit.actual <= unit.reserved && unit.work <= unit.reserved)).toBe(true);
     expect(observed.counts().returnedRows).toBeLessThanOrEqual(300);
     expect(observed.counts().statements).toBeLessThanOrEqual(400);
+    // The former one-step guard still applies to each actual step of this
+    // sparse growth fixture, even though two phases now execute more steps.
+    expect(observed.units.length).toBeGreaterThan(5);
+    for (const unit of observed.units) {
+      expect(unit.returnedRows).toBeLessThanOrEqual(20);
+      expect(unit.statements).toBeLessThanOrEqual(80);
+    }
   });
 }, 120_000);
 

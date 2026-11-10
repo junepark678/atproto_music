@@ -13,7 +13,7 @@ or declared inspection work exceeds the reservation.
 | Lane step | Reserved work | Per-step detail |
 | --- | ---: | --- |
 | INV | 10 | One invalidated intent plus head removal/arming, allocator, authority cursor, and linked-account effects |
-| DUE | 19 | Up to 16 child deletions plus head/FIFO re-arm and associated updates |
+| DUE | 21 | Up to 16 child deletions, FIFO arm allocation, head arm, optional completed-link reopen, maintenance requeue allocation and head floor/queue update |
 | RR | 21 | Up to 16 child deletions plus scan, arm, and associated updates |
 | WIT | 16 | One group step or up to 16 witness rows pruned |
 | AUTH | 8 | Up to eight unfiltered authority rows inspected; cursor advances to the last inspected row |
@@ -25,7 +25,9 @@ ceilings, not independent quotas.
 
 At most 18 changed rows are reserved for metadata: one singleton initialization,
 six maintenance-cursor finalizations (RR, WIT, and AUTH once in each phase),
-ten lane-counter upserts, and one lane-turn update. Cursor and counter writes
+ten lane-counter upserts, and one lane-turn update. Each cursor, counter, initialization and lane-turn statement reserves at most one
+metadata write and measures its actual SQLite change delta before commit. Spare
+unit allowance cannot cover metadata expansion. Cursor and counter writes
 are in the lane transaction. Empty initialized runs write zero rows. The
 combined charged-work and metadata ceilings are 128 changed rows. A failed
 lane rolls back its data, cursor, and counter; earlier lane transactions remain
