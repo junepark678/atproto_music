@@ -586,6 +586,29 @@ function query(path: string, sql: string, ...params: sqlite.SQLInputValue[]): Re
   }
 }
 
+function downgradeFixtureTo55(path: string): void {
+  const db = openSqliteDb(path, { busyTimeoutMs: BUSY_MS });
+  try {
+    expect(migrate(db, MIGRATIONS)).toEqual({ status: 'ready', version: 56 });
+    db.tx(() => {
+      db.exec('DROP INDEX forward_outbox_unlove_authority_dependency');
+      for (const table of [
+        'forward_deferred_love_intents',
+        'forward_deferred_love_witnesses',
+        'forward_deferred_love_authorities',
+        'forward_deferred_love_heads',
+        'forward_love_delivery',
+        'forward_deferred_love_maintenance',
+      ])
+        db.exec(`DROP TABLE ${table}`);
+      db.run('DELETE FROM schema_migrations WHERE version=56');
+    });
+    expect(migrate(db, MIGRATIONS.slice(0, 55))).toEqual({ status: 'ready', version: 55 });
+  } finally {
+    db.close();
+  }
+}
+
 function boxOf(doc: Record<string, unknown>): { box: Box; secrets: Secrets } {
   const secrets = parseSecrets(doc);
   return { box: createBox(secrets.encryptionKeys, seededRandom(1)), secrets };
@@ -840,6 +863,67 @@ describe('restore.ts', () => {
     expect(query(oldLivePath, 'PRAGMA foreign_key_check')).toEqual([]);
   });
 
+  it('migrates a real schema-55 backup to 56 while preserving a readable schema-55 live receipt and gap', async () => {
+    const world = await buildWorld({
+      backupSql: [
+        `INSERT INTO forward_receipts(link_id,generation,kind,dedupe_key,created_at_ms)
+         SELECT id,generation,'scrobble','schema55-receipt',101 FROM linked_accounts WHERE did='${DID_A}'`,
+        `INSERT INTO forward_link_gaps(link_id,generation,from_seq,to_seq,reason,opened_at_ms,closed_at_ms)
+         SELECT id,generation,4,7,'disabled','101','102' FROM linked_accounts WHERE did='${DID_A}'`,
+      ],
+      liveSql: [
+        `INSERT INTO forward_receipts(link_id,generation,kind,dedupe_key,created_at_ms)
+         SELECT id,generation,'scrobble','schema55-live-receipt',201 FROM linked_accounts WHERE did='${DID_A}'`,
+        `INSERT INTO forward_link_gaps(link_id,generation,from_seq,to_seq,reason,opened_at_ms,closed_at_ms)
+         SELECT id,generation,8,9,'disabled','201','202' FROM linked_accounts WHERE did='${DID_A}'`,
+      ],
+    });
+    const backup55 = join(world.dir, 'backup-schema-55.db');
+    const live55 = join(world.dir, 'live-schema-55.db');
+    copyFileSync(world.backupPath, backup55);
+    copyFileSync(world.dbPath, live55);
+    downgradeFixtureTo55(backup55);
+    downgradeFixtureTo55(live55);
+    expect(query(backup55, 'SELECT max(version) AS v FROM schema_migrations')).toEqual([{ v: 55 }]);
+    expect(query(live55, 'SELECT max(version) AS v FROM schema_migrations')).toEqual([{ v: 55 }]);
+
+    const oldWorld = { ...world, dbPath: live55, backupPath: backup55 };
+    const systemd = new FakeSystemd(oldWorld, { servicePort: null });
+    await systemd.boot();
+    const result = await restoreCli(oldWorld, systemd, [...baseArgs(oldWorld), '--no-ready-check']);
+    expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.stdout).toContain('migrated the copy from version 55 to 56');
+    const restored = openSqliteDb(live55, { busyTimeoutMs: BUSY_MS });
+    try {
+      expect(restored.one('SELECT max(version) AS version FROM schema_migrations')).toEqual({ version: 56 });
+      expect(restored.all('SELECT kind,dedupe_key,created_at_ms FROM forward_receipts ORDER BY dedupe_key')).toEqual([
+        { kind: 'scrobble', dedupe_key: 'schema55-live-receipt', created_at_ms: 201 },
+        { kind: 'scrobble', dedupe_key: 'schema55-receipt', created_at_ms: 101 },
+      ]);
+      expect(
+        restored.all(
+          'SELECT from_seq,to_seq,reason FROM forward_link_gaps WHERE link_id=? ORDER BY from_seq',
+          world.ids.link!,
+        ),
+      ).toEqual([
+        { from_seq: 4, to_seq: 7, reason: 'disabled' },
+        { from_seq: 8, to_seq: 9, reason: 'disabled' },
+      ]);
+      for (const table of [
+        'forward_love_delivery',
+        'forward_deferred_love_heads',
+        'forward_deferred_love_intents',
+        'forward_deferred_love_witnesses',
+        'forward_deferred_love_authorities',
+        'forward_deferred_love_maintenance',
+      ])
+        expect(restored.one(`SELECT 1 AS present FROM ${table}`)).toBeNull();
+    } finally {
+      restored.close();
+    }
+    expect(query(live55, 'PRAGMA foreign_key_check')).toEqual([]);
+  }, 30_000);
+
   it('keeps the newest live evidence, candidate, and pending removal when a readable restore merges an older backup', async () => {
     const uri = `at://${DID_A}/${PREFIX}.scrobble/evidence-restore`;
     const identity = 'listen:restore-candidate';
@@ -875,6 +959,12 @@ describe('restore.ts', () => {
     expect(TABLE_CLASS.live_pending_removal_reconcile).toBe('non-derived');
     expect(TABLE_CLASS.forward_receipts).toBe('non-derived');
     expect(TABLE_CLASS.forward_link_gaps).toBe('non-derived');
+    expect(TABLE_CLASS.forward_love_delivery).toBe('non-derived');
+    expect(TABLE_CLASS.forward_deferred_love_heads).toBe('non-derived');
+    expect(TABLE_CLASS.forward_deferred_love_intents).toBe('non-derived');
+    expect(TABLE_CLASS.forward_deferred_love_witnesses).toBe('non-derived');
+    expect(TABLE_CLASS.forward_deferred_love_authorities).toBe('non-derived');
+    expect(TABLE_CLASS.forward_deferred_love_maintenance).toBe('non-derived');
     const systemd = new FakeSystemd(world, { servicePort: null });
     await systemd.boot();
     const result = await restoreCli(world, systemd, [...baseArgs(world), '--no-ready-check']);

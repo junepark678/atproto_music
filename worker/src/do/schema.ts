@@ -1623,6 +1623,115 @@ const MIGRATION_LINK_COVERAGE_RECEIPTS: Migration = {
   ],
 };
 
+const MIGRATION_LINK_LOVE_COVERAGE: Migration = {
+  version: 56,
+  name: 'link_love_coverage',
+  statements: [
+    `CREATE TABLE forward_love_delivery (
+      link_id TEXT NOT NULL REFERENCES linked_accounts(id) ON DELETE CASCADE,
+      generation INTEGER NOT NULL,
+      love_artist_key TEXT NOT NULL,
+      love_track_key TEXT NOT NULL,
+      last_sent_kind TEXT NOT NULL CHECK(last_sent_kind IN ('love','unlove')),
+      last_sent_dedupe_key TEXT NOT NULL,
+      row_created_at_ms INTEGER NOT NULL,
+      sent_at_ms INTEGER NOT NULL,
+      PRIMARY KEY(link_id,generation,love_artist_key,love_track_key)
+    )`,
+    `CREATE TABLE forward_deferred_love_heads (
+      link_id TEXT NOT NULL REFERENCES linked_accounts(id) ON DELETE CASCADE,
+      generation INTEGER NOT NULL,
+      love_artist_key TEXT NOT NULL,
+      love_track_key TEXT NOT NULL,
+      head_seq INTEGER NOT NULL UNIQUE CHECK(head_seq>=1),
+      next_seq INTEGER NOT NULL DEFAULT 1 CHECK(next_seq>=1),
+      live_from_seq INTEGER NOT NULL DEFAULT 1 CHECK(live_from_seq>=1 AND live_from_seq<=next_seq),
+      armed_seq INTEGER CHECK(armed_seq IS NULL OR armed_seq>=1),
+      maintenance_seq INTEGER CHECK(maintenance_seq IS NULL OR maintenance_seq>=1),
+      decided_seq INTEGER CHECK(decided_seq IS NULL OR decided_seq>=1),
+      scan_seq INTEGER CHECK(scan_seq IS NULL OR scan_seq>=1),
+      created_at_ms INTEGER NOT NULL,
+      PRIMARY KEY(link_id,generation,love_artist_key,love_track_key)
+    )`,
+    'CREATE INDEX forward_deferred_love_heads_armed ON forward_deferred_love_heads(link_id,generation,armed_seq) WHERE armed_seq IS NOT NULL',
+    'CREATE INDEX forward_deferred_love_heads_maintenance ON forward_deferred_love_heads(maintenance_seq) WHERE maintenance_seq IS NOT NULL',
+    `CREATE TABLE forward_deferred_love_intents (
+      link_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      love_artist_key TEXT NOT NULL,
+      love_track_key TEXT NOT NULL,
+      intent_seq INTEGER NOT NULL CHECK(intent_seq>=1),
+      kind TEXT NOT NULL CHECK(kind IN ('love','unlove')),
+      operation_id TEXT NOT NULL,
+      origin_class TEXT NOT NULL CHECK(origin_class IN ('operation','authorized','live_love','unclassified')),
+      payload_json TEXT NOT NULL,
+      authorization_uri TEXT,
+      authorization_rev TEXT,
+      intent_at_ms INTEGER NOT NULL,
+      CHECK((authorization_uri IS NULL) = (authorization_rev IS NULL)),
+      CHECK((origin_class='authorized') = (authorization_uri IS NOT NULL)),
+      PRIMARY KEY(link_id,generation,love_artist_key,love_track_key,intent_seq),
+      UNIQUE(link_id,generation,operation_id),
+      FOREIGN KEY(link_id,generation,love_artist_key,love_track_key)
+        REFERENCES forward_deferred_love_heads(link_id,generation,love_artist_key,love_track_key) ON DELETE CASCADE
+    )`,
+    'CREATE INDEX forward_deferred_love_intents_authorization ON forward_deferred_love_intents(authorization_uri,authorization_rev,link_id,generation,operation_id) WHERE authorization_uri IS NOT NULL',
+    `CREATE TABLE forward_deferred_love_witnesses (
+      link_id TEXT NOT NULL REFERENCES linked_accounts(id) ON DELETE CASCADE,
+      generation INTEGER NOT NULL,
+      operation_id TEXT NOT NULL,
+      group_seq INTEGER NOT NULL CHECK(group_seq>=1),
+      kind TEXT NOT NULL CHECK(kind IN ('love','unlove')),
+      love_artist_key TEXT NOT NULL,
+      love_track_key TEXT NOT NULL,
+      authorization_uri TEXT,
+      authorization_rev TEXT,
+      created_at_ms INTEGER NOT NULL,
+      CHECK((authorization_uri IS NULL) = (authorization_rev IS NULL)),
+      PRIMARY KEY(link_id,generation,operation_id)
+    )`,
+    'CREATE INDEX forward_deferred_love_witnesses_group ON forward_deferred_love_witnesses(group_seq,link_id,generation)',
+    `CREATE TABLE forward_deferred_love_authorities (
+      authorization_uri TEXT NOT NULL,
+      authorization_rev TEXT NOT NULL,
+      authority_seq INTEGER NOT NULL UNIQUE CHECK(authority_seq>=1),
+      action TEXT NOT NULL CHECK(action IN ('update','delete')),
+      cid TEXT NOT NULL,
+      state TEXT NOT NULL CHECK(state IN ('active','conflicted')),
+      due_seq INTEGER CHECK(due_seq IS NULL OR due_seq>=1),
+      cursor_link_id TEXT NOT NULL DEFAULT '',
+      cursor_generation INTEGER NOT NULL DEFAULT 0,
+      cursor_operation_id TEXT NOT NULL DEFAULT '',
+      created_at_ms INTEGER NOT NULL,
+      CHECK((state='conflicted') = (due_seq IS NOT NULL)),
+      CHECK((action='delete') = (cid='')),
+      PRIMARY KEY(authorization_uri,authorization_rev)
+    )`,
+    'CREATE INDEX forward_deferred_love_authorities_due ON forward_deferred_love_authorities(due_seq) WHERE due_seq IS NOT NULL',
+    "CREATE INDEX forward_outbox_unlove_authority_dependency ON forward_outbox(authorization_uri,authorization_rev) WHERE kind='unlove' AND authorization_uri IS NOT NULL AND (state IN ('queued','held','retrying') OR (state='ignored' AND last_error IN ('no_recording_mbid','mbid_unresolved')))",
+    `CREATE TABLE forward_deferred_love_maintenance (
+      singleton INTEGER PRIMARY KEY NOT NULL CHECK(singleton=1),
+      lane_turn INTEGER NOT NULL DEFAULT 0 CHECK(lane_turn BETWEEN 0 AND 4),
+      next_head_seq INTEGER NOT NULL DEFAULT 1 CHECK(next_head_seq>=1),
+      next_group_seq INTEGER NOT NULL DEFAULT 1 CHECK(next_group_seq>=1),
+      next_authority_seq INTEGER NOT NULL DEFAULT 1 CHECK(next_authority_seq>=1),
+      rr_cursor INTEGER NOT NULL DEFAULT 0,
+      rr_frontier INTEGER NOT NULL DEFAULT 0,
+      wit_cursor INTEGER NOT NULL DEFAULT 0,
+      wit_frontier INTEGER NOT NULL DEFAULT 0,
+      wit_state TEXT NOT NULL DEFAULT 'scan' CHECK(wit_state IN ('scan','pruning')),
+      wit_link_id TEXT NOT NULL DEFAULT '',
+      wit_generation INTEGER NOT NULL DEFAULT 0,
+      auth_cursor INTEGER NOT NULL DEFAULT 0,
+      auth_frontier INTEGER NOT NULL DEFAULT 0,
+      rr_passes INTEGER NOT NULL DEFAULT 0,
+      wit_passes INTEGER NOT NULL DEFAULT 0,
+      auth_passes INTEGER NOT NULL DEFAULT 0,
+      updated_at_ms INTEGER NOT NULL DEFAULT 0
+    )`,
+  ],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
   MIGRATION_2,
@@ -1679,6 +1788,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_A2_RETENTION_EPOCH,
   MIGRATION_LOVE_IMPORT_BRIDGE_SOURCE_CLASS,
   MIGRATION_LINK_COVERAGE_RECEIPTS,
+  MIGRATION_LINK_LOVE_COVERAGE,
 ];
 
 /** The schema version this code expects. */
@@ -1784,6 +1894,12 @@ export const TABLES = [
   // Migration 55.
   'forward_receipts',
   'forward_link_gaps',
+  'forward_love_delivery',
+  'forward_deferred_love_heads',
+  'forward_deferred_love_intents',
+  'forward_deferred_love_witnesses',
+  'forward_deferred_love_authorities',
+  'forward_deferred_love_maintenance',
 ] as const;
 
 export type TableName = (typeof TABLES)[number];
@@ -1887,4 +2003,10 @@ export const TABLE_CLASS: Readonly<Record<TableName, TableClass>> = {
   linked_pull_love_admissions: 'non-derived',
   forward_receipts: 'non-derived',
   forward_link_gaps: 'non-derived',
+  forward_love_delivery: 'non-derived',
+  forward_deferred_love_heads: 'non-derived',
+  forward_deferred_love_intents: 'non-derived',
+  forward_deferred_love_witnesses: 'non-derived',
+  forward_deferred_love_authorities: 'non-derived',
+  forward_deferred_love_maintenance: 'non-derived',
 };

@@ -614,7 +614,7 @@ describe('worker/test/harness', () => {
   it('the migration ledger is ordered across the N/M, M4, S1, S2, S3 and S4 stack', async () => {
     const versions = MIGRATIONS.map((m) => m.version);
     expect(versions.slice(0, 14)).toEqual(Array.from({ length: 14 }, (_, i) => i + 1));
-    expect(versions.slice(-23)).toEqual(Array.from({ length: 23 }, (_, i) => i + 33));
+    expect(versions.slice(-24)).toEqual(Array.from({ length: 24 }, (_, i) => i + 33));
     expect(versions.every((version, index) => index === 0 || version > (versions[index - 1] ?? 0))).toBe(true);
     expect(SCHEMA_VERSION).toBe(MIGRATIONS[MIGRATIONS.length - 1]?.version);
     expect(MIGRATIONS.length).toBeGreaterThanOrEqual(2);
@@ -703,6 +703,27 @@ describe('worker/test/harness', () => {
          VALUES('at://did:plc:seed/com.example.atmusic.scrobble/live','r2','delete','',0,9999999999999)`,
       );
       for (const [table, rows] of Object.entries(SEED_ROWS)) for (const row of rows) insertRow(db, table, row);
+      db.run(
+        `INSERT INTO forward_love_delivery(link_id,generation,love_artist_key,love_track_key,last_sent_kind,last_sent_dedupe_key,row_created_at_ms,sent_at_ms)
+         VALUES('l1',1,'björk','jóga','love','fixture-love',${NOW},${NOW})`,
+      );
+      db.run(
+        `INSERT INTO forward_deferred_love_heads(link_id,generation,love_artist_key,love_track_key,head_seq,next_seq,live_from_seq,created_at_ms)
+         VALUES('l1',1,'björk','jóga',1,2,1,${NOW})`,
+      );
+      db.run(
+        `INSERT INTO forward_deferred_love_intents(link_id,generation,love_artist_key,love_track_key,intent_seq,kind,operation_id,origin_class,payload_json,intent_at_ms)
+         VALUES('l1',1,'björk','jóga',1,'unlove','fixture-b2-op','operation','{"nontrivial":"payload"}',${NOW})`,
+      );
+      db.run(
+        `INSERT INTO forward_deferred_love_witnesses(link_id,generation,operation_id,group_seq,kind,love_artist_key,love_track_key,created_at_ms)
+         VALUES('l1',1,'fixture-b2-op',1,'unlove','björk','jóga',${NOW})`,
+      );
+      db.run(
+        `INSERT INTO forward_deferred_love_authorities(authorization_uri,authorization_rev,authority_seq,action,cid,state,created_at_ms)
+         VALUES('at://did:plc:seed/com.atproto.repo.record/r','rev',1,'update','cid','active',${NOW})`,
+      );
+      db.run('INSERT INTO forward_deferred_love_maintenance(singleton) VALUES(1)');
       db.run('UPDATE forward_admission_clock SET next_seq=1 WHERE singleton=1');
       db.run(
         "INSERT INTO linked_pull_state(link_id,generation,source_service,source_account,listen_watermark_ms,updated_at_ms) VALUES('seed-link',1,'listenbrainz','seed',0,0)",

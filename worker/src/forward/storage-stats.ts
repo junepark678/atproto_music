@@ -107,6 +107,68 @@ const TABLES = [
     columns: ['link_id', 'reason'],
     marker: false,
   },
+  {
+    key: 'forward_love_delivery',
+    primaryKey: ['link_id', 'generation', 'love_artist_key', 'love_track_key'],
+    columns: ['link_id', 'love_artist_key', 'love_track_key', 'last_sent_kind', 'last_sent_dedupe_key'],
+    marker: false,
+  },
+  {
+    key: 'forward_deferred_love_heads',
+    primaryKey: ['link_id', 'generation', 'love_artist_key', 'love_track_key'],
+    columns: ['link_id', 'love_artist_key', 'love_track_key'],
+    marker: false,
+  },
+  {
+    key: 'forward_deferred_love_intents',
+    primaryKey: ['link_id', 'generation', 'love_artist_key', 'love_track_key', 'intent_seq'],
+    columns: [
+      'link_id',
+      'love_artist_key',
+      'love_track_key',
+      'kind',
+      'operation_id',
+      'origin_class',
+      'payload_json',
+      'authorization_uri',
+      'authorization_rev',
+    ],
+    marker: false,
+  },
+  {
+    key: 'forward_deferred_love_witnesses',
+    primaryKey: ['link_id', 'generation', 'operation_id'],
+    columns: [
+      'link_id',
+      'operation_id',
+      'kind',
+      'love_artist_key',
+      'love_track_key',
+      'authorization_uri',
+      'authorization_rev',
+    ],
+    marker: false,
+  },
+  {
+    key: 'forward_deferred_love_authorities',
+    primaryKey: ['authorization_uri', 'authorization_rev'],
+    columns: [
+      'authorization_uri',
+      'authorization_rev',
+      'action',
+      'cid',
+      'state',
+      'cursor_link_id',
+      'cursor_operation_id',
+    ],
+    marker: false,
+  },
+  {
+    key: 'forward_deferred_love_maintenance',
+    primaryKey: ['singleton'],
+    columns: ['wit_state', 'wit_link_id'],
+    marker: false,
+  },
 ] as const;
 
 type TableKey = (typeof TABLES)[number]['key'];
