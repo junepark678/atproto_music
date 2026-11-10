@@ -40,6 +40,10 @@ export function retainedForwardProvenance(db: Db, did: string, identityKey: stri
   return null;
 }
 
+export const RETAINED_RECORD_PROVENANCE_SQL = `SELECT op.origin,jobs.source FROM operations AS op
+     LEFT JOIN import_jobs AS jobs ON jobs.id=op.import_job_id
+     WHERE op.did=? AND op.collection=? AND op.rkey=? ORDER BY op.created_at_ms DESC LIMIT 1`;
+
 /** Trusted path from a retained operation at one exact repository record. */
 export function retainedRecordProvenance(
   db: Db,
@@ -48,9 +52,7 @@ export function retainedRecordProvenance(
   rkey: string,
 ): ForwardProvenance | null {
   const operation = db.one<{ origin: string; source: string | null }>(
-    `SELECT op.origin,jobs.source FROM operations AS op
-     LEFT JOIN import_jobs AS jobs ON jobs.id=op.import_job_id
-     WHERE op.did=? AND op.collection=? AND op.rkey=? ORDER BY op.created_at_ms DESC LIMIT 1`,
+    RETAINED_RECORD_PROVENANCE_SQL,
     did,
     collection,
     rkey,

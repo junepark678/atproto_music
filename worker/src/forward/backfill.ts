@@ -15,6 +15,10 @@ import { latestExplicitLoveIntent } from './love-intent';
 import { resolveLoveRecording } from './love-recording';
 import { projectionListenKey } from './projection';
 
+export const LOVE_BRIDGE_EXCLUSION_SQL = `SELECT 1 AS x FROM love_import_bridges INDEXED BY love_import_bridges_source_class
+       WHERE did=? AND uri=? AND incarnation_key=? AND state='bound'
+         AND (${LOVE_IMPORT_SOURCE_CLASS_SQL}) IN (0,?) LIMIT 1`;
+
 export const BACKFILL_CHUNK_SIZE = 500;
 export const BACKFILL_IDLE_MS = 30_000;
 const BACKFILL_RETRY_BASE_MS = 5_000;
@@ -182,9 +186,7 @@ function payloadForHistoryRow(
     if (incarnation.path === 'import' && sourceService(incarnation.source_service) === link.service) return null;
     const destinationClass = link.service === 'lastfm' ? 1 : 2;
     const excludedByBridge = db.one<{ x: number }>(
-      `SELECT 1 AS x FROM love_import_bridges INDEXED BY love_import_bridges_source_class
-       WHERE did=? AND uri=? AND incarnation_key=? AND state='bound'
-         AND (${LOVE_IMPORT_SOURCE_CLASS_SQL}) IN (0,?) LIMIT 1`,
+      LOVE_BRIDGE_EXCLUSION_SQL,
       link.did,
       row.uri,
       incarnation.incarnation_key,
