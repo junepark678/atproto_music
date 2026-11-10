@@ -18,7 +18,7 @@ Owner request:
 - Nothing calls `noteLinkError` (`worker/src/forward/links.ts:296`). The UI shows only `link.status`.
 - The outbox has no maximum attempt count; a row leaves only when it ages out.
 - A verified love-record update that changes its canonical artist/track identity currently does not queue a replacement love or remove the old remote love. The old remote love may remain as an acceptable best-effort sync limitation. Manual-enqueue update tests model a future producer and do not establish current caller coverage.
-- Inherited live-delete survivor behavior is unchanged by B2: an event-caused unlove can be sent while another same-track love is locally present. It is not counted as fixed. The approved [separate P1 LIVE-DELETE-SURVIVOR slice](#live-delete-survivor-p1) follows B2 and precedes finding 32 code.
+- Inherited live-delete survivor behavior is unchanged by B2: an event-caused unlove can be sent while another same-track love is locally present. It is not counted as fixed. The approved [separate P1 LIVE-DELETE-SURVIVOR slice](https://github.com/junepark678/atproto_music/pull/209) follows B2 and precedes finding 32 code.
 
 **Now playing** (`worker/src/do/read/now-playing.ts`, `now_playing` at `schema.ts:491-503`)
 - There is one row per DID, holding `started_at_ms` (the server's receive time), duration, album, album artist, recording MBID, client and source.
@@ -390,6 +390,8 @@ The copy stays short, and no DIDs are shown.
   - Never force-push to master or to someone else's branch.
 
 ## LIVE-DELETE-SURVIVOR (P1)
+
+Separate implementation and red reproduction: [PR #209](https://github.com/junepark678/atproto_music/pull/209), stacked on B2.
 
 Planner ruling, 2026-11-10: this is a separate safety slice, next after B2 and
 ahead of finding 32 implementation. B2 discloses the inherited limitation and
