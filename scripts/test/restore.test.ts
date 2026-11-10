@@ -673,6 +673,15 @@ function restoreB2Snapshot(path: string): string {
   );
 }
 
+function restoreLoveApiSnapshot(path: string): string {
+  return JSON.stringify(
+    LOVE_API_TABLES.map((table) => {
+      const columns = query(path, `PRAGMA table_info(${table})`).map((row) => row.name as string);
+      return [table, query(path, `SELECT * FROM ${table} ORDER BY ${columns.join(',')}`)];
+    }),
+  );
+}
+
 async function dispatchListenbrainz(
   db: SqliteDb,
   now: number,
@@ -1967,6 +1976,9 @@ describe('restore.ts', () => {
     expect(dispatchedListenbrainz.filter((request) => (request as { score?: number }).score === 0)).toHaveLength(1);
     const secondDispatch = await dispatchRestoreLoveTransports(restored, timerNow + 90_000);
     expect(secondDispatch.report.requests).toBe(0);
+    expect(
+      restored.one('SELECT 1 FROM love_api_bindings WHERE did=? AND operation_id=?', DID_A, source!.operationId),
+    ).toBeNull();
     await stopServer(systemd.server!.server);
     systemd.server = null;
     expect(query(world.dbPath, 'PRAGMA foreign_key_check')).toEqual([]);
@@ -2188,14 +2200,18 @@ describe('restore.ts', () => {
     const world = await buildWorld({
       beforeBackup: ({ db, clock, linkId }) => {
         populateDeferredLoveState(db, clock, linkId, 'Backup');
+        populateLoveApiProofState(db, clock, linkId, 'Backup');
       },
       afterBackup: ({ db, clock, linkId }) => {
         populateDeferredLoveState(db, clock, linkId, 'Live');
+        populateLoveApiProofState(db, clock, linkId, 'Live');
       },
     });
     const backupBytes = readFileSync(world.backupPath);
     const liveBefore = restoreB2Snapshot(world.dbPath);
     const backupBefore = restoreB2Snapshot(world.backupPath);
+    const liveLoveApiBefore = restoreLoveApiSnapshot(world.dbPath);
+    const backupLoveApiBefore = restoreLoveApiSnapshot(world.backupPath);
     for (const table of [
       'forward_love_delivery',
       'forward_deferred_love_heads',
@@ -2215,7 +2231,7 @@ describe('restore.ts', () => {
       systemd,
       [...baseArgs(world), '--listen', `127.0.0.1:${servicePort}`],
       (step) => {
-        if (step === 'merged') throw new Error('injected after complete six-table merge');
+        if (step === 'merged') throw new Error('injected after complete B2 and L2 merge before file swap');
       },
     );
     expect(result.code).toBe(1);
@@ -2224,6 +2240,8 @@ describe('restore.ts', () => {
     expect(systemd.server).toBeNull();
     expect(restoreB2Snapshot(world.dbPath)).toBe(liveBefore);
     expect(restoreB2Snapshot(world.backupPath)).toBe(backupBefore);
+    expect(restoreLoveApiSnapshot(world.dbPath)).toBe(liveLoveApiBefore);
+    expect(restoreLoveApiSnapshot(world.backupPath)).toBe(backupLoveApiBefore);
     expect(readFileSync(world.backupPath).equals(backupBytes)).toBe(true);
     expect(restoreB2Snapshot(`${world.dbPath}.pre-restore`)).toBe(liveBefore);
     expect(existsSync(`${world.dbPath}.restore.tmp`)).toBe(false);

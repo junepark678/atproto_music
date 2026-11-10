@@ -611,3 +611,19 @@ is retained as historical evidence, not erased by this revised paused/revoked
 restore path; active-at-absence broad/narrow coexistence still needs Sol's
 reconciliation and is not claimed as exactly-once per remote. No broad
 producer behavior changed here.
+
+The producer-derived restore case now also verifies the retention endpoint:
+after fresh-composition timer work, paused/revoked zero-egress, same-remote
+resume, one dispatch per remote, and a zero-request rerun, the original
+`love_api_bindings` row is gone once both recipient aggregates are released.
+The bounded reclaimer may reach that row during a later lane turn, so the test
+asserts the durable post-progress state instead of requiring the dispatch
+transaction itself to reclaim it. A separate production-handoff test checks
+the direct single-page reclaim result after the final dependency releases.
+
+Restore failure injection now snapshots all eight L2 tables from both the
+readable live DB and backup and compares their complete rows after an injected
+failure at the real CLI `merged` stage (after B2/L2 merge and before file swap).
+This is rollback/atomicity coverage using seeded rows; it does not replace the
+producer-derived restore and dispatch scenario. Accept-loss all-eight-table
+behavior and alias-session rescan after reopen/rollback remain pending.
