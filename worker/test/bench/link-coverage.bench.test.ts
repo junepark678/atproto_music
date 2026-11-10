@@ -65,6 +65,7 @@ it('bounds exact receipt and gap queries across receipt and closed-gap growth, i
       for (const key of ['ownerOldestHit', 'ownerMiddleHit', 'ownerNewestHit'])
         expect(m[key]).toMatchObject({ rows: 1, owned: true });
       expect(m.newestClosed!.values?.[0]?.[1]).not.toBeNull();
+      expect(m.newestClosed!.rows).toBe(1);
       expect(m.newestOpen).toMatchObject({ rows: 1, toSeqIsNull: true });
       for (const key of ['negativeOwnerAfterAll', 'negativeOwnerBetween', 'negativeNewestAllClosed'])
         expect(m[key]!.rows).toBe(0);
@@ -95,6 +96,15 @@ it('bounds exact receipt and gap queries across receipt and closed-gap growth, i
         key
       ]!.steps;
       expect(large, `${key} with closed-gap growth`).toBeLessThanOrEqual(small * 1.5);
+    }
+    for (const key of ['newestClosed', 'newestOpen'] as const) {
+      const small = reports.find((report) => report.receiptSize === 1_000 && report.gapSize === 1_000)!.measurements[
+        key
+      ]!.steps;
+      const large = reports.find((report) => report.receiptSize === 1_000 && report.gapSize === 50_000)!.measurements[
+        key
+      ]!.steps;
+      expect(large, `${key} newest lookup with closed-gap growth`).toBeLessThanOrEqual(small * 1.5);
     }
     for (const key of ['negativeOwnerAfterAll', 'negativeOwnerBetween', 'negativeNewestAllClosed'] as const) {
       const small = reports.find((report) => report.receiptSize === 1_000 && report.gapSize === 1_000)!.measurements[

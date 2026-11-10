@@ -32,7 +32,7 @@ import { type Box, linkedAad, linkedPurpose } from '../crypto/box';
 import { constantTimeEqual } from '../crypto/constant-time';
 import { bytesToHex, hashToken } from '../crypto/tokens';
 import type { Db } from '../do/db';
-import { admissionHighWater, closeOrReconstructLinkGap, openLinkGap } from './coverage';
+import { admissionHighWater, closeOrReconstructLinkGap, openGapAfterEligibleTransition } from './coverage';
 import { resumeHeldRows } from './forward-outbox';
 
 /** How long a Last.fm link state is valid (ADR §12.1). */
@@ -419,7 +419,7 @@ export function patchLink(
     const now = deps.clock.nowMs();
     if (enableScrobbles) db.run('DELETE FROM link_backfill_items WHERE link_id=?', row.id);
     if (disableScrobbles) {
-      openLinkGap(db, row, 'disabled', now);
+      openGapAfterEligibleTransition(db, row, 'disabled', now);
     }
     if (enableScrobbles) closeOrReconstructLinkGap(db, row, admissionHighWater(db), now);
     db.run(
@@ -506,8 +506,8 @@ export function revokeLink(
 ): boolean {
   const safeError = /^[a-z0-9_]{1,64}$/.test(error) ? error : 'credential_revoked';
   return db.tx(() => {
-    const current = db.one<{ status: string; forward_scrobbles: number }>(
-      'SELECT status,forward_scrobbles FROM linked_accounts WHERE id=? AND generation=?',
+    const current = db.one<{ status: string; forward_scrobbles: number; generation_start_seq: number }>(
+      'SELECT status,forward_scrobbles,generation_start_seq FROM linked_accounts WHERE id=? AND generation=?',
       link.id,
       link.generation,
     );
@@ -524,7 +524,13 @@ export function revokeLink(
         link.generation,
         toBlob(blobBytes(link.credential_ciphertext)),
       ).rowsWritten === 1;
-    if (revoked && wasForwardEligible) openLinkGap(db, link, 'revoked', now);
+    if (revoked && wasForwardEligible && current !== null)
+      openGapAfterEligibleTransition(
+        db,
+        { ...link, generation_start_seq: current.generation_start_seq },
+        'revoked',
+        now,
+      );
     return revoked;
   });
 }

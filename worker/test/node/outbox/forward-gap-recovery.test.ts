@@ -8,9 +8,12 @@ import type { Db, SqlParam } from '../../../src/do/db';
 import { readLiveEvidence, recordLiveEvidence } from '../../../src/do/ingest/live-evidence';
 import { applyRecordProof } from '../../../src/do/write/apply-record';
 import { runLinkBackfill } from '../../../src/forward/backfill';
-import { openLinkGap } from '../../../src/forward/coverage';
+import { openLinkGap, ownsAdmissionInGap } from '../../../src/forward/coverage';
+import { expireRows, holdLinkRows, resumeHeldRows, settleRows } from '../../../src/forward/forward-outbox';
 import { patchLink, revokeLink, saveLink } from '../../../src/forward/links';
 import { lateAccept } from '../../../src/forward/live-acceptance';
+import { storedForwardDedupeKey } from '../../../src/outbox/forward-key';
+import { FORWARD_RECEIPT_LOOKUP_SQL } from '../../../src/outbox/forward-receipts';
 import { acceptListens } from '../../../src/outbox/ingress';
 import { cancelUnsent, insertOperation } from '../../../src/outbox/operations';
 import { authorizedLiveOptions, fixtureScrobble, putProof } from '../../write/support';
@@ -59,10 +62,10 @@ async function publishAndProject(h: Harness): Promise<void> {
   }
 }
 
-function saveSameLink(h: Harness) {
+function saveSameLink(h: Harness, remoteUser = 'recovery') {
   return saveLink(
     { db: h.db, clock: h.m.clock, random: h.m.random, box },
-    { did: h.alice, service: 'listenbrainz', remoteUser: 'recovery', credential: 'test-token' },
+    { did: h.alice, service: 'listenbrainz', remoteUser, credential: 'test-token' },
   );
 }
 
@@ -289,7 +292,154 @@ describe('forward coverage gap recovery', () => {
     });
   });
 
-  it('does not late-accept imported or cleanup-retired candidates on replay', async () => {
+  it('checks receipt and row invariants through mixed production settlement and same-link rotation', async () => {
+    await withHarness(async (h) => {
+      h.seedUser(h.alice);
+      h.account(h.alice);
+      const link = saveSameLink(h).link;
+      const assertCoverage = (generation = link.generation) => {
+        const receipts = h.db.all<{ dedupe_key: string; retired_at_ms: number | null }>(
+          'SELECT dedupe_key,retired_at_ms FROM forward_receipts WHERE link_id=? AND generation=?',
+          link.id,
+          generation,
+        );
+        const rows = h.db.all<{ dedupe_key: string; state: string; attempts: number; payload_json: string }>(
+          'SELECT dedupe_key,state,attempts,payload_json FROM forward_outbox WHERE link_id=? AND generation=?',
+          link.id,
+          generation,
+        );
+        for (const receipt of receipts) {
+          const row = rows.find(
+            (candidate) => candidate.dedupe_key === storedForwardDedupeKey(generation, receipt.dedupe_key),
+          );
+          if (receipt.retired_at_ms === null) expect(row, `live receipt ${receipt.dedupe_key}`).toBeDefined();
+        }
+        for (const row of rows) {
+          expect(
+            receipts.some((receipt) => storedForwardDedupeKey(generation, receipt.dedupe_key) === row.dedupe_key),
+          ).toBe(true);
+          expect(JSON.parse(row.payload_json)).toBeTruthy();
+        }
+        return rows;
+      };
+
+      const cancelled = await accept(h, 45);
+      assertCoverage();
+      expect(cancelUnsent(h.db, cancelled.operationId, T0 + 1)).toBe(true);
+      expect(
+        h.db.one('SELECT 1 FROM forward_outbox WHERE link_id=? AND dedupe_key=?', link.id, cancelled.listenKey),
+      ).toBeNull();
+      expect(
+        h.db.one('SELECT 1 FROM forward_receipts WHERE link_id=? AND dedupe_key=?', link.id, cancelled.listenKey),
+      ).toBeNull();
+      assertCoverage();
+
+      const finish = async (index: number, terminal: 'sent' | 'ignored' | 'failed') => {
+        const item = await accept(h, index);
+        await publishAndProject(h);
+        const row = h.db.one<{ id: string }>(
+          'SELECT id FROM forward_outbox WHERE link_id=? AND dedupe_key=?',
+          link.id,
+          item.listenKey,
+        );
+        expect(row).not.toBeNull();
+        const error = terminal === 'ignored' ? 'ignored' : terminal === 'failed' ? 'retry_exhausted' : null;
+        settleRows(h.db, [row!.id], terminal, T0 + index, error, true, link.generation);
+        const state = h.db.one<{ state: string; attempts: number; last_error: string | null }>(
+          'SELECT state,attempts,last_error FROM forward_outbox WHERE id=?',
+          row!.id,
+        );
+        expect(state).toEqual({ state: terminal, attempts: 1, last_error: error });
+        assertCoverage();
+        return { item, row: row!, state };
+      };
+      await finish(46, 'sent');
+      await finish(47, 'ignored');
+      const failed = await finish(48, 'failed');
+
+      const held = await accept(h, 49);
+      await publishAndProject(h);
+      expect(holdLinkRows(h.db, link.id, T0 + 49, link.generation)).toBeGreaterThan(0);
+      expect(
+        h.db.one('SELECT state FROM forward_outbox WHERE link_id=? AND dedupe_key=?', link.id, held.listenKey),
+      ).toEqual({
+        state: 'held',
+      });
+      assertCoverage();
+      expect(resumeHeldRows(h.db, link.id, T0 + 50, link.generation)).toBeGreaterThan(0);
+      expect(
+        h.db.one('SELECT state FROM forward_outbox WHERE link_id=? AND dedupe_key=?', link.id, held.listenKey),
+      ).toEqual({
+        state: 'queued',
+      });
+      assertCoverage();
+      expect(holdLinkRows(h.db, link.id, T0 + 51, link.generation)).toBeGreaterThan(0);
+      h.db.run('UPDATE forward_outbox SET updated_at_ms=0 WHERE link_id=? AND dedupe_key=?', link.id, held.listenKey);
+      expect(expireRows(h.db, T0 + 31 * 24 * 60 * 60 * 1000).held).toBeGreaterThan(0);
+      expect(
+        h.db.one(
+          'SELECT state,last_error FROM forward_outbox WHERE link_id=? AND dedupe_key=?',
+          link.id,
+          held.listenKey,
+        ),
+      ).toEqual({
+        state: 'expired',
+        last_error: 'held_expired',
+      });
+      assertCoverage();
+
+      const pending = await accept(h, 51);
+      await publishAndProject(h);
+      const pendingBeforeRotation = h.db.one<{ id: string; state: string; attempts: number }>(
+        'SELECT id,state,attempts FROM forward_outbox WHERE link_id=? AND dedupe_key=?',
+        link.id,
+        pending.listenKey,
+      )!;
+      expect(pendingBeforeRotation).toMatchObject({ state: 'queued', attempts: 0 });
+      assertCoverage();
+
+      const rotated = saveSameLink(h, 'recovery-rotated').link;
+      expect(rotated).toMatchObject({ id: link.id, generation: 2, remote_user: 'recovery-rotated' });
+      const oldRow = h.db.one<{ state: string; attempts: number; id: string }>(
+        'SELECT id,state,attempts FROM forward_outbox WHERE link_id=? AND dedupe_key=?',
+        link.id,
+        pending.listenKey,
+      )!;
+      expect(oldRow).toMatchObject({ state: 'expired', attempts: 0 });
+      expect(h.db.one('SELECT state,attempts FROM forward_outbox WHERE id=?', oldRow.id)).toEqual({
+        state: oldRow.state,
+        attempts: oldRow.attempts,
+      });
+      settleRows(h.db, [oldRow.id], 'sent', T0 + 60, null, true, link.generation);
+      expect(h.db.one('SELECT state,attempts FROM forward_outbox WHERE id=?', oldRow.id)).toEqual({
+        state: oldRow.state,
+        attempts: oldRow.attempts,
+      });
+      expect(h.db.one('SELECT state,last_error FROM forward_outbox WHERE id=?', failed.row.id)).toEqual({
+        state: 'failed',
+        last_error: 'retry_exhausted',
+      });
+      expect(h.db.one('SELECT count(*) AS n FROM forward_receipts WHERE link_id=? AND generation=1', link.id)).toEqual({
+        n: 5,
+      });
+      expect(h.db.one('SELECT count(*) AS n FROM forward_receipts WHERE link_id=? AND generation=2', link.id)).toEqual({
+        n: 0,
+      });
+      assertCoverage(1);
+      const current = await accept(h, 50);
+      await publishAndProject(h);
+      const gen2Row = h.db.one<{ generation: number; state: string; attempts: number; dedupe_key: string }>(
+        'SELECT generation,state,attempts,dedupe_key FROM forward_outbox WHERE link_id=? AND generation=2 AND did=?',
+        link.id,
+        h.alice,
+      );
+      expect(gen2Row).toMatchObject({ generation: 2, state: 'queued', attempts: 0 });
+      expect(gen2Row?.dedupe_key).not.toBe(current.listenKey);
+      assertCoverage(2);
+    });
+  });
+
+  it('stops imported and consumed late-accept candidates before receipt lookup', async () => {
     await withHarness(async (h) => {
       h.seedUser(h.alice);
       h.account(h.alice);
@@ -366,7 +516,19 @@ describe('forward coverage gap recovery', () => {
         row!.dedupe_key,
       );
       h.db.run('DELETE FROM forward_outbox WHERE link_id=? AND dedupe_key=?', row!.link_id, row!.dedupe_key);
-      expect(lateAccept(h.db, { ...cleanup.args, evidence: cleanup.evidence })).toBe(0);
+      const originalOne = h.db.one.bind(h.db);
+      let receiptLookups = 0;
+      h.db.one = <T>(sql: string, ...params: SqlParam[]): T | null => {
+        if (sql === FORWARD_RECEIPT_LOOKUP_SQL) receiptLookups++;
+        return originalOne<T>(sql, ...params);
+      };
+      try {
+        expect(lateAccept(h.db, { ...cleanup.args, evidence: cleanup.evidence })).toBe(0);
+        // The acceptance candidate was consumed on the first call, so the receipt layer is unreachable here.
+        expect(receiptLookups).toBe(0);
+      } finally {
+        h.db.one = originalOne;
+      }
       expect(
         h.db.one(
           'SELECT retired_at_ms FROM forward_receipts WHERE link_id=? AND dedupe_key=?',
@@ -377,5 +539,97 @@ describe('forward coverage gap recovery', () => {
         retired_at_ms: T0 + 1,
       });
     });
+  });
+
+  it('settles a rollback-stale interval on disable before backfill can select it', async () => {
+    await withHarness(async (h) => {
+      h.seedUser(h.alice);
+      h.account(h.alice);
+      const link = saveSameLink(h).link;
+      patchLink({ db: h.db, clock: h.m.clock }, h.alice, link.id, { forwardScrobbles: false });
+      const disabled = await accept(h, 38);
+      await publishAndProject(h);
+
+      // Exact supported schema-54 re-enable shape: flag and floor reset, old gap left open.
+      h.db.run(
+        "UPDATE linked_accounts SET forward_scrobbles=1,generation_start_seq=1,backfill_state='pending' WHERE id=?",
+        link.id,
+      );
+      const enabled = await accept(h, 39);
+      await publishAndProject(h);
+      expect(
+        h.db.one(
+          'SELECT count(*) AS n FROM forward_outbox WHERE link_id=? AND dedupe_key=?',
+          link.id,
+          enabled.listenKey,
+        ),
+      ).toEqual({ n: 1 });
+
+      // The current producer disables before backfill selects and settles the stale interval.
+      patchLink({ db: h.db, clock: h.m.clock }, h.alice, link.id, { forwardScrobbles: false });
+      const afterDisable = await accept(h, 40);
+      await publishAndProject(h);
+      patchLink({ db: h.db, clock: h.m.clock }, h.alice, link.id, { forwardScrobbles: true });
+
+      expect(disabled.listenKey).not.toBe(enabled.listenKey);
+      expect(afterDisable.listenKey).not.toBe(enabled.listenKey);
+      expect(
+        h.db.all('SELECT from_seq,to_seq FROM forward_link_gaps WHERE link_id=? ORDER BY from_seq', link.id),
+      ).toEqual([
+        { from_seq: 0, to_seq: 1 },
+        { from_seq: 2, to_seq: 3 },
+      ]);
+      expect(ownsAdmissionInGap(h.db, link, 2)).toBe(false);
+      expect(ownsAdmissionInGap(h.db, link, 3)).toBe(true);
+    });
+  });
+
+  it('settles a rollback-stale interval on credential and bulk policy revocation', async () => {
+    for (const mode of ['credential', 'bulk'] as const) {
+      await withHarness(async (h) => {
+        h.seedUser(h.alice);
+        h.account(h.alice);
+        const link = saveSameLink(h).link;
+        patchLink({ db: h.db, clock: h.m.clock }, h.alice, link.id, { forwardScrobbles: false });
+        await accept(h, mode === 'credential' ? 41 : 43);
+        await publishAndProject(h);
+        h.db.run(
+          "UPDATE linked_accounts SET forward_scrobbles=1,generation_start_seq=1,backfill_state='pending' WHERE id=?",
+          link.id,
+        );
+        const enabled = await accept(h, mode === 'credential' ? 42 : 44);
+        await publishAndProject(h);
+
+        if (mode === 'credential') {
+          expect(revokeLink(h.db, link, 'credential_revoked', T0)).toBe(true);
+        } else {
+          const revocations = new MemoryRevocations(h.m.clock);
+          await reconcileSignInPolicy(
+            {
+              db: h.db,
+              clock: h.m.clock,
+              log: h.m.log,
+              revocations,
+              oauth: { revoke: async () => 'revoked' },
+            },
+            { signinPolicy: 'allowlist', signinDids: [] },
+          );
+          expect(h.db.one('SELECT status FROM linked_accounts WHERE id=?', link.id)).toEqual({ status: 'revoked' });
+        }
+        const admittedSeq = h.db.one<{ admission_seq: number }>(
+          'SELECT admission_seq FROM forward_admissions WHERE did=? AND identity_key=?',
+          h.alice,
+          enabled.listenKey,
+        )?.admission_seq;
+        expect(admittedSeq).toBeDefined();
+        expect(ownsAdmissionInGap(h.db, link, admittedSeq!)).toBe(false);
+        expect(
+          h.db.all('SELECT from_seq,to_seq FROM forward_link_gaps WHERE link_id=? ORDER BY from_seq', link.id),
+        ).toEqual([
+          { from_seq: 0, to_seq: 1 },
+          { from_seq: 2, to_seq: null },
+        ]);
+      });
+    }
   });
 });

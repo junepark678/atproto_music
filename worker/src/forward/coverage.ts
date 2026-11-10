@@ -88,6 +88,17 @@ export function closeOrReconstructLinkGap(
   return closeOpenLinkGap(db, link, toSeq, now);
 }
 
+/** Settle a rollback-stale open interval only when an eligible link leaves E. */
+export function openGapAfterEligibleTransition(
+  db: Db,
+  link: CoverageLink & { generation_start_seq: number },
+  reason: Exclude<LinkGapReason, 'legacy'>,
+  now: number,
+): void {
+  closeOpenLinkGap(db, link, link.generation_start_seq, now);
+  openLinkGap(db, link, reason, now);
+}
+
 export function ownsAdmissionInGap(db: Db, link: CoverageLink, admissionSeq: number): boolean {
   const candidate = db.one<{ to_seq: number | null }>(GAP_ADMISSION_OWNER_SQL, link.id, link.generation, admissionSeq);
   return candidate !== null && candidate.to_seq !== null && admissionSeq <= candidate.to_seq;

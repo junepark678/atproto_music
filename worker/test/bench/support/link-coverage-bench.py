@@ -161,6 +161,7 @@ for receipt_size in (1_000, 100_000):
         )
         newest_open_lookup = work(queries["newestGap"], (link_id, 1))
         measurements["newestOpen"] = {
+            "steps": newest_open_lookup["steps"],
             "rows": newest_open_lookup["rows"],
             "toSeqIsNull": newest_open_lookup["values"][0][1] is None,
         }
