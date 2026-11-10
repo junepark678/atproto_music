@@ -4,8 +4,9 @@
 // compatibility cases use synthetic migration lists, so they do not depend on
 // migration 2 (N1-10).
 
-import { rmSync } from 'node:fs';
+import { readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it } from 'vitest';
 import { MigrationLedgerError, type MigrationTarget, migrate } from '../../src/do/migrate';
 import { MIGRATIONS, type Migration, SCHEMA_VERSION, TABLE_CLASS, TABLES } from '../../src/do/schema';
@@ -72,6 +73,42 @@ function recordingTarget(db: SqliteDb) {
 }
 
 describe('migrate over node:sqlite', () => {
+  it('executes the unallocated L2 proposal on schema 56 through the Node authorizer with clean foreign keys', async () => {
+    await withMigratedDb((db) => {
+      const ddl = readFileSync(new URL('../../../docs/planning/finding32-l2-v4-proposed.sql', import.meta.url), 'utf8');
+      const statements = ddl
+        .split(';')
+        .map((statement) => statement.trim())
+        .filter(Boolean);
+      expect(statements).toHaveLength(17);
+      expect(db.exec('SELECT max(version) AS version FROM schema_migrations')).toEqual([{ version: 56 }]);
+      db.tx(() => {
+        for (const statement of statements) db.exec(statement);
+      });
+      const tables = db.all<{ name: string }>(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'love_api_%' ORDER BY name",
+      );
+      expect(tables).toHaveLength(8);
+      const indexes = db.all<{ name: string }>(
+        "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'love_api_%' ORDER BY name",
+      );
+      expect(indexes).toHaveLength(9);
+      expect(db.exec('SELECT max(version) AS version FROM schema_migrations')).toEqual([{ version: 56 }]);
+
+      const verify = new DatabaseSync(':memory:');
+      try {
+        verify.exec('PRAGMA foreign_keys=ON');
+        for (const { sql } of db.all<{ sql: string }>(
+          "SELECT sql FROM sqlite_master WHERE type IN ('table','index') AND sql IS NOT NULL ORDER BY rowid",
+        ))
+          verify.exec(sql);
+        expect(verify.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+      } finally {
+        verify.close();
+      }
+    });
+  });
+
   it('migration 30 creates durable per-generation pull state, staging and tombstone tables', () => {
     const db = freshDb();
     migrate(db);
