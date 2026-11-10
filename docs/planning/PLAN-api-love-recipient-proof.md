@@ -187,10 +187,12 @@ settlement can promote a pending member and attach that member's persisted API
 origin to the sealed decision in the same transaction. The production
 executor/projector test covers new API binding, exact current-generation SENT
 settlement, persisted delete evidence, and decision sealing before projection
-cleanup. This does not prove delayed-window ownership, producer-batch pinning,
-a materializer, or an egress handoff. Production caller matrix and whole-path
-costs remain pending. Bounded API-origin binding retention and
-reclamation remain pending.
+cleanup. The same actual executor test now deletes the bound operation and SENT
+outbox row before repository deletion; the persisted L2 binding reconstructs
+the exact `listenbrainz` source for decision sealing after both mutable source
+rows are gone. This does not prove producer-batch pinning, a materializer, or
+an egress handoff. Production caller matrix and whole-path costs remain
+pending. Bounded API-origin binding retention and reclamation remain pending.
 
 The next slice now records exact current-generation `love_api_window_owners`
 when a pending love-removal window is persisted. Authorization compares the
@@ -204,8 +206,10 @@ creates/replays the delayed window, authorizes the retained event, executes the
 window, checks the sealed payload/source, verifies owner cascade, and rotates
 the link generation to prove stale recipient exclusion. This is delayed-window
 ownership/sealing evidence only; batch pinning, materialization, egress, and
-full cost bounds remain pending. The current changed-row/read trace for this
-slice has not yet been recorded.
+full cost bounds remain pending. The scoped owner plus authorization trace is
+12 changed rows, 16 reads, 15 mutation statements, and 12 returned rows,
+including the idempotent repeated-window call; decision sealing is outside
+that trace.
 
 The executor's reuse, snapshot, and import-incarnation tests exercise actual
 binding for each API origin. An instrumented real Node DB helper trace measured

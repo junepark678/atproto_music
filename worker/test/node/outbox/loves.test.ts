@@ -320,7 +320,7 @@ it('forwards a live deletion of an API-created love, and routes imported love de
   });
 });
 
-it('captures an API recipient decision from a persisted exact delete fact before projection cleanup', async () => {
+it('reconstructs API source from L2 after operation and sent-outbox cleanup before deletion proof sealing', async () => {
   await withHarness(async (h) => {
     h.seedUser(h.alice);
     const linkId = h.link(h.alice, 'lastfm');
@@ -361,6 +361,15 @@ it('captures an API recipient decision from a persisted exact delete fact before
     settleRows(h.db, [effect!.id], 'sent', h.m.clock.nowMs(), null, true, effect!.generation);
     expect(h.db.one('SELECT sent_operation_id FROM love_api_recipients')).toEqual({ sent_operation_id: op.id });
     h.db.run('DELETE FROM linked_love_intents WHERE did=? AND operation_id=?', h.alice, op.id);
+    h.db.run('DELETE FROM operations WHERE id=?', op.id);
+    h.db.run('DELETE FROM forward_outbox WHERE id=?', effect!.id);
+    expect(h.db.one('SELECT 1 FROM operations WHERE id=?', op.id)).toBeNull();
+    expect(h.db.one('SELECT 1 FROM forward_outbox WHERE id=?', effect!.id)).toBeNull();
+    expect(h.db.one('SELECT api_origin FROM love_api_bindings WHERE did=? AND operation_id=?', h.alice, op.id)).toEqual(
+      {
+        api_origin: 'listenbrainz',
+      },
+    );
 
     await h.kit.externalDelete('Alice', LOVE, op.rkey!);
     const car = await h.kit.repos.Alice.getRecordCar(LOVE, op.rkey!);
