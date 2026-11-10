@@ -485,7 +485,9 @@ whole-L2 acceptance or readiness. The audit and repair direction are
 7. A replay mismatch now persists a shorter existing horizon before refusing.
    Payload-only mismatch does not create an authorization comparison conflict;
    only an actual action/CID disagreement records sticky negative authority.
-   The regression checks the shorter stored horizon and unchanged clean fact.
+   The regression checks the shorter stored horizon, unchanged immutable
+   payload, and clean fact; a later wider matching replay succeeds without
+   restoring the original deadline.
 
 Scoped evidence for the earlier repair slice: six worker-node files / 72 tests
 pass; four worker-bench files / 16 tests pass. The follow-up bench and origin

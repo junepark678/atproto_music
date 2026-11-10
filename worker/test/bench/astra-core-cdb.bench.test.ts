@@ -254,6 +254,51 @@ it('audit mismatched replay must shorten stored decision', async () =>
     expect(
       db.one<{ expires_at_ms: number }>('SELECT expires_at_ms FROM love_api_unlove_decisions')!.expires_at_ms,
     ).toBe(50);
+    expect(db.one<{ artist: string; track: string }>('SELECT artist,track FROM love_api_unlove_decisions')).toEqual({
+      artist: 'Artist',
+      track: 'Track 1',
+    });
+    expect(db.one<{ conflicted: number }>('SELECT conflicted FROM love_api_comparison_facts')).toEqual({
+      conflicted: 0,
+    });
+    expect(
+      sealLoveApiDirectAbsence(
+        db,
+        {
+          did: DID,
+          uri,
+          incarnationKey: 'inc1',
+          rev: REV,
+          action: 'delete',
+          cid: '',
+          horizonMs: 500,
+          nowMs: 40,
+          recipients: [
+            {
+              linkId: 'link',
+              generation: 1,
+              sentOperationId: 'op1',
+              sentOrigin: 'web',
+              pendingApiOperationId: null,
+              pendingApiOrigin: null,
+              hasPendingMembers: false,
+            },
+          ],
+        },
+        { artist: 'Artist', track: 'Track 1', album: null, recordingMbid: null },
+      ),
+    ).toBe(true);
+    expect(
+      db.one<{ expires_at_ms: number; payload_json: string }>(
+        'SELECT expires_at_ms,payload_json FROM love_api_unlove_decisions',
+      ),
+    ).toEqual({
+      expires_at_ms: 50,
+      payload_json: JSON.stringify({ artist: 'Artist', track: 'Track 1', origin: 'web' }),
+    });
+    expect(db.one<{ conflicted: number }>('SELECT conflicted FROM love_api_comparison_facts')).toEqual({
+      conflicted: 0,
+    });
   }));
 
 it('audit retained fact without A2 source still authorizes handoff', async () =>
