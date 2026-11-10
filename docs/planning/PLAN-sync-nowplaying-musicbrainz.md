@@ -17,6 +17,7 @@ Owner request:
 - Imports are one-shot and user-started. Their origin `import` is never forwarded.
 - Nothing calls `noteLinkError` (`worker/src/forward/links.ts:296`). The UI shows only `link.status`.
 - The outbox has no maximum attempt count; a row leaves only when it ages out.
+- A verified love-record update that changes its canonical artist/track identity currently does not queue a replacement love or remove the old remote love. The old remote love may remain as an acceptable best-effort sync limitation. Manual-enqueue update tests model a future producer and do not establish current caller coverage.
 
 **Now playing** (`worker/src/do/read/now-playing.ts`, `now_playing` at `schema.ts:491-503`)
 - There is one row per DID, holding `started_at_ms` (the server's receive time), duration, album, album artist, recording MBID, client and source.

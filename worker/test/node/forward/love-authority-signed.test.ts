@@ -21,10 +21,10 @@ function addPausedLink(db: Parameters<typeof enqueueForwards>[0]): void {
   );
 }
 
-describe('signed delete callers and manual signed-update authority enqueues', () => {
+describe('signed delete callers and FUTURE manual signed-update producer model', () => {
   for (const delayed of [false, true]) {
     for (const action of ['delete', 'update'] as const) {
-      it(`${action === 'update' ? 'manually enqueues update authority after' : 'removes through the delete caller with'} ${delayed ? 'late' : 'early'} signed evidence`, async () => {
+      it(`${action === 'update' ? 'models a FUTURE manual update producer (not current caller coverage) after' : 'removes through the delete caller with'} ${delayed ? 'late' : 'early'} signed evidence`, async () => {
         const repo = await repoFor('alice');
         const collection = `${PREFIX}.love`;
         const rkey = '3lbqlove01ab';
@@ -94,8 +94,8 @@ describe('signed delete callers and manual signed-update authority enqueues', ()
             hint();
             if (action === 'delete') executeAuthorizedRemovals(db, { nowMs: NOW_MS + 1, random, limit: 16 });
           }
-          // The inherited love update projector does not emit this effect. This branch
-          // tests trusted materialization through an explicit enqueuer, not caller wiring.
+          // applyRecordProof does not currently produce this effect for present-record
+          // updates. This explicit call models a FUTURE producer and is not caller coverage.
           if (action === 'update')
             enqueueLiveUnlove(db, {
               did: DID,
