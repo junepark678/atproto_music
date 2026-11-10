@@ -16,6 +16,7 @@ import {
 } from '../../../src/do/ingest/live-pending-removals';
 import { applyRecordProof } from '../../../src/do/write/apply-record';
 import { settleRows } from '../../../src/forward/forward-outbox';
+import { reclaimLoveApiProofRows } from '../../../src/forward/love-api-maintenance';
 import { materializeLoveApiRecipientDecisions } from '../../../src/forward/love-api-materializer';
 import { bumpLoveApiIntentEpoch, prepareLoveApiRecipientHandoff } from '../../../src/forward/love-api-recipients';
 import { enqueueForwards } from '../../../src/outbox/forward-enqueue';
@@ -899,6 +900,8 @@ it('reconstructs API source and trusted authority from retained L2 after operati
     ).toMatchObject({ kind: 'unlove', dedupe_key: recipientOperationId, state: 'queued' });
     expect(h.db.one('SELECT 1 FROM love_api_unlove_decisions')).toBeNull();
     expect(h.db.one('SELECT state FROM love_api_recipients')).toEqual({ state: 'released' });
+    expect(reclaimLoveApiProofRows(h.db, h.m.clock.nowMs(), 8)).toMatchObject({ bindingsDeleted: 1 });
+    expect(h.db.one('SELECT 1 FROM love_api_bindings WHERE did=? AND operation_id=?', h.alice, op.id)).toBeNull();
   });
 });
 
