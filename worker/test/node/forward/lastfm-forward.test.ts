@@ -34,13 +34,13 @@ import {
 } from '../../../src/forward/forward-outbox';
 import { type ForwardRuntime, KEY_REJECTED_PROBE_MS, runForward } from '../../../src/forward/forwarder';
 import { LASTFM_CAPS, LastfmClient } from '../../../src/forward/lastfm-client';
-import { saveLink } from '../../../src/forward/links';
+import { patchLink, saveLink } from '../../../src/forward/links';
 import { admitForwardIdentity, projectionListenKey } from '../../../src/forward/projection';
 import { UpstreamPacing } from '../../../src/forward/upstream-pacing';
 import { type LinksService, linksFeature } from '../../../src/http/links';
 import { bindPolicyFetch, createPolicyFetch } from '../../../src/node/policy-fetch';
 import { parseSecrets } from '../../../src/node/secrets';
-import { enqueueForwards, type ForwardItem } from '../../../src/outbox/forward-enqueue';
+import { enqueueApiRecipientUnlove, enqueueForwards, type ForwardItem } from '../../../src/outbox/forward-enqueue';
 import {
   canonicalForwardDedupeKey,
   deleteQueuedForwardIdentity,
@@ -1304,6 +1304,90 @@ describe('Last.fm forwarding', () => {
         .filter((r) => r.kind === 'nowplaying')
         .map((r) => r.state),
     ).toEqual(['sent', 'sent']);
+  });
+
+  it('keeps a Last.fm API recipient handoff at zero egress while paused and sends once after same-remote resume', async () => {
+    const w = await world();
+    const link = w.linkLastfm(ALICE, 'recipient-lastfm');
+    const now = w.clock.nowMs();
+    expect(
+      enqueueForwards(w.app.db, {
+        did: ALICE,
+        items: [
+          {
+            kind: 'love',
+            operationId: 'recipient-lastfm-existing-love',
+            payload: { artist: 'Paused Artist', track: 'Paused Track', origin: 'web' },
+          },
+        ],
+        now,
+        random: w.rt.random,
+      }),
+    ).toBe(1);
+    await w.run();
+    expect(w.lastfm.loveCalls.map(({ method }) => method)).toEqual(['track.love']);
+    const uri = `at://${ALICE}/com.example.atmusic.love/recipient-lastfm-api`;
+    const revision = '3lbcdefghijmu';
+    const incarnationKey = `love:${uri}:api:recipient-lastfm-put`;
+    w.app.db.run(
+      `INSERT INTO operations(id,did,kind,origin,priority,collection,rkey,state,due_at,created_at_ms,updated_at_ms)
+       VALUES('recipient-lastfm-put',?,'love.put','web',0,'com.example.atmusic.love','recipient-lastfm-api','succeeded',?,?,?)`,
+      ALICE,
+      now,
+      now,
+      now,
+    );
+    w.app.db.run(
+      `INSERT INTO love_incarnations(uri,incarnation_key,state,path,source_service,updated_at_ms)
+       VALUES(?,?,'absent','api',NULL,?)`,
+      uri,
+      incarnationKey,
+      now,
+    );
+    w.app.db.run(
+      `INSERT INTO live_pending_removal_events(uri,rev,action,cid,created_at_ms,expires_at_ms)
+       VALUES(?,?,'delete','',?,?)`,
+      uri,
+      revision,
+      now,
+      now + 24 * 60 * MINUTE,
+    );
+    expect(patchLink({ db: w.app.db, clock: w.clock }, ALICE, link.id, { forwardScrobbles: false })).not.toBeNull();
+    const broadOperationId = `love-delete:${incarnationKey}:rev:${revision}`;
+    expect(
+      enqueueApiRecipientUnlove(w.app.db, {
+        did: ALICE,
+        linkId: link.id,
+        generation: link.generation,
+        broadOperationId,
+        operationId: `${broadOperationId}:api-recipient`,
+        payload: { artist: 'Paused Artist', track: 'Paused Track', origin: 'web' },
+        authorization: { uri, rev: revision },
+        source: 'web',
+        now,
+        random: w.rt.random,
+      }),
+    ).toEqual({ status: 'deferred' });
+
+    const pausedRequests = w.seen.length;
+    await w.run();
+    expect(w.seen).toHaveLength(pausedRequests);
+    expect(w.lastfm.loveCalls.map(({ method }) => method)).toEqual(['track.love']);
+
+    expect(patchLink({ db: w.app.db, clock: w.clock }, ALICE, link.id, { forwardScrobbles: true })).not.toBeNull();
+    w.app.db.run("INSERT INTO users(did,joined_at,indexing_state) VALUES(?,'2026-01-15T00:00:00Z','current')", ALICE);
+    for (let i = 0; i < 8; i++) await runLinkBackfill(w.app.db, w.rt.random, w.clock.nowMs());
+    w.clock.advance(SECOND);
+    await w.run();
+    expect(w.lastfm.loveCalls.map(({ method, artist, track }) => [method, artist, track])).toEqual([
+      ['track.love', 'Paused Artist', 'Paused Track'],
+      ['track.unlove', 'Paused Artist', 'Paused Track'],
+    ]);
+    const completedRequests = w.seen.length;
+    w.clock.advance(SECOND);
+    await w.run();
+    expect(w.seen).toHaveLength(completedRequests);
+    expect(w.lastfm.loveCalls.map(({ method }) => method)).toEqual(['track.love', 'track.unlove']);
   });
 
   it('removes a backed-off love head and immediately exposes the queued unlove behind it', async () => {

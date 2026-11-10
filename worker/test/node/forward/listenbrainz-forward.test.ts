@@ -55,7 +55,12 @@ import { type LinksService, linksFeature } from '../../../src/http/links';
 import { enqueueRevivedLoves } from '../../../src/musicbrainz/revive-loves';
 import { parseSecrets } from '../../../src/node/secrets';
 import { openSqliteDb, type SqliteDb } from '../../../src/node/sqlite-db';
-import { enqueueForwards, enqueueLiveUnlove, type ForwardItem } from '../../../src/outbox/forward-enqueue';
+import {
+  enqueueApiRecipientUnlove,
+  enqueueForwards,
+  enqueueLiveUnlove,
+  type ForwardItem,
+} from '../../../src/outbox/forward-enqueue';
 import { PRESENT_TRACK_LOVE_SQL } from '../../../src/outbox/live-track-survivor';
 import { enqueueLove, enqueueUnlove } from '../../../src/outbox/love-ops';
 import { cancelUnsent } from '../../../src/outbox/operations';
@@ -583,6 +588,82 @@ describe('ListenBrainz forwarding', () => {
       { recording_mbid: MBID, score: 0 },
     ]);
     expect(w.app.db.one("SELECT count(*) AS n FROM forward_outbox WHERE kind='unlove'")).toEqual({ n: 1 });
+  });
+
+  it('acknowledges a real API-origin unlove while paused, then forwards exactly once after same-remote resume', async () => {
+    const w = await world();
+    const linkId = w.link();
+    const deps = w.app.composed.core.deps;
+    const artist = 'Recipient Handoff Artist';
+    const track = 'Recipient Handoff Track';
+    expect(
+      (await enqueueLove(deps, { did: ALICE, input: { artist, track, recordingMbid: MBID }, origin: 'web' })).ok,
+    ).toBe(true);
+    await w.run();
+    expect(w.lb.feedback.map((entry) => entry.json)).toEqual([{ recording_mbid: MBID, score: 1 }]);
+
+    const operation = w.app.db.one<{ id: string; rkey: string }>(
+      `SELECT id,rkey FROM operations WHERE did=? AND kind='love.put' AND origin='web'
+       ORDER BY created_at_ms DESC,rowid DESC LIMIT 1`,
+      ALICE,
+    )!;
+    const uri = `at://${ALICE}/com.example.atmusic.love/${operation.rkey}`;
+    const incarnationKey = `love:${uri}:api:${operation.id}`;
+    w.app.db.run("UPDATE operations SET state='succeeded' WHERE id=?", operation.id);
+    w.app.db.run(
+      `INSERT INTO love_incarnations(uri,incarnation_key,state,path,source_service,updated_at_ms)
+       VALUES(?,?,'absent','api',NULL,?)`,
+      uri,
+      incarnationKey,
+      w.clock.nowMs(),
+    );
+    const revision = '3lbcdefghijmu';
+    w.app.db.run(
+      `INSERT INTO live_pending_removal_events(uri,rev,action,cid,created_at_ms,expires_at_ms)
+       VALUES(?,?,'delete','',?,?)`,
+      uri,
+      revision,
+      w.clock.nowMs(),
+      w.clock.nowMs() + DAY,
+    );
+    w.app.db.run('DELETE FROM loves WHERE uri=?', uri);
+    expect(patchLink({ db: w.app.db, clock: w.clock }, ALICE, linkId, { forwardScrobbles: false })).not.toBeNull();
+    const broadOperationId = `love-delete:${incarnationKey}:rev:${revision}`;
+    const ack = enqueueApiRecipientUnlove(w.app.db, {
+      did: ALICE,
+      linkId,
+      generation: 1,
+      broadOperationId,
+      operationId: `${broadOperationId}:api-recipient`,
+      payload: { artist, track, recordingMbid: MBID, origin: 'web' },
+      authorization: { uri, rev: revision },
+      source: 'web',
+      excludeSourceServices: [],
+      now: w.clock.nowMs(),
+      random: w.rt.random,
+    });
+    expect(ack).toEqual({ status: 'deferred' });
+
+    const pausedAt = w.seen.length;
+    await w.run();
+    expect(w.seen).toHaveLength(pausedAt);
+    expect(w.lb.feedback.map((entry) => entry.json)).toEqual([{ recording_mbid: MBID, score: 1 }]);
+
+    expect(patchLink({ db: w.app.db, clock: w.clock }, ALICE, linkId, { forwardScrobbles: true })).not.toBeNull();
+    w.app.db.run("INSERT INTO users(did,joined_at,indexing_state) VALUES(?,'2026-01-15T00:00:00Z','current')", ALICE);
+    await runLinkBackfill(w.app.db, w.rt.random, w.clock.nowMs());
+    await runLinkBackfill(w.app.db, w.rt.random, w.clock.nowMs());
+    w.clock.advance(SECOND);
+    await w.run();
+    expect(w.lb.feedback.map((entry) => entry.json)).toEqual([
+      { recording_mbid: MBID, score: 1 },
+      { recording_mbid: MBID, score: 0 },
+    ]);
+    const completedAt = w.seen.length;
+    w.clock.advance(SECOND);
+    await w.run();
+    expect(w.seen).toHaveLength(completedAt);
+    expect(w.lb.feedback).toHaveLength(2);
   });
 
   it('re-arms the earlier deferred unlove when a later API love is cancelled before send', async () => {
