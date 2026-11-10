@@ -154,6 +154,45 @@ held expiry; they fail when only the Promise guard is bypassed. The observer is
 a trusted synchronous contract, not cancellation of arbitrary async work.
 Empty transition batches do not invoke it.
 
+## Stage 2 implementation progress
+
+The amended schema57 commit `f94c749` is pushed. The production `love.put`
+reuse path now runs the existing-record lookup, current incarnation and exact
+API-admission reads, import bridge updates, L2 binding/member writes, and
+admission deletion in one synchronous transaction; runner memo state changes
+only after commit. The binding reads the exact `operations.origin`, accepts
+only API origins, validates the persisted projection URI/incarnation and API
+admission identity (whose request rkey can differ from the projection rkey),
+and stores the origin without a default. It seeks only exact current-link,
+current-generation love rows. SENT rows at binding create positive proof;
+queued/held rows create pending members. Operation-GC/reopen coverage runs the
+real Node executor for each of the three API origins and verifies import does
+not create API bindings.
+
+The shared terminal `UPDATE RETURNING` result now feeds the L2 member consumer
+inside the same transaction for settlement and age/held expiry. Only exact
+SENT transitions promote an aggregate; every terminal result removes its
+matching pending member. Existing B2 delivery ledger behavior and expiry
+report shape remain covered. Hint comparison invokes retained L2 comparison
+before A2 pending-removal authorization and ORs its sticky conflict result into
+the existing gate. These are binding and terminal/comparison seams only: no
+absence decision, window owner, materializer handoff or full maintenance lane
+is claimed yet. Bounded API-origin binding retention/reclamation and actual
+producer-batch pinning are still pending.
+
+The executor's reuse, snapshot, and import-incarnation tests exercise actual
+binding for each API origin. An instrumented real Node DB helper trace measured
+7 SQLite changed rows, 9 read calls, 8 mutation statements, and 6 returned
+rows, including singleton initialization and allocator changes; the hard
+13-row handoff bound passes. This is a helper-only trace, not the composed
+whole DECISION path. Current focused suites cover production love executor,
+recipient handoff/module boundaries, sticky facts, and SENT/failed/age/held
+settlement; migration authorizer/shape/storage, restore CLI 56→57 plus
+older-live merge, secret scan, typecheck, scoped Biome, and diff check pass.
+No whole-path128 or full-L2 budget proof is claimed. The next stages must
+measure actual helper, handoff and whole decision costs, retaining the hard
+96-write/16-visit/DECISION28 limits and provisional whole-read128 gate.
+
 ## Read-cap relaxation and evidence gate
 
 The 128 full-DECISION read cap is a provisional relaxation of the

@@ -53,6 +53,7 @@
 import type { Random } from '@atmusic/core/deps';
 import type { ForwardKind, ForwardOutboxRow, LinkService } from '../app/rows';
 import type { Db } from '../do/db';
+import { settleApiLoveRecipientRows } from './love-api-recipients';
 import { recordLoveDelivery, type SentLoveRow } from './love-delivery';
 import { touchLoveLane } from './love-lanes';
 
@@ -299,18 +300,22 @@ export type SettledForwardRowsHook = (rows: readonly SettledForwardRow[], now: n
 const SETTLED_COLUMNS = 'id,link_id,generation,did,kind,dedupe_key,state,love_artist_key,love_track_key,created_at_ms';
 
 function notifySettled(
+  db: Db,
   onSettled: SettledForwardRowsHook | undefined,
   rows: readonly SettledForwardRow[],
   now: number,
 ): void {
-  if (rows.length === 0 || onSettled === undefined) return;
-  const result: unknown = onSettled?.(rows, now);
-  if (
-    result !== null &&
-    (typeof result === 'object' || typeof result === 'function') &&
-    typeof (result as { then?: unknown }).then === 'function'
-  )
-    throw new TypeError('terminal settlement hook must be synchronous');
+  if (rows.length === 0) return;
+  if (onSettled !== undefined) {
+    const result: unknown = onSettled(rows, now);
+    if (
+      result !== null &&
+      (typeof result === 'object' || typeof result === 'function') &&
+      typeof (result as { then?: unknown }).then === 'function'
+    )
+      throw new TypeError('terminal settlement hook must be synchronous');
+  }
+  settleApiLoveRecipientRows(db, rows, now);
 }
 
 /** Runs `update` over `ids` in slices that fit one statement, in one transaction. */
@@ -364,7 +369,7 @@ export function settleRowsReturning(
     const rows = db.all<SettledForwardRow>(`${sql} RETURNING ${SETTLED_COLUMNS}`, ...params);
     changed.push(...rows);
     if (state === 'sent') recordLoveDelivery(db, rows satisfies SentLoveRow[], now);
-    notifySettled(onSettled, rows, now);
+    notifySettled(db, onSettled, rows, now);
   });
   return changed;
 }
@@ -520,7 +525,7 @@ export function expireRows(db: Db, now: number, onSettled?: SettledForwardRowsHo
           });
         }
       }
-      notifySettled(onSettled, rows, now);
+      notifySettled(db, onSettled, rows, now);
       remaining -= selected.length;
       if (bucket === 'aged') aged += rows.length;
       else staleNowPlaying += rows.length;
@@ -547,7 +552,7 @@ export function expireRows(db: Db, now: number, onSettled?: SettledForwardRowsHo
           row.seq,
         ),
       );
-      notifySettled(onSettled, rows, now);
+      notifySettled(db, onSettled, rows, now);
       held = rows.length;
       remaining -= selected.length;
     }

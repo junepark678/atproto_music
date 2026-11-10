@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Db } from '../../../src/do/db';
-import { settleRows } from '../../../src/forward/forward-outbox';
+import { expireRows, settleRows } from '../../../src/forward/forward-outbox';
 import { remoteLoveState } from '../../../src/forward/love-delivery';
 import { withMigratedDb } from '../../node/support/node-db';
 
@@ -12,7 +12,7 @@ function insertRow(
     id: string;
     kind: 'love' | 'unlove';
     dedupeKey: string;
-    state: 'queued' | 'sent';
+    state: 'queued' | 'sent' | 'held';
     createdAtMs: number;
   },
 ) {
@@ -33,7 +33,69 @@ function insertRow(
   );
 }
 
+function insertRecipientMember(db: Db, operationId: string) {
+  db.run(
+    `INSERT OR IGNORE INTO love_api_recipients(did,uri,incarnation_key,link_id,generation,aggregate_seq,state,created_at_ms,updated_at_ms)
+     VALUES(?,?,'incarnation','love-link',2,1,'sealed',1,1)`,
+    DID,
+    `at://${DID}/com.example.atmusic.love/recipient`,
+  );
+  db.run(
+    `INSERT INTO love_api_recipient_members(link_id,generation,operation_id,did,uri,incarnation_key,member_seq,created_at_ms)
+     VALUES('love-link',2,?,?,?,'incarnation',1,1)`,
+    operationId,
+    DID,
+    `at://${DID}/com.example.atmusic.love/recipient`,
+  );
+}
+
 describe('love delivery ledger', () => {
+  it('clears a recipient member on failed terminal settlement without promoting positive proof', async () => {
+    await withMigratedDb((db) => {
+      db.run(
+        `INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,generation,status,created_at_ms,updated_at_ms)
+         VALUES('love-link',?,'lastfm','remote',X'00','e1',2,'active',1,1)`,
+        DID,
+      );
+      insertRecipientMember(db, 'failed-member');
+      insertRow(db, {
+        id: 'failed-member',
+        kind: 'love',
+        dedupeKey: 'g2:failed-member',
+        state: 'queued',
+        createdAtMs: 10,
+      });
+      settleRows(db, ['failed-member'], 'failed', 20, 'test_failure', true, 2);
+      expect(db.one('SELECT 1 FROM love_api_recipient_members WHERE operation_id=?', 'failed-member')).toBeNull();
+      expect(db.one('SELECT sent_operation_id FROM love_api_recipients')).toEqual({ sent_operation_id: null });
+    });
+  });
+
+  it('clears members from both age and held expiry RETURNING transitions', async () => {
+    await withMigratedDb((db) => {
+      db.run(
+        `INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,generation,status,created_at_ms,updated_at_ms)
+         VALUES('love-link',?,'lastfm','remote',X'00','e1',2,'active',1,1)`,
+        DID,
+      );
+      insertRecipientMember(db, 'aged-member');
+      insertRow(db, { id: 'aged-member', kind: 'love', dedupeKey: 'g2:aged-member', state: 'queued', createdAtMs: 10 });
+      const aged = expireRows(db, 14 * 24 * 60 * 60 * 1000);
+      expect(aged.aged).toBe(1);
+      expect(db.one('SELECT 1 FROM love_api_recipient_members WHERE operation_id=?', 'aged-member')).toBeNull();
+
+      db.run("UPDATE love_api_recipients SET next_member_seq=2 WHERE link_id='love-link'");
+      insertRecipientMember(db, 'held-member');
+      insertRow(db, { id: 'held-member', kind: 'love', dedupeKey: 'g2:held-member', state: 'held', createdAtMs: 10 });
+      const held = expireRows(db, 31 * 24 * 60 * 60 * 1000);
+      expect(held.held).toBe(1);
+      expect(db.one('SELECT 1 FROM love_api_recipient_members WHERE operation_id=?', 'held-member')).toBeNull();
+      expect(db.all<{ sent_operation_id: string | null }>('SELECT sent_operation_id FROM love_api_recipients')).toEqual(
+        [{ sent_operation_id: null }],
+      );
+    });
+  });
+
   it('records only sent settlement, canonicalizes generations, and survives sent-row cleanup', async () => {
     await withMigratedDb((db) => {
       db.run(

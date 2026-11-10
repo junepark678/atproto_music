@@ -33,6 +33,7 @@
 
 import { isTid } from '@atmusic/core/syntax';
 import { fromMs, toStorage } from '@atmusic/core/timestamp';
+import { compareLoveApiComparisonFact } from '../../forward/love-api-recipients';
 import { compareDeferredLoveAuthority } from '../../forward/love-coverage-authority';
 import type { Db } from '../db';
 import { recordEvent } from '../status';
@@ -159,6 +160,11 @@ function upsertHint(db: Db, h: HintInput): string {
       action: h.live.operation,
       cid: h.live.cid ?? '',
     });
+    const apiRecipientConflicted = compareLoveApiComparisonFact(
+      db,
+      { uri, rev: hintRev!, action: h.live.operation, cid: h.live.cid ?? '' },
+      h.receiptMs,
+    );
     authorizePendingRemovals(
       db,
       {
@@ -166,7 +172,7 @@ function upsertHint(db: Db, h: HintInput): string {
         rev: hintRev!,
         action: h.live.operation,
         ...(h.live.cid === undefined ? {} : { cid: h.live.cid }),
-        conflicted: conflicted || deferredConflicted,
+        conflicted: conflicted || deferredConflicted || apiRecipientConflicted,
       },
       h.receiptMs,
     );

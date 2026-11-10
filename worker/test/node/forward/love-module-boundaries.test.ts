@@ -13,9 +13,12 @@ const entries = [
   './worker/src/do/ingest/live-pending-removals.ts',
   './worker/src/bff/reconcile.ts',
   './worker/src/outbox/forward-enqueue.ts',
+  './worker/src/outbox/love-ops.ts',
   './worker/src/outbox/forward-key.ts',
   './worker/src/outbox/forward-receipts.ts',
   './worker/src/forward/love-coverage-authority.ts',
+  './worker/src/forward/love-api-recipients.ts',
+  './worker/src/forward/forward-outbox.ts',
   './worker/src/outbox/operation-certainty.ts',
   './worker/src/forward/backfill.ts',
   './worker/src/forward/forwarder.ts',
@@ -33,8 +36,8 @@ function smoke(order: readonly string[]): void {
   expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
 }
 
-describe('B2 module boundaries', () => {
-  it('loads producer, cleanup, enqueue, backfill, forwarding, revival and Node production entries in both import orders', () => {
+describe('B2/L2 module boundaries', () => {
+  it('loads producer, recipient leaf, executor, settlement, cleanup, backfill, forwarding and Node entries in both orders', () => {
     smoke(entries);
     smoke([...entries].reverse());
   }, 60_000);
@@ -51,6 +54,15 @@ describe('B2 module boundaries', () => {
         'forward-key',
         'forward-receipts',
         'love-deferral-storage',
+      ],
+      'worker/src/forward/love-api-recipients.ts': [
+        'forward-enqueue',
+        'love-ops',
+        'backfill',
+        'hints',
+        'live-pending-removals',
+        'forward-outbox',
+        'forwarder',
       ],
       'worker/src/forward/love-deferral-storage.ts': [
         'forward-key',

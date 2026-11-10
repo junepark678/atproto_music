@@ -34,6 +34,7 @@ import type { ValidationFailure } from '@atmusic/core/scrobble';
 import { validateDisplayString } from '@atmusic/core/scrobble';
 import type { OperationRow, Origin } from '../app/rows';
 import type { ModuleDeps } from '../do/contracts';
+import { bindApiLoveOperation } from '../forward/love-api-recipients';
 import { admitForwardIdentity } from '../forward/projection';
 import { bindPullLoveAdmission, retirePullLoveAdmissions } from '../sync/pull-love-admissions';
 import { tombstoneLove } from '../sync/tombstones';
@@ -402,12 +403,12 @@ export const lovePutExecutor: Executor = {
     if (!hasIdentity(op, ctx, ctx.collections.love) || op.digest === null || key === null) {
       return { kind: 'permanent', code: 'invalid_record_identity' };
     }
-    const existing = existingLove(op, ctx, key);
-    if (existing !== null) {
+    const existing = ctx.m.db.tx(() => {
+      const existing = existingLove(op, ctx, key);
+      if (existing === null) return null;
       // One love per key: an existing love is this love; nothing is written. It
       // is hinted like a written one (hinting an indexed record is harmless),
       // so an unknown DID is admitted too.
-      remember(ctx, op.did, key, { kind: 'love.put', uri: existing.uri, cid: existing.cid });
       const currentIncarnation = ctx.m.db.one<{ incarnation_key: string }>(
         "SELECT incarnation_key FROM love_incarnations WHERE uri=? AND state='present'",
         existing.uri,
@@ -463,11 +464,26 @@ export const lovePutExecutor: Executor = {
           nowMs: ctx.m.clock.nowMs(),
         });
       }
+      if (accepted?.path === 'api' && currentIncarnation !== null) {
+        const bound = bindApiLoveOperation(ctx.m.db, {
+          did: op.did,
+          uri: existing.uri,
+          incarnationKey: currentIncarnation.incarnation_key,
+          operationId: op.id,
+          admissionIdentityKey: `love-uri:${op.did}:${op.collection}:${op.rkey}`,
+          nowMs: ctx.m.clock.nowMs(),
+        });
+        if (!bound) throw new Error('API love recipient binding refused');
+      }
       ctx.m.db.run(
         'DELETE FROM forward_admissions WHERE did=? AND identity_key=?',
         op.did,
         `love-uri:${op.did}:${op.collection}:${op.rkey}`,
       );
+      return existing;
+    });
+    if (existing !== null) {
+      remember(ctx, op.did, key, { kind: 'love.put', uri: existing.uri, cid: existing.cid });
       return {
         kind: 'succeeded',
         uri: existing.uri,

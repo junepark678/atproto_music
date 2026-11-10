@@ -6,6 +6,7 @@ import { seededRandom } from '@atmusic/core/test-support/random';
 import { fromMs } from '@atmusic/core/timestamp';
 import { expect, it } from 'vitest';
 import { applyRecordProof } from '../../../src/do/write/apply-record';
+import { settleRows } from '../../../src/forward/forward-outbox';
 import { enqueueForwards } from '../../../src/outbox/forward-enqueue';
 import { enqueueLove, enqueueUnlove } from '../../../src/outbox/love-ops';
 import { authorizedLiveOptions } from '../../write/support';
@@ -55,6 +56,7 @@ it('a second love for the same (artist_key, track_key) succeeds without a new re
     expect(
       h.db.one<{ path: string }>('SELECT path FROM love_incarnations WHERE uri=?', created.result_uri!)?.path,
     ).toBe('api');
+    const linkId = h.link(h.alice, 'lastfm');
 
     // The same key with other case and spacing: success with the existing record, nothing sent at all.
     const second = await enqueueLove(h.m, {
@@ -74,6 +76,43 @@ it('a second love for the same (artist_key, track_key) succeeds without a new re
     expect(h.op(second.operation.id).rkey).toBe(second.operation.rkey);
     expect(h.op(second.operation.id).rkey).not.toBe(created.rkey);
     expect(h.op(second.operation.id).result_uri).toBe(`at://${h.alice}/${LOVE}/${created.rkey}`);
+    const binding = h.db.one<{ uri: string; incarnation_key: string; api_origin: string }>(
+      'SELECT uri,incarnation_key,api_origin FROM love_api_bindings WHERE did=? AND operation_id=?',
+      h.alice,
+      second.operation.id,
+    );
+    expect(binding).toMatchObject({ uri: created.result_uri, api_origin: 'lastfm' });
+    const effect = h.db.one<{ id: string; generation: number }>(
+      "SELECT id,generation FROM forward_outbox WHERE link_id=? AND kind='love' AND dedupe_key=?",
+      linkId,
+      second.operation.id,
+    )!;
+    expect(
+      h.db.one(
+        'SELECT 1 FROM love_api_recipient_members WHERE link_id=? AND operation_id=?',
+        linkId,
+        second.operation.id,
+      ),
+    ).not.toBeNull();
+    settleRows(h.db, [effect.id], 'sent', h.kit.clock.nowMs() + 1, null, true, effect.generation);
+    expect(
+      h.db.one<{ sent_operation_id: string; state: string }>(
+        `SELECT sent_operation_id,state FROM love_api_recipients
+         WHERE did=? AND uri=? AND incarnation_key=? AND link_id=? AND generation=?`,
+        h.alice,
+        created.result_uri,
+        binding!.incarnation_key,
+        linkId,
+        effect.generation,
+      ),
+    ).toEqual({ sent_operation_id: second.operation.id, state: 'present' });
+    expect(
+      h.db.one(
+        'SELECT 1 FROM love_api_recipient_members WHERE link_id=? AND operation_id=?',
+        linkId,
+        second.operation.id,
+      ),
+    ).toBeNull();
     expect(await remoteRecords(h.kit, 'Alice', LOVE)).toHaveLength(1);
 
     // Another app wrote a duplicate love of the same track, and a love of another track.
@@ -119,6 +158,97 @@ it('a second love for the same (artist_key, track_key) succeeds without a new re
   });
 });
 
+for (const origin of ['web', 'lastfm', 'listenbrainz'] as const) {
+  it(`binds a reused snapshot love with its exact ${origin} source through operation GC and file reopen`, async () => {
+    await withHarness(async (h) => {
+      h.seedUser(h.alice);
+      const projectionRkey = '3ksnapshotbound';
+      await h.kit.externalPut('Alice', LOVE, projectionRkey, love('Bound artist', 'Bound track'));
+      expect((await projectLove(h, projectionRkey)).outcome).toBe('applied');
+      const projectionUri = `at://${h.alice}/${LOVE}/${projectionRkey}`;
+      expect(h.db.one<{ path: string }>('SELECT path FROM love_incarnations WHERE uri=?', projectionUri)).toEqual({
+        path: 'snapshot',
+      });
+      const linkId = h.link(h.alice, 'lastfm');
+      const reused = await enqueueLove(h.m, {
+        did: h.alice,
+        input: { artist: 'Bound artist', track: 'Bound track' },
+        origin,
+      });
+      if (!reused.ok) throw new Error(JSON.stringify(reused.reason));
+      await h.runUntilIdle();
+      const binding = h.db.one<{ api_origin: string; uri: string; incarnation_key: string }>(
+        'SELECT api_origin,uri,incarnation_key FROM love_api_bindings WHERE did=? AND operation_id=?',
+        h.alice,
+        reused.operation.id,
+      );
+      expect(binding).toMatchObject({ api_origin: origin, uri: projectionUri });
+      expect(
+        h.db.one(
+          'SELECT 1 FROM love_api_recipient_members WHERE link_id=? AND operation_id=?',
+          linkId,
+          reused.operation.id,
+        ),
+      ).not.toBeNull();
+      h.db.run('DELETE FROM operations WHERE id=?', reused.operation.id);
+      h.restart();
+      expect(
+        h.db.one<{ api_origin: string; uri: string; incarnation_key: string }>(
+          'SELECT api_origin,uri,incarnation_key FROM love_api_bindings WHERE did=? AND operation_id=?',
+          h.alice,
+          reused.operation.id,
+        ),
+      ).toEqual(binding);
+      expect(h.db.one('SELECT 1 FROM operations WHERE id=?', reused.operation.id)).toBeNull();
+    });
+  });
+}
+
+it('binds an API operation to a present import incarnation without treating API origin as an exclusion', async () => {
+  await withHarness(async (h) => {
+    h.seedUser(h.alice);
+    const projectionRkey = '3kimportbound';
+    await h.kit.externalPut('Alice', LOVE, projectionRkey, love('Imported bound artist', 'Imported bound track'));
+    h.db.run(
+      `INSERT INTO forward_admissions(did,identity_key,path,source_service,created_at_ms,admission_seq)
+       VALUES(?,?,'import','lastfm',?,101)`,
+      h.alice,
+      `love-uri:${h.alice}:${LOVE}:${projectionRkey}`,
+      h.kit.clock.nowMs(),
+    );
+    expect((await projectLove(h, projectionRkey)).outcome).toBe('applied');
+    const projectionUri = `at://${h.alice}/${LOVE}/${projectionRkey}`;
+    expect(
+      h.db.one<{ path: string; source_service: string | null }>(
+        'SELECT path,source_service FROM love_incarnations WHERE uri=?',
+        projectionUri,
+      ),
+    ).toEqual({ path: 'import', source_service: 'lastfm' });
+    const linkId = h.link(h.alice, 'lastfm');
+    const reused = await enqueueLove(h.m, {
+      did: h.alice,
+      input: { artist: 'Imported bound artist', track: 'Imported bound track' },
+      origin: 'lastfm',
+    });
+    if (!reused.ok) throw new Error(JSON.stringify(reused.reason));
+    await h.runUntilIdle();
+    expect(
+      h.db.one<{ api_origin: string }>(
+        'SELECT api_origin FROM love_api_bindings WHERE did=? AND operation_id=?',
+        h.alice,
+        reused.operation.id,
+      ),
+    ).toEqual({ api_origin: 'lastfm' });
+    expect(
+      h.db.one(
+        'SELECT 1 FROM love_api_recipient_members WHERE link_id=? AND operation_id=?',
+        linkId,
+        reused.operation.id,
+      ),
+    ).not.toBeNull();
+  });
+});
+
 it('forwards a live deletion of an API-created love, and routes imported love deletion away from its source', async () => {
   await withHarness(async (h) => {
     h.seedUser(h.alice);
@@ -153,6 +283,7 @@ it('forwards a live deletion of an API-created love, and routes imported love de
         `at://${h.alice}/${LOVE}/${importedRkey}`,
       ),
     ).toEqual({ source_service: 'lastfm' });
+    expect(h.db.one('SELECT 1 FROM love_api_bindings WHERE did=?', h.alice)).toBeNull();
     await h.kit.externalDelete('Alice', LOVE, importedRkey);
     expect((await projectLove(h, importedRkey, true)).outcome).toBe('absent');
 
