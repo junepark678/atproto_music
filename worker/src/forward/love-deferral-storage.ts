@@ -18,10 +18,11 @@ type Link = LinkGeneration & {
 };
 type LoveItem = Extract<ForwardItem, { kind: 'love' | 'unlove' }>;
 
-function safeSeq(text: string | undefined, label: string): number {
+function safeSeq(text: string | undefined, label: string, min = 1): number {
   if (text === undefined) throw new Error(`deferred love ${label} is missing`);
   const value = BigInt(text);
-  if (value < 1n || value >= BigInt(Number.MAX_SAFE_INTEGER)) throw new RangeError(`deferred love ${label} exhausted`);
+  if (value < BigInt(min) || value >= BigInt(Number.MAX_SAFE_INTEGER))
+    throw new RangeError(`deferred love ${label} exhausted`);
   return Number(value);
 }
 
@@ -163,6 +164,17 @@ function existingHead(
 }
 
 export function armLoveCoverage(db: Db, link: LinkGeneration, artistKey: string, trackKeyValue: string): boolean {
+  const resumable = db.one<{ revision: string }>(
+    `SELECT CAST(l.backfill_run_revision AS TEXT) AS revision FROM linked_accounts l
+     JOIN forward_deferred_love_heads h ON h.link_id=l.id AND h.generation=l.generation
+     WHERE l.id=? AND l.generation=? AND l.status='active' AND l.forward_scrobbles=1 AND l.backfill_state='done'
+       AND h.love_artist_key=? AND h.love_track_key=?`,
+    link.id,
+    link.generation,
+    artistKey,
+    trackKeyValue,
+  );
+  const revision = resumable === null ? null : safeSeq(resumable.revision, 'backfill run revision', 0) + 1;
   const armed = db.run(
     `UPDATE forward_deferred_love_heads SET armed_seq=coalesce(armed_seq,head_seq)
      WHERE link_id=? AND generation=? AND love_artist_key=? AND love_track_key=?`,
@@ -172,14 +184,16 @@ export function armLoveCoverage(db: Db, link: LinkGeneration, artistKey: string,
     trackKeyValue,
   ).rowsWritten;
   if (armed === 0) return false;
-  db.run(
-    `UPDATE linked_accounts SET backfill_state='pending',backfill_cursor=NULL,backfill_total=0,backfill_done=0,
-       backfill_failures=0,backfill_next_attempt_ms=NULL,backfill_run_revision=backfill_run_revision+1,
+  if (revision !== null)
+    db.run(
+      `UPDATE linked_accounts SET backfill_state='pending',backfill_cursor=NULL,backfill_total=0,backfill_done=0,
+       backfill_failures=0,backfill_next_attempt_ms=NULL,backfill_run_revision=?,
        backfill_discovery_cursor=NULL,backfill_discovery_done=0,backfill_last_error=NULL
      WHERE id=? AND generation=? AND status='active' AND forward_scrobbles=1 AND backfill_state='done'`,
-    link.id,
-    link.generation,
-  );
+      revision,
+      link.id,
+      link.generation,
+    );
   return true;
 }
 

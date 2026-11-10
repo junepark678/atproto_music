@@ -10,6 +10,8 @@ import {
   LOVE_MAINTENANCE_WRITES,
   runDeferredLoveMaintenance,
 } from '../../../src/forward/love-deferral-maintenance';
+import { armLoveCoverage } from '../../../src/forward/love-deferral-storage';
+import { enqueueForwards } from '../../../src/outbox/forward-enqueue';
 import { reopen, withMigratedDb } from '../../node/support/node-db';
 
 const DID = 'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa';
@@ -24,6 +26,106 @@ function link(db: Parameters<typeof runDeferredLoveMaintenance>[0], generation =
 }
 
 describe('deferred love maintenance', () => {
+  it('keeps a completed run settled when interior validation leaves its newest decision unchanged', async () => {
+    await withMigratedDb((db) => {
+      link(db);
+      db.run("UPDATE linked_accounts SET forward_scrobbles=0 WHERE id='maintenance-link'");
+      for (const [id, kind] of [
+        ['older-unlove', 'love.delete'],
+        ['newer-love', 'love.put'],
+      ] as const) {
+        db.run(
+          `INSERT INTO operations(id,did,kind,origin,priority,collection,state,due_at,created_at_ms,updated_at_ms)
+           VALUES(?,?,?,'web',1,'com.example.atmusic.love','queued',1,1,1)`,
+          id,
+          DID,
+          kind,
+        );
+        enqueueForwards(db, {
+          did: DID,
+          linkId: 'maintenance-link',
+          now: id === 'older-unlove' ? 10 : 20,
+          random: seededRandom(321),
+          items: [
+            {
+              kind: kind === 'love.put' ? 'love' : 'unlove',
+              operationId: id,
+              payload: { artist: 'artist', track: 'track', origin: 'web' },
+            },
+          ],
+        });
+      }
+      db.run("UPDATE linked_accounts SET forward_scrobbles=1,backfill_state='done',backfill_discovery_done=1");
+      db.run('UPDATE forward_deferred_love_heads SET armed_seq=NULL,decided_seq=2,maintenance_seq=head_seq');
+      runDeferredLoveMaintenance(db, 30);
+      expect(db.one('SELECT backfill_state,backfill_discovery_done FROM linked_accounts')).toEqual({
+        backfill_state: 'done',
+        backfill_discovery_done: 1,
+      });
+      expect(db.one('SELECT armed_seq,decided_seq FROM forward_deferred_love_heads')).toEqual({
+        armed_seq: null,
+        decided_seq: 2,
+      });
+    });
+  });
+
+  it.each(['rr', 'wit', 'auth'] as const)(
+    'rejects an unsafe %s pass successor before committing that lane',
+    async (lane) => {
+      await withMigratedDb((db) => {
+        db.run(
+          `INSERT INTO forward_deferred_love_maintenance(singleton,next_head_seq,next_group_seq,next_authority_seq,${lane}_passes)
+        VALUES(1,2,2,2,?)`,
+          String(Number.MAX_SAFE_INTEGER),
+        );
+        expect(() => runDeferredLoveMaintenance(db, 10)).toThrow();
+        expect(
+          db.one(`SELECT CAST(${lane}_passes AS TEXT) AS passes,${lane}_cursor AS cursor,${lane}_frontier AS frontier
+        FROM forward_deferred_love_maintenance`),
+        ).toEqual({ passes: String(Number.MAX_SAFE_INTEGER), cursor: 0, frontier: 0 });
+      });
+    },
+  );
+
+  it.each(['rr', 'wit', 'auth'] as const)('allows the last safe %s pass successor', async (lane) => {
+    await withMigratedDb((db) => {
+      db.run(
+        `INSERT INTO forward_deferred_love_maintenance(singleton,next_head_seq,next_group_seq,next_authority_seq,${lane}_passes)
+        VALUES(1,2,2,2,?)`,
+        String(Number.MAX_SAFE_INTEGER - 1),
+      );
+      expect(runDeferredLoveMaintenance(db, 10).writes).toBeLessThanOrEqual(LOVE_MAINTENANCE_WRITES);
+      expect(db.one(`SELECT CAST(${lane}_passes AS TEXT) AS passes FROM forward_deferred_love_maintenance`)).toEqual({
+        passes: String(Number.MAX_SAFE_INTEGER),
+      });
+    });
+  });
+
+  it('does not arm a head or overflow the linked run revision when its successor is unsafe', async () => {
+    await withMigratedDb((db) => {
+      link(db);
+      db.run(
+        "UPDATE linked_accounts SET backfill_state='done',backfill_run_revision=?",
+        String(Number.MAX_SAFE_INTEGER),
+      );
+      db.run(`INSERT INTO forward_deferred_love_heads(link_id,generation,love_artist_key,love_track_key,head_seq,created_at_ms)
+        VALUES('maintenance-link',1,'artist','track',1,1)`);
+      const head = db.one('SELECT * FROM forward_deferred_love_heads');
+      expect(() =>
+        db.tx(() => armLoveCoverage(db, { id: 'maintenance-link', generation: 1 }, 'artist', 'track')),
+      ).toThrow();
+      expect(db.one('SELECT * FROM forward_deferred_love_heads')).toEqual(head);
+      expect(
+        db.one('SELECT CAST(backfill_run_revision AS TEXT) AS revision,backfill_state FROM linked_accounts'),
+      ).toEqual({ revision: String(Number.MAX_SAFE_INTEGER), backfill_state: 'done' });
+      db.run('UPDATE linked_accounts SET backfill_run_revision=?', String(Number.MAX_SAFE_INTEGER - 1));
+      expect(db.tx(() => armLoveCoverage(db, { id: 'maintenance-link', generation: 1 }, 'artist', 'track'))).toBe(true);
+      expect(db.one('SELECT CAST(backfill_run_revision AS TEXT) AS revision FROM linked_accounts')).toEqual({
+        revision: String(Number.MAX_SAFE_INTEGER),
+      });
+    });
+  });
+
   it('starts frozen integer passes, removes cancellations, and stays within whole-call budgets', async () => {
     await withMigratedDb((db) => {
       link(db);

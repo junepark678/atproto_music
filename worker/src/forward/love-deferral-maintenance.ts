@@ -38,6 +38,9 @@ interface Singleton {
   wit_generation: number;
   auth_cursor: string;
   auth_frontier: string;
+  rr_passes: string;
+  wit_passes: string;
+  auth_passes: string;
 }
 interface Head {
   link_id: string;
@@ -72,13 +75,20 @@ function asSafeInt(value: string | number, label: string, min = 0): number {
   return Number(parsed);
 }
 
+function safeSuccessor(value: string, label: string): number {
+  const current = asSafeInt(value, label);
+  if (current === Number.MAX_SAFE_INTEGER) throw new RangeError(`deferred love ${label} successor is unsafe`);
+  return current + 1;
+}
+
 function readSingleton(db: Db): Singleton {
   const row = db.one<Singleton>(
     `SELECT lane_turn,CAST(next_head_seq AS TEXT) AS next_head_seq,CAST(next_group_seq AS TEXT) AS next_group_seq,
        CAST(next_authority_seq AS TEXT) AS next_authority_seq,CAST(rr_cursor AS TEXT) AS rr_cursor,
        CAST(rr_frontier AS TEXT) AS rr_frontier,CAST(wit_cursor AS TEXT) AS wit_cursor,
        CAST(wit_frontier AS TEXT) AS wit_frontier,wit_state,wit_link_id,wit_generation,
-       CAST(auth_cursor AS TEXT) AS auth_cursor,CAST(auth_frontier AS TEXT) AS auth_frontier
+       CAST(auth_cursor AS TEXT) AS auth_cursor,CAST(auth_frontier AS TEXT) AS auth_frontier,
+       CAST(rr_passes AS TEXT) AS rr_passes,CAST(wit_passes AS TEXT) AS wit_passes,CAST(auth_passes AS TEXT) AS auth_passes
      FROM forward_deferred_love_maintenance WHERE singleton=1`,
   );
   if (row === null) throw new Error('deferred love maintenance singleton missing');
@@ -93,6 +103,9 @@ function readSingleton(db: Db): Singleton {
   asSafeInt(row.wit_generation, 'WIT generation');
   asSafeInt(row.auth_cursor, 'AUTH cursor');
   asSafeInt(row.auth_frontier, 'AUTH frontier');
+  asSafeInt(row.rr_passes, 'RR passes');
+  asSafeInt(row.wit_passes, 'WIT passes');
+  asSafeInt(row.auth_passes, 'AUTH passes');
   if (!Number.isInteger(row.lane_turn) || row.lane_turn > 4) throw new RangeError('deferred love lane turn is invalid');
   return row;
 }
@@ -385,7 +398,7 @@ function runDue(db: Db): LaneResult {
   useful ||= deleted > 0;
   const current = readHead(db, head.link_id, head.generation, head.love_artist_key, head.love_track_key);
   if (current === null) return { useful, visited: 1 };
-  const top = intentRows(db, current, 'intent_seq>=?', [current.live_from_seq], TOP_LIMIT);
+  const top = newestIntents(db, current, 'intent_seq>=?', [current.live_from_seq], TOP_LIMIT);
   let newest: Intent | null = null;
   let barrier: Intent | null = null;
   for (const row of top) {
@@ -460,8 +473,9 @@ function runRr(db: Db, now: number): LaneResult {
   if (row === null) {
     if (cursor === 0 && frontier === next - 1) return { useful: false, visited: 0 };
     db.run(
-      'UPDATE forward_deferred_love_maintenance SET rr_cursor=0,rr_frontier=?,rr_passes=rr_passes+1,updated_at_ms=? WHERE singleton=1',
+      'UPDATE forward_deferred_love_maintenance SET rr_cursor=0,rr_frontier=?,rr_passes=?,updated_at_ms=? WHERE singleton=1',
       next - 1,
+      safeSuccessor(state.rr_passes, 'RR passes'),
       now,
     );
     return { useful: false, visited: 0 };
@@ -572,8 +586,9 @@ function runWit(db: Db, now: number): LaneResult {
   if (group === null) {
     if (cursor === 0 && frontier === next - 1) return { useful: false, visited: 0 };
     db.run(
-      `UPDATE forward_deferred_love_maintenance SET wit_cursor=0,wit_frontier=?,wit_passes=wit_passes+1,updated_at_ms=? WHERE singleton=1`,
+      `UPDATE forward_deferred_love_maintenance SET wit_cursor=0,wit_frontier=?,wit_passes=?,updated_at_ms=? WHERE singleton=1`,
       next - 1,
+      safeSuccessor(state.wit_passes, 'WIT passes'),
       now,
     );
     return { useful: false, visited: 0, steps: 1 };
@@ -608,8 +623,9 @@ function runAuth(db: Db, now: number): LaneResult {
   if (rows.length === 0) {
     if (cursor === 0 && frontier === next - 1) return { useful: false, visited: 0 };
     db.run(
-      `UPDATE forward_deferred_love_maintenance SET auth_cursor=0,auth_frontier=?,auth_passes=auth_passes+1,updated_at_ms=? WHERE singleton=1`,
+      `UPDATE forward_deferred_love_maintenance SET auth_cursor=0,auth_frontier=?,auth_passes=?,updated_at_ms=? WHERE singleton=1`,
       next - 1,
+      safeSuccessor(state.auth_passes, 'AUTH passes'),
       now,
     );
     return { useful: false, visited: 0 };
