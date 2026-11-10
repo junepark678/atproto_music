@@ -429,6 +429,10 @@ whole-L2 acceptance or readiness. The audit and repair direction are
    each invocation stays at or below 96 changed rows and 16 visits, with one
    invocation using the full 16-visit allowance. Transaction traces list
    decision, sweep, reclaim, and lane-turn phases separately.
+   A production SQL over-visit control returns six real ordered binding rows
+   against a five-visit reservation; the scheduler trips its visit oracle and
+   rolls the attempted reclamation back, preserving all six bindings and the
+   unchanged cursor.
    Full cold/partial-delete/replay/refusal/completion/cleanup decision matrix
    and one negative control for every whole-invocation bound remain required.
 2. Direct and delayed local re-love checks now recognize only the exact bound
@@ -491,7 +495,7 @@ whole-L2 acceptance or readiness. The audit and repair direction are
 
 Scoped evidence for the earlier repair slice: six worker-node files / 72 tests
 pass; four worker-bench files / 16 tests pass. The follow-up bench and origin
-growth suites now pass 15/15, including production guard controls for >96
+growth suites now pass 16/16, including production guard controls for >96
 invocation rows, >16 visits,
 >128 decision reads, and >28 decision changed rows, plus a real 40-row
 amplification injected inside the decision transaction that rolls back its

@@ -169,6 +169,44 @@ it('charges complete eight-decision and eight-orphan maintenance across shared i
     expect(db.one("SELECT 1 FROM love_api_bindings WHERE operation_id LIKE 'orphan-%' LIMIT 1")).toBeNull();
     expect(acknowledgements).toBe(8);
   }));
+it('rolls back a production reclaim page when its actual row scan exceeds reserved visits', async () =>
+  withMigratedDb((db) => {
+    seed(db, 0);
+    for (let i = 1; i <= 6; i++)
+      db.run(
+        `INSERT INTO love_api_bindings(did,operation_id,api_origin,uri,incarnation_key,binding_seq,created_at_ms)
+         VALUES(?,?,'web',?,?,?,1)`,
+        DID,
+        `overvisit-${i}`,
+        `at://${DID}/com.example.atmusic.love/overvisit${i}`,
+        `overvisit-inc-${i}`,
+        i,
+      );
+    const exceeded: Db = {
+      all: <T>(sql: string, ...params: SqlParam[]) => {
+        if (sql.includes('SELECT did,operation_id,uri,incarnation_key,binding_seq FROM love_api_bindings')) {
+          const [cursor, frontier, limit] = params;
+          if (typeof cursor === 'number' && typeof frontier === 'number' && typeof limit === 'number')
+            return db.all<T>(sql, cursor, frontier, limit + 1);
+        }
+        return db.all<T>(sql, ...params);
+      },
+      one: <T>(sql: string, ...params: SqlParam[]) => db.one<T>(sql, ...params),
+      run: (sql: string, ...params: SqlParam[]) => db.run(sql, ...params),
+      tx: <T>(fn: () => T extends Promise<unknown> ? never : T) => db.tx(fn),
+    };
+    expect(() => runLoveApiMaintenance(exceeded, 100, seededRandom(5), 'audit')).toThrow(
+      /L2 RECLAIM visit bound exceeded: 6\/5/,
+    );
+    expect(
+      db.one<{ n: number }>("SELECT count(*) AS n FROM love_api_bindings WHERE operation_id LIKE 'overvisit-%'"),
+    ).toEqual({ n: 6 });
+    expect(
+      db.one<{ cursor: number; frontier: number }>(
+        'SELECT binding_cursor AS cursor,binding_frontier AS frontier FROM love_api_proof_state WHERE singleton=1',
+      ),
+    ).toEqual({ cursor: 0, frontier: 0 });
+  }));
 it('expires pending decision before awaiting its member', async () =>
   withMigratedDb((db) => {
     seed(db, 1, 1);
