@@ -2,6 +2,11 @@ import type { Random } from '@atmusic/core/deps';
 import { trackKey } from '@atmusic/core/music-key';
 import { BATCH_MAX_LISTENS } from '@atmusic/core/scrobble-batch';
 import { executeListenRemovals, type LiveRemovedListen } from '../../forward/live-removal-effects';
+import {
+  prepareLoveApiWindowAbsence,
+  recordLoveApiComparisonFact,
+  sealLoveApiDirectAbsence,
+} from '../../forward/love-api-recipients';
 import { conflictDeferredLoveAuthority } from '../../forward/love-coverage-authority';
 import { projectionListenKey } from '../../forward/projection';
 import { enqueueLiveUnlove } from '../../outbox/forward-enqueue';
@@ -99,6 +104,46 @@ export function recordPendingRemovals(db: Db, inputs: readonly PendingRemovalInp
           priorGroup?.conflict_invalidated ?? 0,
           priorGroup?.conflicted_auth_rev ?? null,
         ).rowsWritten;
+      }
+      for (const input of group) {
+        if (input.kind !== 'love') continue;
+        const pending = db.one(
+          `SELECT 1 FROM live_pending_removals
+           WHERE uri=? AND member_uri=? AND removed_cid=? AND kind='love'
+             AND window_lo=? AND window_hi=? AND replaced_by_cid=?`,
+          input.uri,
+          input.row.uri,
+          input.row.cid,
+          input.windowLo,
+          input.windowHi,
+          input.replacedByCid ?? '',
+        );
+        if (pending === null) continue;
+        const owners = db.all<{ link_id: string; generation: number }>(
+          `SELECT r.link_id,r.generation FROM love_api_recipients r
+           JOIN linked_accounts l ON l.id=r.link_id AND l.generation=r.generation
+           WHERE r.did=? AND r.uri=? AND r.incarnation_key=? AND r.state='present'`,
+          input.did,
+          input.uri,
+          input.identityKey,
+        );
+        for (const owner of owners)
+          db.run(
+            `INSERT OR IGNORE INTO love_api_window_owners(
+               uri,member_uri,removed_cid,window_lo,window_hi,replaced_by_cid,did,incarnation_key,link_id,generation,created_at_ms
+             ) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+            input.uri,
+            input.row.uri,
+            input.row.cid,
+            input.windowLo,
+            input.windowHi,
+            input.replacedByCid ?? '',
+            input.did,
+            input.identityKey,
+            owner.link_id,
+            owner.generation,
+            input.nowMs,
+          );
       }
       if (insertedCount > 0) {
         db.run(
@@ -232,7 +277,7 @@ const RECONCILE_PAGE_SIZE = 128;
 const RETAINED_EVENT_RECHECK_MS = 60_000;
 
 /** Production statements shared with the actual-SQL bounds regressions. */
-export const AUTHORIZATION_PAGE_SQL = `SELECT kind,window_lo,window_hi,replaced_by_cid,member_uri,removed_cid,authorized_rev,conflict_invalidated,conflicted_auth_rev
+export const AUTHORIZATION_PAGE_SQL = `SELECT kind,window_lo,window_hi,replaced_by_cid,member_uri,removed_cid,authorized_rev,conflict_invalidated,conflicted_auth_rev,expires_at_ms
   FROM live_pending_removals INDEXED BY live_pending_removals_page
  WHERE uri=? AND (window_hi,window_lo,replaced_by_cid,kind,member_uri,removed_cid)>(?,?,?,?,?,?)
  ORDER BY window_hi,window_lo,replaced_by_cid,kind,member_uri,removed_cid LIMIT ?`;
@@ -327,6 +372,7 @@ function processAuthorizationPage(db: Db, event: AuthorizationEvent, nowMs: numb
     authorized_rev: string | null;
     conflict_invalidated: number;
     conflicted_auth_rev: string | null;
+    expires_at_ms: number;
   }>(
     AUTHORIZATION_PAGE_SQL,
     event.uri,
@@ -346,6 +392,38 @@ function processAuthorizationPage(db: Db, event: AuthorizationEvent, nowMs: numb
       event.rev <= row.window_hi &&
       (event.conflicted !== 0 || eventMatchesPending(event, row.replaced_by_cid));
     if (!eligible) continue;
+    if (
+      row.kind === 'love' &&
+      (event.action === 'delete' || event.action === 'update') &&
+      (event.action !== 'delete' || event.cid === '')
+    ) {
+      const owners = db.all<{ did: string; incarnation_key: string; link_id: string; generation: number }>(
+        `SELECT o.did,o.incarnation_key,o.link_id,o.generation FROM love_api_window_owners o
+         JOIN love_api_recipients r ON r.did=o.did AND r.uri=o.uri AND r.incarnation_key=o.incarnation_key
+           AND r.link_id=o.link_id AND r.generation=o.generation AND r.state IN ('present','sealed')
+         JOIN linked_accounts l ON l.id=o.link_id AND l.generation=o.generation
+         WHERE o.uri=? AND o.member_uri=? AND o.removed_cid=? AND o.window_lo=? AND o.window_hi=? AND o.replaced_by_cid=?`,
+        event.uri,
+        row.member_uri,
+        row.removed_cid,
+        row.window_lo,
+        row.window_hi,
+        row.replaced_by_cid,
+      );
+      for (let ownerIndex = 0; ownerIndex < owners.length; ownerIndex++)
+        recordLoveApiComparisonFact(
+          db,
+          {
+            uri: event.uri,
+            rev: event.rev,
+            action: event.action,
+            cid: event.cid,
+            horizonMs: Math.min(event.expires_at_ms, row.expires_at_ms),
+            conflicted: event.conflicted !== 0,
+          },
+          nowMs,
+        );
+    }
     const key = JSON.stringify([row.kind, row.window_lo, row.window_hi, row.replaced_by_cid]);
     if (!groups.has(key)) groups.set(key, row);
   }
@@ -653,13 +731,9 @@ function processGroup(db: Db, group: PendingGroup, nowMs: number, random: Random
     `SELECT incarnation_key,state FROM love_incarnations WHERE uri=?`,
     row.uri,
   );
-  const currentIncarnationRev = currentIncarnation?.incarnation_key.slice(
-    currentIncarnation.incarnation_key.lastIndexOf(':') + 1,
-  );
   const sameUriNewerIncarnation =
     currentIncarnation?.state === 'present' &&
-    currentIncarnationRev !== undefined &&
-    currentIncarnationRev > group.authorized_rev &&
+    currentIncarnation.incarnation_key !== row.identity_key &&
     db.one('SELECT 1 FROM loves WHERE uri=?', row.uri) !== null;
   const newerLoveIntent =
     db.one(
@@ -680,6 +754,50 @@ function processGroup(db: Db, group: PendingGroup, nowMs: number, random: Random
       row.recording_mbid,
     ) !== null;
   if (!newerLoveIntent && !locallyReloved && !newerProjectedLove && !sameUriNewerIncarnation) {
+    const authorizationEvent = db.one<{ action: string; cid: string }>(
+      'SELECT action,cid FROM live_pending_removal_events WHERE uri=? AND rev=? AND conflicted=0',
+      group.uri,
+      group.authorized_rev,
+    );
+    if (authorizationEvent !== null) {
+      const owners = db.all<{ link_id: string; generation: number; did: string; incarnation_key: string }>(
+        `SELECT o.link_id,o.generation,o.did,o.incarnation_key FROM love_api_window_owners o
+         JOIN linked_accounts l ON l.id=o.link_id AND l.generation=o.generation
+         WHERE o.uri=? AND o.member_uri=? AND o.removed_cid=? AND o.window_lo=? AND o.window_hi=? AND o.replaced_by_cid=?`,
+        row.uri,
+        row.member_uri,
+        row.removed_cid,
+        group.window_lo,
+        group.window_hi,
+        group.replaced_by_cid,
+      );
+      for (const owner of owners) {
+        const prepared = prepareLoveApiWindowAbsence(db, {
+          did: owner.did,
+          uri: row.uri,
+          incarnationKey: owner.incarnation_key,
+          linkId: owner.link_id,
+          generation: owner.generation,
+          memberUri: row.member_uri,
+          removedCid: row.removed_cid,
+          windowLo: group.window_lo,
+          windowHi: group.window_hi,
+          replacedByCid: group.replaced_by_cid,
+          rev: group.authorized_rev,
+          action: authorizationEvent.action,
+          cid: authorizationEvent.cid,
+          windowExpiresAtMs: row.expires_at_ms,
+          nowMs,
+        });
+        if (prepared !== null && prepared !== 'conflicted')
+          sealLoveApiDirectAbsence(db, prepared, {
+            artist: row.artist,
+            track: row.track,
+            album: null,
+            recordingMbid: row.recording_mbid,
+          });
+      }
+    }
     const identity = `love-delete:${row.identity_key}`;
     tombstoneLove(db, {
       did,

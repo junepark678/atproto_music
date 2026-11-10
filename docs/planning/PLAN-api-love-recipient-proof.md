@@ -192,6 +192,21 @@ a materializer, or an egress handoff. Production caller matrix and whole-path
 costs remain pending. Bounded API-origin binding retention and
 reclamation remain pending.
 
+The next slice now records exact current-generation `love_api_window_owners`
+when a pending love-removal window is persisted. Authorization compares the
+retained delete/update event before A2 advances, records the exact recipient
+comparison fact with the minimum event/window horizon, and seals an immutable
+decision only after the existing survivor, newer-intent, and local-re-love
+guards allow the delayed removal. Owner rows cascade with the exact pending
+window and stale link generations cannot acquire ownership. An actual Node DB
+integration test binds an API-origin love, settles its forward row to SENT,
+creates/replays the delayed window, authorizes the retained event, executes the
+window, checks the sealed payload/source, verifies owner cascade, and rotates
+the link generation to prove stale recipient exclusion. This is delayed-window
+ownership/sealing evidence only; batch pinning, materialization, egress, and
+full cost bounds remain pending. The current changed-row/read trace for this
+slice has not yet been recorded.
+
 The executor's reuse, snapshot, and import-incarnation tests exercise actual
 binding for each API origin. An instrumented real Node DB helper trace measured
 7 SQLite changed rows, 9 read calls, 8 mutation statements, and 6 returned
@@ -248,8 +263,8 @@ Migration57 is registered at the planner-authorized revised hash above. The
 old-hash authorizer/CLI receipts are preserved and explicitly superseded; the
 new-hash authorizer, real 56→57 CLI upgrade, and older-live restore passed on
 the amended migration slice. Full L2 behavior, whole-path128 traces and
-countercontrol, fresh Astra review of that gate, populated-L2 restore, delayed
-window ownership, bounded retention/reclamation, scheduler/maintenance,
+countercontrol, fresh Astra review of that gate, populated-L2 restore,
+producer-batch pinning, bounded retention/reclamation, scheduler/maintenance,
 terminal cleanup, and scale gates remain pending. Small behavior fixtures
 belong in `worker-node`; growing fixtures belong in `worker-bench` with
 VM/statement/returned-row bounds, not elapsed-time claims.

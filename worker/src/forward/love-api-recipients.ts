@@ -40,6 +40,8 @@ export interface PreparedLoveApiAbsence {
   uri: string;
   incarnationKey: string;
   rev: string;
+  action: LoveApiFactAction;
+  cid: string;
   horizonMs: number;
   nowMs: number;
   recipients: Array<{
@@ -133,12 +135,14 @@ export function recordLoveApiComparisonFact(db: Db, fact: LoveApiAuthorizationFa
     }
     const mismatch = existing.action !== fact.action || existing.cid !== fact.cid;
     if (mismatch || fact.conflicted) {
-      db.run(
-        'UPDATE love_api_comparison_facts SET conflicted=1,horizon_ms=min(horizon_ms,?) WHERE authorization_uri=? AND authorization_rev=?',
-        fact.horizonMs,
-        fact.uri,
-        fact.rev,
-      );
+      const nextHorizon = Math.min(existing.horizon_ms, fact.horizonMs);
+      if (existing.conflicted === 0 || nextHorizon !== existing.horizon_ms)
+        db.run(
+          'UPDATE love_api_comparison_facts SET conflicted=1,horizon_ms=? WHERE authorization_uri=? AND authorization_rev=?',
+          nextHorizon,
+          fact.uri,
+          fact.rev,
+        );
       recordVerifiedDeferredLoveAuthority(
         db,
         { uri: fact.uri, rev: fact.rev },
@@ -147,12 +151,13 @@ export function recordLoveApiComparisonFact(db: Db, fact: LoveApiAuthorizationFa
       );
       return false;
     }
-    db.run(
-      'UPDATE love_api_comparison_facts SET horizon_ms=min(horizon_ms,?) WHERE authorization_uri=? AND authorization_rev=?',
-      fact.horizonMs,
-      fact.uri,
-      fact.rev,
-    );
+    if (fact.horizonMs < existing.horizon_ms)
+      db.run(
+        'UPDATE love_api_comparison_facts SET horizon_ms=? WHERE authorization_uri=? AND authorization_rev=?',
+        fact.horizonMs,
+        fact.uri,
+        fact.rev,
+      );
     return existing.conflicted === 0;
   });
 }
@@ -305,9 +310,163 @@ export function prepareLoveApiDirectAbsence(
     uri: args.uri,
     incarnationKey: args.incarnationKey,
     rev: args.rev,
+    action: 'delete',
+    cid: '',
     horizonMs: evidence.expires_at_ms,
     nowMs: args.nowMs,
     recipients,
+  };
+}
+
+/** Prepare one exact A2-owned delayed window from its retained event and owner tuple. */
+export function prepareLoveApiWindowAbsence(
+  db: Db,
+  args: {
+    did: string;
+    uri: string;
+    incarnationKey: string;
+    linkId: string;
+    generation: number;
+    memberUri: string;
+    removedCid: string;
+    windowLo: string;
+    windowHi: string;
+    replacedByCid: string;
+    rev: string;
+    action: string;
+    cid: string;
+    windowExpiresAtMs: number;
+    nowMs: number;
+  },
+): PreparedLoveApiAbsence | 'conflicted' | null {
+  const parsed = parseRecordUri(args.uri);
+  const validEvent =
+    (args.action === 'delete' && args.cid === '') ||
+    (args.action === 'update' && args.replacedByCid !== '' && CID.test(args.cid) && args.cid === args.replacedByCid);
+  if (
+    parsed === null ||
+    parsed.did !== args.did ||
+    !isTid(args.rev) ||
+    (args.windowLo !== '' && !isTid(args.windowLo)) ||
+    !isTid(args.windowHi) ||
+    !(args.windowLo < args.rev && args.rev <= args.windowHi) ||
+    !validEvent ||
+    !Number.isSafeInteger(args.generation) ||
+    args.generation < 1 ||
+    !Number.isSafeInteger(args.nowMs) ||
+    args.nowMs < 0 ||
+    !Number.isSafeInteger(args.windowExpiresAtMs) ||
+    args.windowExpiresAtMs <= args.nowMs
+  )
+    return null;
+  const event = db.one<{ action: string; cid: string; conflicted: number; expires_at_ms: number }>(
+    'SELECT action,cid,conflicted,expires_at_ms FROM live_pending_removal_events WHERE uri=? AND rev=?',
+    args.uri,
+    args.rev,
+  );
+  if (event === null || event.action !== args.action || event.cid !== args.cid || event.expires_at_ms <= args.nowMs)
+    return null;
+  const owner = db.one(
+    `SELECT 1 FROM love_api_window_owners o
+     JOIN love_api_recipients r ON r.did=o.did AND r.uri=o.uri AND r.incarnation_key=o.incarnation_key
+       AND r.link_id=o.link_id AND r.generation=o.generation
+     JOIN linked_accounts l ON l.id=o.link_id AND l.generation=o.generation
+     WHERE o.uri=? AND o.member_uri=? AND o.removed_cid=? AND o.window_lo=? AND o.window_hi=?
+       AND o.replaced_by_cid=? AND o.did=? AND o.incarnation_key=? AND o.link_id=? AND o.generation=?
+       AND r.state IN ('present','sealed')`,
+    args.uri,
+    args.memberUri,
+    args.removedCid,
+    args.windowLo,
+    args.windowHi,
+    args.replacedByCid,
+    args.did,
+    args.incarnationKey,
+    args.linkId,
+    args.generation,
+  );
+  if (owner === null || event.conflicted !== 0) return event.conflicted ? 'conflicted' : null;
+  const recipient = db.one<{ sent_operation_id: string | null; state: string }>(
+    `SELECT sent_operation_id,state FROM love_api_recipients WHERE ${RECIPIENT_KEY}`,
+    args.did,
+    args.uri,
+    args.incarnationKey,
+    args.linkId,
+    args.generation,
+  );
+  if (recipient === null || (recipient.state !== 'present' && recipient.state !== 'sealed')) return null;
+  let sentOrigin: Exclude<Origin, 'import'> | null = null;
+  if (recipient.sent_operation_id !== null) {
+    const binding = db.one<{ uri: string; incarnation_key: string; api_origin: string }>(
+      'SELECT uri,incarnation_key,api_origin FROM love_api_bindings WHERE did=? AND operation_id=?',
+      args.did,
+      recipient.sent_operation_id,
+    );
+    if (
+      binding === null ||
+      binding.uri !== args.uri ||
+      binding.incarnation_key !== args.incarnationKey ||
+      !bindingOrigin(binding.api_origin)
+    ) {
+      recordLoveApiComparisonFact(
+        db,
+        {
+          uri: args.uri,
+          rev: args.rev,
+          action: args.action as LoveApiFactAction,
+          cid: args.cid,
+          horizonMs: Math.min(args.windowExpiresAtMs, event.expires_at_ms),
+          conflicted: true,
+        },
+        args.nowMs,
+      );
+      return 'conflicted';
+    }
+    sentOrigin = binding.api_origin;
+  }
+  const hasPendingMembers =
+    db.one(
+      `SELECT 1 FROM love_api_recipient_members WHERE did=? AND uri=? AND incarnation_key=?
+       AND link_id=? AND generation=? LIMIT 1`,
+      args.did,
+      args.uri,
+      args.incarnationKey,
+      args.linkId,
+      args.generation,
+    ) !== null;
+  const horizonMs = Math.min(args.windowExpiresAtMs, event.expires_at_ms);
+  if (
+    !recordLoveApiComparisonFact(
+      db,
+      {
+        uri: args.uri,
+        rev: args.rev,
+        action: args.action as LoveApiFactAction,
+        cid: args.cid,
+        horizonMs,
+      },
+      args.nowMs,
+    )
+  )
+    return 'conflicted';
+  return {
+    did: args.did,
+    uri: args.uri,
+    incarnationKey: args.incarnationKey,
+    rev: args.rev,
+    action: args.action as LoveApiFactAction,
+    cid: args.cid,
+    horizonMs,
+    nowMs: args.nowMs,
+    recipients: [
+      {
+        linkId: args.linkId,
+        generation: args.generation,
+        sentOperationId: recipient.sent_operation_id,
+        sentOrigin,
+        hasPendingMembers,
+      },
+    ],
   };
 }
 
@@ -385,8 +544,8 @@ export function sealLoveApiDirectAbsence(
       existing !== null &&
       (existing.authorization_uri !== prepared.uri ||
         existing.authorization_rev !== prepared.rev ||
-        existing.fact_action !== 'delete' ||
-        existing.fact_cid !== '' ||
+        existing.fact_action !== prepared.action ||
+        existing.fact_cid !== prepared.cid ||
         !sameLovePayload(existing.payload_json, love) ||
         (recipient.sentOrigin !== null && JSON.parse(existing.payload_json).origin !== recipient.sentOrigin))
     ) {
@@ -395,8 +554,8 @@ export function sealLoveApiDirectAbsence(
         {
           uri: prepared.uri,
           rev: prepared.rev,
-          action: 'delete',
-          cid: '',
+          action: prepared.action,
+          cid: prepared.cid,
           horizonMs: prepared.horizonMs,
           conflicted: true,
         },
@@ -420,7 +579,7 @@ export function sealLoveApiDirectAbsence(
            did,uri,incarnation_key,link_id,generation,artist,track,artist_key,track_key,recording_mbid,payload_json,
            love_source_service,love_import_sources,authorization_uri,authorization_rev,fact_action,fact_cid,
            expires_at_ms,due_at_ms,created_at_ms
-         ) VALUES(?,?,?,?,?,?,?,?,?,?,?,NULL,NULL,?,?,'delete','',?,?,?)`,
+         ) VALUES(?,?,?,?,?,?,?,?,?,?,?,NULL,NULL,?,?,?,?,?,?,?)`,
         prepared.did,
         prepared.uri,
         prepared.incarnationKey,
@@ -434,6 +593,8 @@ export function sealLoveApiDirectAbsence(
         payload,
         prepared.uri,
         prepared.rev,
+        prepared.action,
+        prepared.cid,
         prepared.horizonMs,
         prepared.nowMs,
         prepared.nowMs,

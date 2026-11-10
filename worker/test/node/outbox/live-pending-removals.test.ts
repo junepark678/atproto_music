@@ -13,7 +13,9 @@ import {
 } from '../../../src/do/ingest/live-pending-removals';
 import { applyRecordProof } from '../../../src/do/write/apply-record';
 import { enqueueListenDelete, hasCanonicalListenSurvivor } from '../../../src/forward/delete-enqueue';
+import { settleRows } from '../../../src/forward/forward-outbox';
 import { executeListenRemovals, type LiveRemovedListen } from '../../../src/forward/live-removal-effects';
+import { bindApiLoveOperation, prepareLoveApiWindowAbsence } from '../../../src/forward/love-api-recipients';
 import {
   admitForwardIdentity,
   cleanupForwardAdmissionsForSuppression,
@@ -35,6 +37,48 @@ import {
   seedUser,
 } from '../../write/support';
 import { withMigratedDb } from '../support/node-db';
+
+function traceSql(db: Db): {
+  db: Db;
+  counts: () => { reads: number; mutationStatements: number; returnedRows: number; changedRows: number };
+} {
+  let reads = 0;
+  let mutationStatements = 0;
+  let returnedRows = 0;
+  const mutation = /^\s*(?:INSERT|UPDATE|DELETE|REPLACE)\b/i;
+  const before = db.one<{ n: number }>('SELECT total_changes() AS n')!.n;
+  const traced: Db = {
+    all<T>(sql: string, ...params: SqlParam[]): T[] {
+      if (mutation.test(sql)) mutationStatements++;
+      else reads++;
+      const rows = db.all<T>(sql, ...params);
+      returnedRows += rows.length;
+      return rows;
+    },
+    one<T>(sql: string, ...params: SqlParam[]): T | null {
+      reads++;
+      const row = db.one<T>(sql, ...params);
+      if (row !== null) returnedRows++;
+      return row;
+    },
+    run(sql: string, ...params: SqlParam[]) {
+      mutationStatements++;
+      return db.run(sql, ...params);
+    },
+    tx<T>(fn: () => T extends Promise<unknown> ? never : T): T {
+      return db.tx(fn);
+    },
+  };
+  return {
+    db: traced,
+    counts: () => ({
+      reads,
+      mutationStatements,
+      returnedRows,
+      changedRows: db.one<{ n: number }>('SELECT total_changes() AS n')!.n - before,
+    }),
+  };
+}
 
 const URI = `at://${DID}/com.example.atmusic.scrobble/r1`;
 const NOW = NOW_MS;
@@ -407,6 +451,183 @@ it('keeps a surviving canonical copy and expires an unapproved window without fo
       value: 1,
     });
     expect(db.all('SELECT * FROM listenbrainz_deletes')).toHaveLength(0);
+  });
+});
+
+it('owns a pending API-love window only for the exact current recipient generation and cascades it', async () => {
+  await withMigratedDb((db) => {
+    seedUser(db, DID);
+    setup(db);
+    const loveUri = `at://${DID}/com.example.atmusic.love/window-owned`;
+    const incarnationKey = `love:${loveUri}:api:api-window-op`;
+    db.run(
+      `INSERT INTO love_incarnations(uri,incarnation_key,state,path,source_service,updated_at_ms)
+       VALUES(?,?,'present','api',NULL,?)`,
+      loveUri,
+      incarnationKey,
+      NOW,
+    );
+    db.run(
+      `INSERT INTO operations(id,did,kind,origin,priority,collection,rkey,state,due_at,created_at_ms,updated_at_ms)
+       VALUES('api-window-op',?,'love.put','web',1,'com.example.atmusic.love','request-rkey','succeeded',?,?,?)`,
+      DID,
+      NOW,
+      NOW,
+      NOW,
+    );
+    db.run(
+      `INSERT INTO forward_admissions(did,identity_key,path,source_service,created_at_ms,admission_seq)
+       VALUES(?,?,'api',NULL,?,1)`,
+      DID,
+      `love-uri:${DID}:com.example.atmusic.love:request-rkey`,
+      NOW,
+    );
+    db.run(
+      `INSERT INTO forward_outbox(id,link_id,generation,did,kind,dedupe_key,payload_json,state,attempts,due_at,
+         created_at_ms,updated_at_ms,love_artist_key,love_track_key)
+       VALUES('api-window-effect','pending-link',1,?,'love','api-window-op',?, 'queued',0,?,?,?,'artist-key','track-key')`,
+      DID,
+      JSON.stringify({ artist: 'Artist', track: 'Track', origin: 'web' }),
+      NOW,
+      NOW,
+      NOW,
+    );
+    db.run(
+      `INSERT INTO love_api_recipients(
+         did,uri,incarnation_key,link_id,generation,aggregate_seq,state,created_at_ms,updated_at_ms
+       ) VALUES(?,?,?,'pending-link',1,1,'present',?,?)`,
+      DID,
+      loveUri,
+      incarnationKey,
+      NOW,
+      NOW,
+    );
+    expect(
+      bindApiLoveOperation(db, {
+        did: DID,
+        uri: loveUri,
+        incarnationKey,
+        operationId: 'api-window-op',
+        admissionIdentityKey: `love-uri:${DID}:com.example.atmusic.love:request-rkey`,
+        nowMs: NOW,
+      }),
+    ).toBe(true);
+    settleRows(db, ['api-window-effect'], 'sent', NOW + 1, null, true, 1);
+    expect(db.one('SELECT sent_operation_id FROM love_api_recipients WHERE uri=?', loveUri)).toEqual({
+      sent_operation_id: 'api-window-op',
+    });
+    const window: PendingRemovalInput = {
+      did: DID,
+      uri: loveUri,
+      kind: 'love',
+      row: {
+        uri: loveUri,
+        record_uri: null,
+        listen_id: null,
+        cid: 'removed-love-cid',
+        listened_at: '',
+        artist_key: 'artist-key',
+        track_key: 'track-key',
+        artist: 'Artist',
+        track: 'Track',
+        recording_mbid: null,
+      },
+      identityKey: incarnationKey,
+      windowLo: '2222222222222',
+      windowHi: '3333333333333',
+      replacedByCid: null,
+      nowMs: NOW,
+    };
+    const trace = traceSql(db);
+    recordPendingRemoval(trace.db, window);
+    recordPendingRemoval(trace.db, window);
+    expect(db.all('SELECT did,uri,incarnation_key,link_id,generation FROM love_api_window_owners')).toEqual([
+      {
+        did: DID,
+        uri: loveUri,
+        incarnation_key: incarnationKey,
+        link_id: 'pending-link',
+        generation: 1,
+      },
+    ]);
+    authorizePendingRemovals(trace.db, { uri: loveUri, rev: window.windowHi, action: 'delete' }, NOW + 2);
+    const ownerAndAuthorizationTrace = trace.counts();
+    expect(ownerAndAuthorizationTrace.changedRows, JSON.stringify(ownerAndAuthorizationTrace)).toBeLessThanOrEqual(13);
+    if (process.env.FINDING32_L2_COST_TRACE === '1')
+      console.info(`L2_WINDOW_OWNER_AUTHORIZATION_TRACE ${JSON.stringify(ownerAndAuthorizationTrace)}`);
+    expect(
+      db.one<{ action: string; cid: string; conflicted: number }>(
+        'SELECT action,cid,conflicted FROM love_api_comparison_facts WHERE authorization_uri=? AND authorization_rev=?',
+        loveUri,
+        window.windowHi,
+      ),
+    ).toEqual({ action: 'delete', cid: '', conflicted: 0 });
+    const debugPrepared = prepareLoveApiWindowAbsence(db, {
+      did: DID,
+      uri: loveUri,
+      incarnationKey,
+      linkId: 'pending-link',
+      generation: 1,
+      memberUri: loveUri,
+      removedCid: 'removed-love-cid',
+      windowLo: window.windowLo,
+      windowHi: window.windowHi,
+      replacedByCid: '',
+      rev: window.windowHi,
+      action: 'delete',
+      cid: '',
+      windowExpiresAtMs: NOW + LIVE_EVIDENCE_TTL_MS,
+      nowMs: NOW + 2,
+    });
+    expect(debugPrepared).not.toBeNull();
+    expect(debugPrepared).not.toBe('conflicted');
+    expect(db.one('SELECT 1 FROM love_api_unlove_decisions WHERE uri=?', loveUri)).toBeNull();
+    expect(db.one('SELECT authorized_rev FROM live_pending_removals WHERE uri=?', loveUri)).toEqual({
+      authorized_rev: window.windowHi,
+    });
+    expect(executeAuthorizedRemovals(db, { uri: loveUri, nowMs: NOW + 2, random, limit: 1 }).groups).toBe(1);
+    expect(
+      db.one<{ authorization_rev: string; payload_json: string }>(
+        'SELECT authorization_rev,payload_json FROM love_api_unlove_decisions WHERE uri=?',
+        loveUri,
+      ),
+    ).toEqual({
+      authorization_rev: window.windowHi,
+      payload_json: JSON.stringify({ artist: 'Artist', track: 'Track', origin: 'web' }),
+    });
+    expect(db.one('SELECT 1 FROM love_api_window_owners WHERE uri=?', loveUri)).toBeNull();
+
+    const nextUri = `at://${DID}/com.example.atmusic.love/window-generation`;
+    db.run("UPDATE linked_accounts SET generation=2 WHERE id='pending-link'");
+    db.run(
+      `INSERT INTO love_incarnations(uri,incarnation_key,state,path,source_service,updated_at_ms)
+       VALUES(?,'generation-incarnation','present','api',NULL,?)`,
+      nextUri,
+      NOW,
+    );
+    for (const generation of [1, 2])
+      db.run(
+        `INSERT INTO love_api_recipients(
+           did,uri,incarnation_key,link_id,generation,aggregate_seq,state,created_at_ms,updated_at_ms
+         ) VALUES(?,?,'generation-incarnation','pending-link',?,?, 'present',?,?)`,
+        DID,
+        nextUri,
+        generation,
+        generation + 1,
+        NOW,
+        NOW,
+      );
+    recordPendingRemoval(db, {
+      ...window,
+      uri: nextUri,
+      row: { ...window.row, uri: nextUri, cid: 'generation-delete-cid' },
+      identityKey: 'generation-incarnation',
+      windowLo: '4444444444444',
+      windowHi: '5555555555555',
+    });
+    expect(db.all('SELECT link_id,generation FROM love_api_window_owners WHERE uri=?', nextUri)).toEqual([
+      { link_id: 'pending-link', generation: 2 },
+    ]);
   });
 });
 
