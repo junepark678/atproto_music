@@ -2,9 +2,10 @@ import { readdirSync, statSync } from 'node:fs';
 import { mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { expect, it, vi } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 
 const fsBarriers = vi.hoisted(() => ({
+  orderNames: null as null | ((path: string, names: string[]) => string[]),
   afterReaddir: null as null | ((names: string[]) => Promise<void>),
   afterStat: null as null | ((path: string) => Promise<void>),
 }));
@@ -15,8 +16,9 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     ...actual,
     readdir: async (path: Parameters<typeof readdir>[0]) => {
       const names = (await actual.readdir(path as string)) as string[];
-      await fsBarriers.afterReaddir?.(names);
-      return names;
+      const ordered = fsBarriers.orderNames?.(String(path), names) ?? names;
+      await fsBarriers.afterReaddir?.(ordered);
+      return ordered;
     },
     stat: async (...args: Parameters<typeof stat>) => {
       const result = await actual.stat(...args);
@@ -26,24 +28,94 @@ vi.mock('node:fs/promises', async (importOriginal) => {
   };
 });
 
-const { receiveUpload } = await import('../../../src/imports/uploads');
+const { receiveUpload: productionReceiveUpload } = await import('../../../src/imports/uploads');
+
+type UploadResult = Awaited<ReturnType<typeof productionReceiveUpload>>;
+type Scope = {
+  controller: AbortController;
+  releases: Set<() => void>;
+  receives: Set<Promise<UploadResult>>;
+  close(): Promise<void>;
+};
+const activeScopes = new Set<Scope>();
+let activeScope: Scope | null = null;
+
+function receiveUpload(...args: Parameters<typeof productionReceiveUpload>) {
+  if (!activeScope) throw new Error('upload requires an accounting test scope');
+  const result = productionReceiveUpload(...args);
+  activeScope.receives.add(result);
+  // Observe from launch; callers still await the original rejection.
+  void result.catch(() => undefined);
+  return result;
+}
+
+async function waitForBarrier<T>(barrier: Promise<T>, ...receives: Promise<UploadResult>[]): Promise<T> {
+  const scope = activeScope;
+  if (!scope) throw new Error('barrier requires an accounting test scope');
+  const { signal } = scope.controller;
+  let abort!: () => void;
+  const aborted = new Promise<never>((_, reject) => {
+    abort = () => reject(signal.reason);
+    if (signal.aborted) abort();
+    else signal.addEventListener('abort', abort, { once: true });
+  });
+  try {
+    return await Promise.race([
+      barrier,
+      aborted,
+      ...receives.map((receive) =>
+        receive.then(() => {
+          throw new Error('upload settled before its required barrier');
+        }),
+      ),
+    ]);
+  } finally {
+    signal.removeEventListener('abort', abort);
+  }
+}
+
+afterEach(async () => {
+  await Promise.all([...activeScopes].map((scope) => scope.close()));
+});
 
 function deferred<T = void>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
   const promise = new Promise<T>((r) => {
     resolve = r;
   });
+  activeScope?.releases.add(() => resolve(undefined as T));
   return { promise, resolve };
 }
 
 async function withDir(run: (dir: string) => Promise<void>): Promise<void> {
   const dir = await mkdtemp(join(tmpdir(), 'atmusic-upload-accounting-'));
+  let closing: Promise<void> | null = null;
+  const scope: Scope = {
+    controller: new AbortController(),
+    releases: new Set(),
+    receives: new Set(),
+    close() {
+      closing ??= (async () => {
+        scope.controller.abort(new Error('accounting test scope closed'));
+        for (const release of scope.releases) release();
+        // All launched receives must close their handles before hooks or files disappear.
+        await Promise.allSettled(scope.receives);
+        fsBarriers.afterReaddir = null;
+        fsBarriers.afterStat = null;
+        fsBarriers.orderNames = null;
+        await rm(dir, { recursive: true, force: true });
+        activeScopes.delete(scope);
+        if (activeScope === scope) activeScope = null;
+      })();
+      return closing;
+    },
+  };
+  activeScopes.add(scope);
+  activeScope = scope;
   try {
     await run(dir);
   } finally {
-    fsBarriers.afterReaddir = null;
-    fsBarriers.afterStat = null;
-    await rm(dir, { recursive: true, force: true });
+    await scope.close();
   }
 }
 
@@ -84,17 +156,17 @@ it('reserves floor and declared capacity while an upload is held before its firs
       jobId: 'floor-a',
       dirMaxBytes: 2_000,
       minFreeBytes: Number(FLOOR),
-      freeBytes: () => FLOOR + 1_000n,
+      freeBytes: asyncFreeBytes(1_000),
       declaredLength: 700,
     });
     try {
-      await first.pulled;
+      await waitForBarrier(first.pulled, firstResult);
       const second = await receiveUpload(closedBody(700), {
         dir,
         jobId: 'floor-b',
         dirMaxBytes: 2_000,
         minFreeBytes: Number(FLOOR),
-        freeBytes: () => FLOOR + 1_000n,
+        freeBytes: asyncFreeBytes(1_000),
         declaredLength: 700,
       });
       expect(second).toEqual(NO_SPACE);
@@ -119,7 +191,7 @@ it('reserves floor and declared capacity while an upload is held before its firs
       declaredLength: 900,
     });
     try {
-      await first.pulled;
+      await waitForBarrier(first.pulled, firstResult);
       expect(
         await receiveUpload(closedBody(900), {
           dir,
@@ -248,8 +320,8 @@ it('charges a completion missed by an empty scan snapshot', async () => {
         freeBytes: () => 1_000_000n,
         declaredLength: 900,
       });
-      await scanHeld.promise;
-      expect(await scanNames.promise).toEqual([]);
+      await waitForBarrier(scanHeld.promise, secondResult);
+      expect(await waitForBarrier(scanNames.promise, secondResult)).toEqual([]);
       firstResult = receiveUpload(closedBody(900), {
         dir,
         jobId: 'scan-a',
@@ -301,7 +373,20 @@ it('charges an in-flight file skipped by the scan when it completes during a lat
     const statHeld = deferred();
     const releaseStat = deferred();
     let sentinelStats = 0;
+    let uploadStatsBeforeCompletion = 0;
+    let secondScanNames: string[] | null = null;
+    fsBarriers.orderNames = (path, names) => {
+      if (path !== dir || !names.includes('skip-a.upload')) return names;
+      const ordered = [...names].sort((a, b) => {
+        if (a === 'skip-a.upload') return -1;
+        if (b === 'skip-a.upload') return 1;
+        return a.localeCompare(b);
+      });
+      secondScanNames = ordered;
+      return ordered;
+    };
     fsBarriers.afterStat = async (path) => {
+      if (path.endsWith('/skip-a.upload')) uploadStatsBeforeCompletion++;
       if (path.endsWith('/sentinel') && ++sentinelStats === 2) {
         statHeld.resolve();
         await releaseStat.promise;
@@ -309,7 +394,7 @@ it('charges an in-flight file skipped by the scan when it completes during a lat
     };
     let secondResult: ReturnType<typeof receiveUpload> | undefined;
     try {
-      await firstPulled.promise;
+      await waitForBarrier(firstPulled.promise, firstResult);
       secondResult = receiveUpload(closedBody(900), {
         dir,
         jobId: 'skip-b',
@@ -318,7 +403,9 @@ it('charges an in-flight file skipped by the scan when it completes during a lat
         freeBytes: () => 1_000_000n,
         declaredLength: 900,
       });
-      await statHeld.promise;
+      await waitForBarrier(statHeld.promise, firstResult, secondResult);
+      expect(secondScanNames).toEqual(['skip-a.upload', 'sentinel']);
+      expect(uploadStatsBeforeCompletion).toBe(0);
       finishFirst.resolve();
       expect(await firstResult).toMatchObject({ ok: true, bytes: 900 });
     } finally {
