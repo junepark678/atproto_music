@@ -1,9 +1,9 @@
 import { spawn } from 'node:child_process';
-import { rmSync } from 'node:fs';
+import { existsSync, rmSync } from 'node:fs';
 import { access, mkdtemp, readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { expect, test, vi } from 'vitest';
 import { MIN_CDP_CONNECT_MS } from '../live/owned-chromium.ts';
@@ -77,12 +77,25 @@ test('owner guards synchronous acquisition failure and blocks late resource acqu
   const connect = vi.spyOn(chromium, 'connectOverCDP');
   owner.deferCleanup(() => connect.mockRestore());
   const late = deferred<void>();
+  let partialRoot: string | undefined;
   const continuation = late.promise.then(() => {
     expect(() => owner.startChromium({ interactive: false, launchDeadlineAt: 0, cleanupDeadlineAt: 0 })).toThrow(
       'test owner acquisition and late continuation controls is closed',
     );
   });
   try {
+    expect(() =>
+      owner.startChromium({
+        interactive: false,
+        ...deadlines(),
+        args(profile) {
+          partialRoot = dirname(profile);
+          throw new Error('injected synchronous failure after profile acquisition');
+        },
+      }),
+    ).toThrow('injected synchronous failure after profile acquisition');
+    expect(partialRoot).toBeDefined();
+    expect(existsSync(partialRoot!)).toBe(false);
     expect(() => owner.startChromium({ interactive: false, launchDeadlineAt: 0, cleanupDeadlineAt: 0 })).toThrow(
       /launch deadline exceeded/,
     );
