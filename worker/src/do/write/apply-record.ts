@@ -56,6 +56,7 @@ import { MAX_INGEST_CBOR_BYTES, validateScrobbleBatchRecord } from '@atmusic/cor
 import { isTid } from '@atmusic/core/syntax';
 import { toStorage } from '@atmusic/core/timestamp';
 import { executeListenRemovals } from '../../forward/live-removal-effects';
+import { prepareLoveApiDirectAbsence, sealLoveApiDirectAbsence } from '../../forward/love-api-recipients';
 import { ensureLegacyLoveIncarnation } from '../../forward/love-incarnation';
 import {
   admitForwardIdentity,
@@ -1137,6 +1138,22 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
       );
       const priorCid = db.one<{ cid: string }>('SELECT cid FROM record_state WHERE uri=?', t.uri)?.cid;
       const apiEcho = apiBridge !== null && apiBridge.expected_cid === priorCid;
+      if (authRev !== null && !apiEcho && priorLove !== null && loveIncarnation !== null) {
+        const prepared = prepareLoveApiDirectAbsence(db, {
+          did: t.did,
+          uri: t.uri,
+          incarnationKey: loveIncarnation.incarnation_key,
+          rev: authRev,
+          nowMs: Number(o.nowNs / 1_000_000n),
+        });
+        if (prepared !== null && prepared !== 'conflicted' && !newerLoveIntent && !locallyReloved)
+          sealLoveApiDirectAbsence(db, prepared, {
+            artist: priorLove.artist,
+            track: priorLove.track,
+            album: priorLove.album,
+            recordingMbid: priorLove.recording_mbid,
+          });
+      }
       if (apiBridge && !apiEcho)
         db.run(
           "UPDATE love_delete_bridges SET state='obsolete' WHERE did=? AND uri=? AND incarnation_key=? AND state IN ('pending','succeeded')",

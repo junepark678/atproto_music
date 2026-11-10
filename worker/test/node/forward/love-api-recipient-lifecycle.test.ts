@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import type { Db, SqlParam } from '../../../src/do/db';
 import {
+  bindApiLoveCreatedOperation,
   bindApiLoveOperation,
   compareLoveApiComparisonFact,
+  prepareLoveApiDirectAbsence,
   recordLoveApiComparisonFact,
+  sealLoveApiDirectAbsence,
 } from '../../../src/forward/love-api-recipients';
 import { withMigratedDb } from '../../node/support/node-db';
 
@@ -42,6 +45,154 @@ function insertBindingFixture(db: Db) {
 }
 
 describe('L2 retained comparison fact', () => {
+  it('measures cold and replay create-binding handoffs from actual SQLite changes', async () => {
+    await withMigratedDb((raw) => {
+      insertBindingFixture(raw);
+      raw.run('DELETE FROM love_incarnations WHERE uri=?', URI);
+      const mutation = /^\s*(?:INSERT|UPDATE|DELETE|REPLACE)\b/i;
+      let reads = 0;
+      let mutations = 0;
+      let returnedRows = 0;
+      const traced: Db = {
+        all<T>(sql: string, ...params: SqlParam[]): T[] {
+          if (mutation.test(sql)) mutations += 1;
+          else reads += 1;
+          const rows = raw.all<T>(sql, ...params);
+          returnedRows += rows.length;
+          return rows;
+        },
+        one<T>(sql: string, ...params: SqlParam[]): T | null {
+          reads += 1;
+          const row = raw.one<T>(sql, ...params);
+          if (row !== null) returnedRows += 1;
+          return row;
+        },
+        run(sql: string, ...params: SqlParam[]) {
+          mutations += 1;
+          return raw.run(sql, ...params);
+        },
+        tx<T>(fn: () => T extends Promise<unknown> ? never : T): T {
+          return raw.tx(fn);
+        },
+      };
+      const before = raw.one<{ total: number }>('SELECT total_changes() AS total')!.total;
+      const accepted = bindApiLoveCreatedOperation(traced, {
+        did: DID,
+        uri: URI,
+        collection: 'com.example.atmusic.love',
+        operationId: 'bound-love-op',
+        admissionIdentityKey: `love-uri:${DID}:com.example.atmusic.love:request-rkey`,
+        nowMs: 10,
+      });
+      const after = raw.one<{ total: number }>('SELECT total_changes() AS total')!.total;
+      const trace = { changedRows: after - before, reads, mutationStatements: mutations, returnedRows };
+      expect(accepted).toBe(true);
+      expect(trace.changedRows).toBeLessThanOrEqual(13);
+      expect(
+        raw.one('SELECT api_origin FROM love_api_bindings WHERE did=? AND operation_id=?', DID, 'bound-love-op'),
+      ).toEqual({
+        api_origin: 'listenbrainz',
+      });
+      reads = 0;
+      mutations = 0;
+      returnedRows = 0;
+      const replayBefore = raw.one<{ total: number }>('SELECT total_changes() AS total')!.total;
+      expect(
+        bindApiLoveCreatedOperation(traced, {
+          did: DID,
+          uri: URI,
+          collection: 'com.example.atmusic.love',
+          operationId: 'bound-love-op',
+          admissionIdentityKey: `love-uri:${DID}:com.example.atmusic.love:request-rkey`,
+          nowMs: 11,
+        }),
+      ).toBe(true);
+      const replayAfter = raw.one<{ total: number }>('SELECT total_changes() AS total')!.total;
+      const replayTrace = {
+        changedRows: replayAfter - replayBefore,
+        reads,
+        mutationStatements: mutations,
+        returnedRows,
+      };
+      expect(replayTrace.changedRows).toBe(0);
+      reads = 0;
+      mutations = 0;
+      returnedRows = 0;
+      const refusedBefore = raw.one<{ total: number }>('SELECT total_changes() AS total')!.total;
+      expect(
+        bindApiLoveCreatedOperation(traced, {
+          did: DID,
+          uri: `at://${DID}/com.example.atmusic.love/rebound-uri`,
+          collection: 'com.example.atmusic.love',
+          operationId: 'bound-love-op',
+          admissionIdentityKey: `love-uri:${DID}:com.example.atmusic.love:request-rkey`,
+          nowMs: 12,
+        }),
+      ).toBe(false);
+      const refusedAfter = raw.one<{ total: number }>('SELECT total_changes() AS total')!.total;
+      const refusedTrace = {
+        changedRows: refusedAfter - refusedBefore,
+        reads,
+        mutationStatements: mutations,
+        returnedRows,
+      };
+      expect(refusedTrace.changedRows).toBe(0);
+      if (process.env.FINDING32_L2_COST_TRACE === '1') {
+        console.info(`L2_CREATE_BIND_TRACE ${JSON.stringify(trace)}`);
+        console.info(`L2_CREATE_BIND_REPLAY_TRACE ${JSON.stringify(replayTrace)}`);
+        console.info(`L2_CREATE_BIND_REFUSAL_TRACE ${JSON.stringify(refusedTrace)}`);
+      }
+    });
+  });
+
+  it('seals a direct absence from the exact live delete tuple and retained API source', async () => {
+    await withMigratedDb((db) => {
+      insertBindingFixture(db);
+      expect(
+        bindApiLoveOperation(db, {
+          did: DID,
+          uri: URI,
+          incarnationKey: 'snapshot-incarnation',
+          operationId: 'bound-love-op',
+          admissionIdentityKey: `love-uri:${DID}:com.example.atmusic.love:request-rkey`,
+          nowMs: 10,
+        }),
+      ).toBe(true);
+      db.run("UPDATE love_api_recipients SET sent_operation_id='bound-love-op'");
+      db.run(
+        `INSERT INTO live_record_evidence(uri,did,collection,rkey,del_rev,received_ms,expires_at_ms)
+         VALUES(?,?,?,'retained-fact',?,20,90000)`,
+        URI,
+        DID,
+        'com.example.atmusic.love',
+        REV,
+      );
+      const prepared = prepareLoveApiDirectAbsence(db, {
+        did: DID,
+        uri: URI,
+        incarnationKey: 'snapshot-incarnation',
+        rev: REV,
+        nowMs: 30,
+      });
+      if (prepared === null || prepared === 'conflicted') throw new Error('exact live delete fact was refused');
+      expect(
+        sealLoveApiDirectAbsence(db, prepared, {
+          artist: 'Björk',
+          track: 'Jóga',
+          album: null,
+          recordingMbid: null,
+        }),
+      ).toBe(true);
+      expect(db.one('SELECT state FROM love_api_recipients')).toEqual({ state: 'sealed' });
+      expect(db.one('SELECT fact_action,fact_cid,expires_at_ms,payload_json FROM love_api_unlove_decisions')).toEqual({
+        fact_action: 'delete',
+        fact_cid: '',
+        expires_at_ms: 90000,
+        payload_json: JSON.stringify({ artist: 'Björk', track: 'Jóga', origin: 'listenbrainz' }),
+      });
+    });
+  });
+
   it('binds an API admission to the exact current generation within the handoff write allowance', async () => {
     await withMigratedDb((raw) => {
       insertBindingFixture(raw);

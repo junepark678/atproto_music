@@ -28,6 +28,29 @@ export interface LoveApiBindingArgs {
   nowMs: number;
 }
 
+export interface LoveApiProjectedLove {
+  artist: string;
+  track: string;
+  album: string | null;
+  recordingMbid: string | null;
+}
+
+export interface PreparedLoveApiAbsence {
+  did: string;
+  uri: string;
+  incarnationKey: string;
+  rev: string;
+  horizonMs: number;
+  nowMs: number;
+  recipients: Array<{
+    linkId: string;
+    generation: number;
+    sentOperationId: string | null;
+    sentOrigin: Exclude<Origin, 'import'> | null;
+    hasPendingMembers: boolean;
+  }>;
+}
+
 export interface LoveApiSettledRow {
   id: string;
   link_id: string;
@@ -167,6 +190,273 @@ export function compareLoveApiComparisonFact(
     );
     return true;
   });
+}
+
+/** Capture an exact, retained live delete fact before source cleanup and A2 authorization. */
+export function prepareLoveApiDirectAbsence(
+  db: Db,
+  args: { did: string; uri: string; incarnationKey: string; rev: string; nowMs: number },
+): PreparedLoveApiAbsence | 'conflicted' | null {
+  const parsed = parseRecordUri(args.uri);
+  if (
+    parsed === null ||
+    parsed.did !== args.did ||
+    !isTid(args.rev) ||
+    !Number.isSafeInteger(args.nowMs) ||
+    args.nowMs < 0
+  )
+    return null;
+  const rows = db.all<{
+    link_id: string;
+    generation: number;
+    sent_operation_id: string | null;
+    state: string;
+  }>(
+    `SELECT r.link_id,r.generation,r.sent_operation_id,r.state
+     FROM love_api_recipients r JOIN linked_accounts l ON l.id=r.link_id AND l.generation=r.generation
+     WHERE r.did=? AND r.uri=? AND r.incarnation_key=? AND r.state IN ('present','sealed')`,
+    args.did,
+    args.uri,
+    args.incarnationKey,
+  );
+  if (rows.length === 0) return null;
+  const evidence = db.one<{
+    did: string;
+    collection: string;
+    rkey: string;
+    del_rev: string | null;
+    conflict_rev: string | null;
+    expires_at_ms: number;
+  }>('SELECT did,collection,rkey,del_rev,conflict_rev,expires_at_ms FROM live_record_evidence WHERE uri=?', args.uri);
+  if (
+    evidence === null ||
+    evidence.did !== args.did ||
+    evidence.collection !== parsed.collection ||
+    evidence.rkey !== parsed.rkey ||
+    evidence.del_rev !== args.rev ||
+    evidence.expires_at_ms <= args.nowMs
+  )
+    return null;
+  const active = recordLoveApiComparisonFact(
+    db,
+    {
+      uri: args.uri,
+      rev: args.rev,
+      action: 'delete',
+      cid: '',
+      horizonMs: evidence.expires_at_ms,
+      conflicted: evidence.conflict_rev === args.rev,
+    },
+    args.nowMs,
+  );
+  if (!active) return 'conflicted';
+  const recipients: PreparedLoveApiAbsence['recipients'] = [];
+  for (const row of rows) {
+    if (!Number.isSafeInteger(row.generation) || row.generation < 1 || row.state === 'released') return 'conflicted';
+    let sentOrigin: Exclude<Origin, 'import'> | null = null;
+    if (row.sent_operation_id !== null) {
+      const binding = db.one<{ uri: string; incarnation_key: string; api_origin: string }>(
+        'SELECT uri,incarnation_key,api_origin FROM love_api_bindings WHERE did=? AND operation_id=?',
+        args.did,
+        row.sent_operation_id,
+      );
+      if (
+        binding === null ||
+        binding.uri !== args.uri ||
+        binding.incarnation_key !== args.incarnationKey ||
+        !bindingOrigin(binding.api_origin)
+      ) {
+        recordLoveApiComparisonFact(
+          db,
+          {
+            uri: args.uri,
+            rev: args.rev,
+            action: 'delete',
+            cid: '',
+            horizonMs: evidence.expires_at_ms,
+            conflicted: true,
+          },
+          args.nowMs,
+        );
+        return 'conflicted';
+      }
+      sentOrigin = binding.api_origin;
+    }
+    const hasPendingMembers =
+      db.one(
+        `SELECT 1 AS present FROM love_api_recipient_members
+         WHERE link_id=? AND generation=? AND did=? AND uri=? AND incarnation_key=? LIMIT 1`,
+        row.link_id,
+        row.generation,
+        args.did,
+        args.uri,
+        args.incarnationKey,
+      ) !== null;
+    recipients.push({
+      linkId: row.link_id,
+      generation: row.generation,
+      sentOperationId: row.sent_operation_id,
+      sentOrigin,
+      hasPendingMembers,
+    });
+  }
+  return {
+    did: args.did,
+    uri: args.uri,
+    incarnationKey: args.incarnationKey,
+    rev: args.rev,
+    horizonMs: evidence.expires_at_ms,
+    nowMs: args.nowMs,
+    recipients,
+  };
+}
+
+function lovePayload(love: LoveApiProjectedLove, origin?: Exclude<Origin, 'import'>): Record<string, string> {
+  return {
+    artist: love.artist,
+    track: love.track,
+    ...(love.album === null ? {} : { album: love.album }),
+    ...(love.recordingMbid === null ? {} : { recordingMbid: love.recordingMbid }),
+    ...(origin === undefined ? {} : { origin }),
+  };
+}
+
+function sameLovePayload(json: string, love: LoveApiProjectedLove): boolean {
+  let value: unknown;
+  try {
+    value = JSON.parse(json);
+  } catch {
+    return false;
+  }
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const object = value as Record<string, unknown>;
+  const keys = Object.keys(object);
+  return (
+    keys.every((key) => ['artist', 'track', 'album', 'recordingMbid', 'origin'].includes(key)) &&
+    object.artist === love.artist &&
+    object.track === love.track &&
+    (love.album === null ? object.album === undefined : object.album === love.album) &&
+    (love.recordingMbid === null ? object.recordingMbid === undefined : object.recordingMbid === love.recordingMbid) &&
+    (object.origin === undefined || bindingOrigin(String(object.origin)))
+  );
+}
+
+/** Seal exact current-generation recipient decisions using the captured projection and retained fact. */
+export function sealLoveApiDirectAbsence(
+  db: Db,
+  prepared: PreparedLoveApiAbsence,
+  love: LoveApiProjectedLove,
+): boolean {
+  const keys = loveApiTrackKeys(love.artist, love.track);
+  if (keys === null) return false;
+  for (const recipient of prepared.recipients) {
+    const hasProof = recipient.sentOperationId !== null;
+    if (!hasProof && !recipient.hasPendingMembers) {
+      db.run(
+        `UPDATE love_api_recipients SET state='released',updated_at_ms=?
+         WHERE did=? AND uri=? AND incarnation_key=? AND link_id=? AND generation=? AND state IN ('present','sealed')`,
+        prepared.nowMs,
+        prepared.did,
+        prepared.uri,
+        prepared.incarnationKey,
+        recipient.linkId,
+        recipient.generation,
+      );
+      continue;
+    }
+    const payload = JSON.stringify(lovePayload(love, recipient.sentOrigin ?? undefined));
+    const existing = db.one<{
+      authorization_uri: string;
+      authorization_rev: string;
+      fact_action: string;
+      fact_cid: string;
+      expires_at_ms: number;
+      payload_json: string;
+    }>(
+      `SELECT authorization_uri,authorization_rev,fact_action,fact_cid,expires_at_ms,payload_json
+       FROM love_api_unlove_decisions WHERE did=? AND uri=? AND incarnation_key=? AND link_id=? AND generation=?`,
+      prepared.did,
+      prepared.uri,
+      prepared.incarnationKey,
+      recipient.linkId,
+      recipient.generation,
+    );
+    if (
+      existing !== null &&
+      (existing.authorization_uri !== prepared.uri ||
+        existing.authorization_rev !== prepared.rev ||
+        existing.fact_action !== 'delete' ||
+        existing.fact_cid !== '' ||
+        !sameLovePayload(existing.payload_json, love) ||
+        (recipient.sentOrigin !== null && JSON.parse(existing.payload_json).origin !== recipient.sentOrigin))
+    ) {
+      recordLoveApiComparisonFact(
+        db,
+        {
+          uri: prepared.uri,
+          rev: prepared.rev,
+          action: 'delete',
+          cid: '',
+          horizonMs: prepared.horizonMs,
+          conflicted: true,
+        },
+        prepared.nowMs,
+      );
+      return false;
+    }
+    db.run(
+      `UPDATE love_api_recipients SET state='sealed',updated_at_ms=?
+       WHERE did=? AND uri=? AND incarnation_key=? AND link_id=? AND generation=? AND state='present'`,
+      prepared.nowMs,
+      prepared.did,
+      prepared.uri,
+      prepared.incarnationKey,
+      recipient.linkId,
+      recipient.generation,
+    );
+    if (existing === null) {
+      db.run(
+        `INSERT INTO love_api_unlove_decisions(
+           did,uri,incarnation_key,link_id,generation,artist,track,artist_key,track_key,recording_mbid,payload_json,
+           love_source_service,love_import_sources,authorization_uri,authorization_rev,fact_action,fact_cid,
+           expires_at_ms,due_at_ms,created_at_ms
+         ) VALUES(?,?,?,?,?,?,?,?,?,?,?,NULL,NULL,?,?,'delete','',?,?,?)`,
+        prepared.did,
+        prepared.uri,
+        prepared.incarnationKey,
+        recipient.linkId,
+        recipient.generation,
+        love.artist,
+        love.track,
+        keys.artistKey,
+        keys.trackKey,
+        love.recordingMbid,
+        payload,
+        prepared.uri,
+        prepared.rev,
+        prepared.horizonMs,
+        prepared.nowMs,
+        prepared.nowMs,
+      );
+      continue;
+    }
+    const expiry = Math.min(existing.expires_at_ms, prepared.horizonMs);
+    const payloadChanged = existing.payload_json !== payload;
+    if (expiry !== existing.expires_at_ms || payloadChanged)
+      db.run(
+        `UPDATE love_api_unlove_decisions SET expires_at_ms=?,payload_json=?,due_at_ms=min(due_at_ms,?)
+         WHERE did=? AND uri=? AND incarnation_key=? AND link_id=? AND generation=?`,
+        expiry,
+        payloadChanged ? payload : existing.payload_json,
+        prepared.nowMs,
+        prepared.did,
+        prepared.uri,
+        prepared.incarnationKey,
+        recipient.linkId,
+        recipient.generation,
+      );
+  }
+  return true;
 }
 
 function memberRows(db: Db, args: LoveApiBindingArgs): Array<{ link_id: string; generation: number; state: string }> {
@@ -342,6 +632,59 @@ export function bindApiLoveOperation(db: Db, args: LoveApiBindingArgs): boolean 
   });
 }
 
+/** Bind a successful API create while its exact admission is still in the executor transaction. */
+export function bindApiLoveCreatedOperation(
+  db: Db,
+  args: Omit<LoveApiBindingArgs, 'incarnationKey'> & { collection: string },
+): boolean {
+  return db.tx(() => {
+    const parsed = parseRecordUri(args.uri);
+    if (parsed === null || parsed.did !== args.did || parsed.collection !== args.collection) return false;
+    const current = db.one<{ incarnation_key: string; state: string; path: string }>(
+      'SELECT incarnation_key,state,path FROM love_incarnations WHERE uri=?',
+      args.uri,
+    );
+    const incarnationKey = `love:${args.uri}:api:${args.operationId}`;
+    if (
+      current !== null &&
+      (current.state !== 'present' || current.path !== 'api' || current.incarnation_key !== incarnationKey)
+    )
+      return false;
+    const existingBinding = db.one<{ uri: string; incarnation_key: string; api_origin: string }>(
+      'SELECT uri,incarnation_key,api_origin FROM love_api_bindings WHERE did=? AND operation_id=?',
+      args.did,
+      args.operationId,
+    );
+    if (existingBinding !== null) {
+      const operation = db.one<{ kind: string; did: string; origin: string }>(
+        'SELECT kind,did,origin FROM operations WHERE id=?',
+        args.operationId,
+      );
+      return (
+        current?.state === 'present' &&
+        existingBinding.uri === args.uri &&
+        existingBinding.incarnation_key === incarnationKey &&
+        bindingOrigin(existingBinding.api_origin) &&
+        operation?.kind === 'love.put' &&
+        operation.did === args.did &&
+        operation.origin === existingBinding.api_origin
+      );
+    }
+    if (current === null)
+      db.run(
+        `INSERT INTO love_incarnations(uri,incarnation_key,state,path,source_service,updated_at_ms)
+         VALUES(?,?,'present','api',NULL,?)`,
+        args.uri,
+        incarnationKey,
+        args.nowMs,
+      );
+    const accepted = bindApiLoveOperation(db, { ...args, incarnationKey });
+    if (!accepted) return false;
+    db.run('DELETE FROM forward_admissions WHERE did=? AND identity_key=?', args.did, args.admissionIdentityKey);
+    return true;
+  });
+}
+
 /** Consume the exact rows returned by B2 terminal transitions in that same transaction. */
 export function settleApiLoveRecipientRows(db: Db, rows: readonly LoveApiSettledRow[], nowMs: number): void {
   for (const row of rows) {
@@ -356,10 +699,26 @@ export function settleApiLoveRecipientRows(db: Db, rows: readonly LoveApiSettled
       operationId,
     );
     if (member === null || member.did !== row.did) continue;
-    if (row.state === 'sent')
+    let sentOrigin: Exclude<Origin, 'import'> | null = null;
+    if (row.state === 'sent') {
+      const binding = db.one<{ uri: string; incarnation_key: string; api_origin: string }>(
+        'SELECT uri,incarnation_key,api_origin FROM love_api_bindings WHERE did=? AND operation_id=?',
+        member.did,
+        operationId,
+      );
+      if (
+        binding !== null &&
+        binding.uri === member.uri &&
+        binding.incarnation_key === member.incarnation_key &&
+        bindingOrigin(binding.api_origin)
+      )
+        sentOrigin = binding.api_origin;
+    }
+    let selectedSent = false;
+    if (sentOrigin !== null) {
       db.run(
-        `UPDATE love_api_recipients SET sent_operation_id=coalesce(sent_operation_id,?),updated_at_ms=?
-         WHERE ${RECIPIENT_KEY} AND state IN ('present','sealed')`,
+        `UPDATE love_api_recipients SET sent_operation_id=?,updated_at_ms=?
+         WHERE ${RECIPIENT_KEY} AND state IN ('present','sealed') AND sent_operation_id IS NULL`,
         operationId,
         nowMs,
         member.did,
@@ -368,6 +727,76 @@ export function settleApiLoveRecipientRows(db: Db, rows: readonly LoveApiSettled
         row.link_id,
         row.generation,
       );
+      selectedSent =
+        db.one<{ sent_operation_id: string | null }>(
+          `SELECT sent_operation_id FROM love_api_recipients WHERE ${RECIPIENT_KEY}`,
+          member.did,
+          member.uri,
+          member.incarnation_key,
+          row.link_id,
+          row.generation,
+        )?.sent_operation_id === operationId;
+    }
+    if (selectedSent) {
+      const decision = db.one<{
+        payload_json: string;
+        authorization_uri: string;
+        authorization_rev: string;
+        expires_at_ms: number;
+      }>(
+        `SELECT payload_json,authorization_uri,authorization_rev,expires_at_ms FROM love_api_unlove_decisions
+         WHERE did=? AND uri=? AND incarnation_key=? AND link_id=? AND generation=?`,
+        member.did,
+        member.uri,
+        member.incarnation_key,
+        row.link_id,
+        row.generation,
+      );
+      if (decision !== null) {
+        let value: unknown;
+        try {
+          value = JSON.parse(decision.payload_json);
+        } catch {
+          value = null;
+        }
+        const oldOrigin =
+          value !== null && typeof value === 'object' && !Array.isArray(value)
+            ? (value as Record<string, unknown>).origin
+            : undefined;
+        if (oldOrigin !== undefined && oldOrigin !== sentOrigin) {
+          recordLoveApiComparisonFact(
+            db,
+            {
+              uri: decision.authorization_uri,
+              rev: decision.authorization_rev,
+              action: 'delete',
+              cid: '',
+              horizonMs: decision.expires_at_ms,
+              conflicted: true,
+            },
+            nowMs,
+          );
+        }
+        const payload =
+          value !== null && typeof value === 'object' && !Array.isArray(value)
+            ? oldOrigin === undefined || oldOrigin === sentOrigin
+              ? { ...(value as Record<string, unknown>), origin: sentOrigin }
+              : null
+            : null;
+        if (payload !== null)
+          db.run(
+            `UPDATE love_api_unlove_decisions SET payload_json=?,due_at_ms=min(due_at_ms,?)
+             WHERE did=? AND uri=? AND incarnation_key=? AND link_id=? AND generation=?`,
+            JSON.stringify(payload),
+            nowMs,
+            member.did,
+            member.uri,
+            member.incarnation_key,
+            row.link_id,
+            row.generation,
+          );
+      }
+    }
     db.run(
       'DELETE FROM love_api_recipient_members WHERE link_id=? AND generation=? AND operation_id=?',
       row.link_id,

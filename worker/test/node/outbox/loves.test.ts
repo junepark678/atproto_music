@@ -5,6 +5,7 @@ import { verifyRecordProof } from '@atmusic/atproto/verify/record-proof';
 import { seededRandom } from '@atmusic/core/test-support/random';
 import { fromMs } from '@atmusic/core/timestamp';
 import { expect, it } from 'vitest';
+import { recordLiveEvidence } from '../../../src/do/ingest/live-evidence';
 import { applyRecordProof } from '../../../src/do/write/apply-record';
 import { settleRows } from '../../../src/forward/forward-outbox';
 import { enqueueForwards } from '../../../src/outbox/forward-enqueue';
@@ -283,7 +284,13 @@ it('forwards a live deletion of an API-created love, and routes imported love de
         `at://${h.alice}/${LOVE}/${importedRkey}`,
       ),
     ).toEqual({ source_service: 'lastfm' });
-    expect(h.db.one('SELECT 1 FROM love_api_bindings WHERE did=?', h.alice)).toBeNull();
+    expect(
+      h.db.one(
+        'SELECT 1 FROM love_api_bindings WHERE did=? AND uri=?',
+        h.alice,
+        `at://${h.alice}/${LOVE}/${importedRkey}`,
+      ),
+    ).toBeNull();
     await h.kit.externalDelete('Alice', LOVE, importedRkey);
     expect((await projectLove(h, importedRkey, true)).outcome).toBe('absent');
 
@@ -310,6 +317,85 @@ it('forwards a live deletion of an API-created love, and routes imported love de
       { link_id: listenbrainz, kind: 'unlove' },
       { link_id: listenbrainz, kind: 'unlove' },
     ]);
+  });
+});
+
+it('captures an API recipient decision from a persisted exact delete fact before projection cleanup', async () => {
+  await withHarness(async (h) => {
+    h.seedUser(h.alice);
+    const linkId = h.link(h.alice, 'lastfm');
+    const created = await enqueueLove(h.m, {
+      did: h.alice,
+      input: { artist: 'Proof artist', track: 'Proof track' },
+      origin: 'listenbrainz',
+    });
+    if (!created.ok) throw new Error(JSON.stringify(created.reason));
+    await h.runUntilIdle();
+    const op = h.op(created.operation.id);
+    expect((await projectLove(h, op.rkey!, true)).outcome).toBe('applied');
+    const uri = `at://${h.alice}/${LOVE}/${op.rkey}`;
+    const incarnation = h.db.one<{ incarnation_key: string }>(
+      "SELECT incarnation_key FROM love_incarnations WHERE uri=? AND state='present'",
+      uri,
+    );
+    expect(incarnation).not.toBeNull();
+    expect(h.db.one('SELECT api_origin FROM love_api_bindings WHERE did=? AND operation_id=?', h.alice, op.id)).toEqual(
+      {
+        api_origin: 'listenbrainz',
+      },
+    );
+    expect(
+      h.db.one(
+        'SELECT path FROM forward_admissions WHERE did=? AND identity_key=?',
+        h.alice,
+        `love-uri:${h.alice}:${LOVE}:${op.rkey}`,
+      ),
+    ).toBeNull();
+    const effect = h.db.one<{ id: string; generation: number; kind: string; state: string; dedupe_key: string }>(
+      "SELECT id,generation,kind,state,dedupe_key FROM forward_outbox WHERE link_id=? AND kind='love' AND dedupe_key=?",
+      linkId,
+      op.id,
+    );
+    expect(effect).not.toBeNull();
+    expect(h.db.one('SELECT operation_id FROM love_api_recipient_members')).toEqual({ operation_id: op.id });
+    settleRows(h.db, [effect!.id], 'sent', h.m.clock.nowMs(), null, true, effect!.generation);
+    expect(h.db.one('SELECT sent_operation_id FROM love_api_recipients')).toEqual({ sent_operation_id: op.id });
+    h.db.run('DELETE FROM linked_love_intents WHERE did=? AND operation_id=?', h.alice, op.id);
+
+    await h.kit.externalDelete('Alice', LOVE, op.rkey!);
+    const car = await h.kit.repos.Alice.getRecordCar(LOVE, op.rkey!);
+    const proof = await verifyRecordProof(car, {
+      did: h.alice,
+      collection: LOVE,
+      rkey: op.rkey!,
+      signingKey: h.kit.users.Alice.key.didKey,
+    });
+    expect(proof.state).toBe('absent');
+    recordLiveEvidence(
+      h.db,
+      { uri, did: h.alice, collection: LOVE, rkey: op.rkey!, rev: proof.commit.rev, action: 'delete' },
+      h.m.clock.nowMs(),
+    );
+    expect((await projectLove(h, op.rkey!, true)).outcome).toBe('absent');
+    expect(h.db.one('SELECT state FROM love_api_recipients')).toEqual({ state: 'sealed' });
+    expect(
+      h.db.one<{
+        authorization_rev: string;
+        fact_action: string;
+        fact_cid: string;
+        expires_at_ms: number;
+        payload_json: string;
+      }>('SELECT authorization_rev,fact_action,fact_cid,expires_at_ms,payload_json FROM love_api_unlove_decisions'),
+    ).toMatchObject({
+      authorization_rev: proof.commit.rev,
+      fact_action: 'delete',
+      fact_cid: '',
+      payload_json: JSON.stringify({ artist: 'Proof artist', track: 'Proof track', origin: 'listenbrainz' }),
+    });
+    expect(
+      h.db.one('SELECT 1 FROM love_api_comparison_facts WHERE authorization_rev=?', proof.commit.rev),
+    ).not.toBeNull();
+    expect(h.db.one('SELECT 1 FROM linked_accounts WHERE id=?', linkId)).not.toBeNull();
   });
 });
 

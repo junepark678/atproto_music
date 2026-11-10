@@ -34,7 +34,7 @@ import type { ValidationFailure } from '@atmusic/core/scrobble';
 import { validateDisplayString } from '@atmusic/core/scrobble';
 import type { OperationRow, Origin } from '../app/rows';
 import type { ModuleDeps } from '../do/contracts';
-import { bindApiLoveOperation } from '../forward/love-api-recipients';
+import { bindApiLoveCreatedOperation, bindApiLoveOperation } from '../forward/love-api-recipients';
 import { admitForwardIdentity } from '../forward/projection';
 import { bindPullLoveAdmission, retirePullLoveAdmissions } from '../sync/pull-love-admissions';
 import { tombstoneLove } from '../sync/tombstones';
@@ -492,9 +492,20 @@ export const lovePutExecutor: Executor = {
       };
     }
     const outcome = await createWithReconcile(op, ctx, (remote) => sameDigest(op, remote));
-    if (outcome.kind === 'succeeded') {
+    if (outcome.kind === 'succeeded' && outcome.uri !== undefined && outcome.uri !== null) {
+      if (op.origin !== 'import')
+        ctx.m.db.tx(() =>
+          bindApiLoveCreatedOperation(ctx.m.db, {
+            did: op.did,
+            uri: outcome.uri!,
+            collection: op.collection,
+            operationId: op.id,
+            admissionIdentityKey: `love-uri:${op.did}:${op.collection}:${op.rkey}`,
+            nowMs: ctx.m.clock.nowMs(),
+          }),
+        );
       remember(ctx, op.did, key, { kind: 'love.put', uri: outcome.uri ?? null, cid: outcome.cid ?? null });
-      if (outcome.uri !== undefined && outcome.uri !== null)
+      if (op.origin === 'import')
         bindPullLoveAdmission(ctx.m.db, {
           did: op.did,
           operationId: op.id,
@@ -508,14 +519,27 @@ export const lovePutExecutor: Executor = {
   async reconcile(op, ctx) {
     if (!hasIdentity(op, ctx, ctx.collections.love)) return { kind: 'permanent', code: 'invalid_record_identity' };
     const outcome = await lookupCreate(op, ctx, (remote) => sameDigest(op, remote), 'attempts_exhausted');
-    if (outcome.kind === 'succeeded' && outcome.uri !== undefined && outcome.uri !== null)
-      bindPullLoveAdmission(ctx.m.db, {
-        did: op.did,
-        operationId: op.id,
-        uri: outcome.uri,
-        incarnationKey: `love:${outcome.uri}:import:${op.id}`,
-        nowMs: ctx.m.clock.nowMs(),
-      });
+    if (outcome.kind === 'succeeded' && outcome.uri !== undefined && outcome.uri !== null) {
+      if (op.origin !== 'import')
+        ctx.m.db.tx(() =>
+          bindApiLoveCreatedOperation(ctx.m.db, {
+            did: op.did,
+            uri: outcome.uri!,
+            collection: op.collection,
+            operationId: op.id,
+            admissionIdentityKey: `love-uri:${op.did}:${op.collection}:${op.rkey}`,
+            nowMs: ctx.m.clock.nowMs(),
+          }),
+        );
+      else
+        bindPullLoveAdmission(ctx.m.db, {
+          did: op.did,
+          operationId: op.id,
+          uri: outcome.uri,
+          incarnationKey: `love:${outcome.uri}:import:${op.id}`,
+          nowMs: ctx.m.clock.nowMs(),
+        });
+    }
     return outcome;
   },
 };

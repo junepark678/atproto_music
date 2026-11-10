@@ -157,17 +157,20 @@ Empty transition batches do not invoke it.
 ## Stage 2 implementation progress
 
 The amended schema57 commit `f94c749` is pushed. The production `love.put`
-reuse path now runs the existing-record lookup, current incarnation and exact
+reuse path runs the existing-record lookup, current incarnation and exact
 API-admission reads, import bridge updates, L2 binding/member writes, and
 admission deletion in one synchronous transaction; runner memo state changes
-only after commit. The binding reads the exact `operations.origin`, accepts
-only API origins, validates the persisted projection URI/incarnation and API
-admission identity (whose request rkey can differ from the projection rkey),
-and stores the origin without a default. It seeks only exact current-link,
-current-generation love rows. SENT rows at binding create positive proof;
-queued/held rows create pending members. Operation-GC/reopen coverage runs the
-real Node executor for each of the three API origins and verifies import does
-not create API bindings.
+only after commit. Successful new API creates now also retain their exact URI,
+operation origin, and current recipient members inside an executor transaction
+before the API admission can be removed. The binding reads the exact
+`operations.origin`, accepts only API origins, validates URI/incarnation and
+API admission identity, and stores origin without a default. It seeks only
+exact current-link/current-generation love rows. SENT rows at binding create
+positive proof; queued/held rows create pending members. A production executor
+regression projects a created love, settles its exact current-generation
+forward row, persists a signed delete event, and observes the sealed immutable
+decision through `applyRecordProof`. Operation-GC/reopen coverage for reuse
+spans all three API origins and verifies import does not create API bindings.
 
 The shared terminal `UPDATE RETURNING` result now feeds the L2 member consumer
 inside the same transaction for settlement and age/held expiry. Only exact
@@ -175,20 +178,35 @@ SENT transitions promote an aggregate; every terminal result removes its
 matching pending member. Existing B2 delivery ledger behavior and expiry
 report shape remain covered. Hint comparison invokes retained L2 comparison
 before A2 pending-removal authorization and ORs its sticky conflict result into
-the existing gate. These are binding and terminal/comparison seams only: no
-absence decision, window owner, materializer handoff or full maintenance lane
-is claimed yet. Bounded API-origin binding retention/reclamation and actual
-producer-batch pinning are still pending.
+the existing gate. The current slice adds a direct-absence preparation
+and sealing seam in `applyRecordTarget`: it requires the exact unexpired
+`live_record_evidence` delete tuple, retains the comparison fact, validates the
+selected SENT operation's persisted API origin, and stores immutable projection
+fields and the original evidence horizon before projection cleanup. Exact SENT
+settlement can promote a pending member and attach that member's persisted API
+origin to the sealed decision in the same transaction. The production
+executor/projector test covers new API binding, exact current-generation SENT
+settlement, persisted delete evidence, and decision sealing before projection
+cleanup. This does not prove delayed-window ownership, producer-batch pinning,
+a materializer, or an egress handoff. Production caller matrix and whole-path
+costs remain pending. Bounded API-origin binding retention and
+reclamation remain pending.
 
 The executor's reuse, snapshot, and import-incarnation tests exercise actual
 binding for each API origin. An instrumented real Node DB helper trace measured
 7 SQLite changed rows, 9 read calls, 8 mutation statements, and 6 returned
-rows, including singleton initialization and allocator changes; the hard
-13-row handoff bound passes. This is a helper-only trace, not the composed
-whole DECISION path. Current focused suites cover production love executor,
-recipient handoff/module boundaries, sticky facts, and SENT/failed/age/held
-settlement; migration authorizer/shape/storage, restore CLI 56→57 plus
-older-live merge, secret scan, typecheck, scoped Biome, and diff check pass.
+rows, including singleton initialization and allocator changes. The new API
+create binder measured 9 changed rows, 11 reads, 10 mutation statements, and 6
+returned rows; exact replay measured 0 changed rows /3 reads, and URI rebind
+refusal measured 0 changed rows /3 reads. These helper traces stay within the
+13-row handoff allowance. They are not the composed whole DECISION path.
+Focused suites cover production love executor, recipient
+handoff/module boundaries, sticky facts, SENT/failed/age/held settlement, and
+direct-absence fact/envelope sealing. Migration authorizer/shape/storage,
+restore CLI 56→57 plus older-live merge, secret scan, typecheck, scoped Biome,
+and diff check passed for their recorded commits. Full cold/warm/refusal/replay
+handoff combinations, producer-batch pinning, and complete actual whole-path
+traces remain pending.
 No whole-path128 or full-L2 budget proof is claimed. The next stages must
 measure actual helper, handoff and whole decision costs, retaining the hard
 96-write/16-visit/DECISION28 limits and provisional whole-read128 gate.
@@ -226,16 +244,15 @@ Those artifacts measured materialization plus one link-scoped enqueue only.
 
 ## Remaining gates
 
-The pushed checkpoint `654905a` still registers the superseded old-hash 57.
-The amendment must update the registered migration and additive schema guards
-to match the revised proposal above, then rerun the Node authorizer/shape test
-and real restore CLI against new-hash 56→57 files, plus an older-live restore.
-Old-hash authorizer and CLI receipts are historical and superseded, not
-evidence for the amended registration. Full L2 behavior, whole-path128
-traces/countercontrol, fresh Astra review of that gate, populated-L2 restore
-and remaining terminal, cleanup, and scale gates are still pending. Small
-behavior fixtures belong in `worker-node`; growing fixtures belong in
-`worker-bench` with VM/statement/returned-row bounds, not elapsed-time claims.
+Migration57 is registered at the planner-authorized revised hash above. The
+old-hash authorizer/CLI receipts are preserved and explicitly superseded; the
+new-hash authorizer, real 56→57 CLI upgrade, and older-live restore passed on
+the amended migration slice. Full L2 behavior, whole-path128 traces and
+countercontrol, fresh Astra review of that gate, populated-L2 restore, delayed
+window ownership, bounded retention/reclamation, scheduler/maintenance,
+terminal cleanup, and scale gates remain pending. Small behavior fixtures
+belong in `worker-node`; growing fixtures belong in `worker-bench` with
+VM/statement/returned-row bounds, not elapsed-time claims.
 
 
 ## Narrow request-metadata correction
