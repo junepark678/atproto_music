@@ -469,7 +469,7 @@ describe('deferred love coverage', () => {
       );
       expect(
         desiredLoved(db, link as never, override.intent as never, override.artistKey, override.trackKeyValue),
-      ).toBe(false);
+      ).toBe(true);
     });
   });
 

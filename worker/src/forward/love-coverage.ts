@@ -29,6 +29,7 @@ export function desiredLoved(
   artistKey: string,
   trackKey: string,
 ): boolean {
+  if (intent.kind === 'love') return true;
   const explicit = latestExplicitLoveIntentRecord(db, link.did, artistKey, trackKey);
   const explicitWitness =
     explicit === null
@@ -47,7 +48,6 @@ export function desiredLoved(
   ) {
     return explicit.intent === 'love';
   }
-  if (intent.kind === 'love') return true;
   if (intent.origin_class === 'operation' && intent.kind === 'unlove') return false;
   return (
     db.one(
