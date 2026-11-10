@@ -123,6 +123,20 @@ function safe(value: number, label: string, min = 0): number {
   return value;
 }
 
+export function assertLoveApiInvocationBudget(changedRows: bigint, visits: number): void {
+  if (changedRows < 0n || changedRows > BigInt(LOVE_API_WRITES))
+    throw new Error(`L2 invocation changed-row bound exceeded: ${changedRows}/96`);
+  if (!Number.isSafeInteger(visits) || visits < 0 || visits > LOVE_API_VISITS)
+    throw new Error(`L2 invocation visit bound exceeded: ${visits}/16`);
+}
+
+export function assertLoveApiDecisionBudget(reads: number, changedRows: bigint): void {
+  if (!Number.isSafeInteger(reads) || reads < 0 || reads > 128)
+    throw new Error(`L2 DECISION read bound exceeded: ${reads}/128`);
+  if (changedRows < 0n || changedRows > BigInt(LOVE_API_DECISION_COST))
+    throw new Error(`L2 DECISION unit exceeded 28 changed rows: ${changedRows}`);
+}
+
 function successor(value: number, label: string): number {
   safe(value, label);
   if (value >= Number.MAX_SAFE_INTEGER) throw new RangeError(`L2 ${label} successor is unsafe`);
@@ -303,10 +317,8 @@ function runLanePhase(
           break;
         }
         const delta = totalChanges(db) - unitChangesBefore;
-        if (delta < 0n || delta > BigInt(cost))
-          throw new Error(`L2 DECISION unit exceeded ${cost} changed rows: ${delta}`);
         const reads = observer.metric().reads - unitReadStart;
-        if (reads > 128) throw new Error(`L2 DECISION read bound exceeded: ${reads}/128`);
+        assertLoveApiDecisionBudget(reads, delta);
         budget.work += Number(delta);
         phaseWork += Number(delta);
         budget.visits++;
@@ -400,8 +412,7 @@ function runLanePhase(
         });
       }
       const currentDelta = totalChanges(db) - invocationStart;
-      if (currentDelta < 0n || currentDelta > BigInt(LOVE_API_WRITES))
-        throw new Error(`L2 invocation changed-row bound exceeded: ${currentDelta}/96`);
+      assertLoveApiInvocationBudget(currentDelta, budget.visits);
     }
 
     if (lane === 'sweep' && cursorState !== null && metaReserved > 0) {
@@ -434,8 +445,7 @@ function runLanePhase(
     if (phaseMetadata < 0 || totalDelta !== BigInt(phaseWork + phaseMetadata))
       throw new Error(`L2 ${lane} phase accounting mismatch: ${totalDelta}/${phaseWork}/${phaseMetadata}`);
     const invocationDelta = totalChanges(db) - invocationStart;
-    if (invocationDelta < 0n || invocationDelta > BigInt(LOVE_API_WRITES))
-      throw new Error(`L2 invocation changed-row bound exceeded: ${invocationDelta}/96`);
+    assertLoveApiInvocationBudget(invocationDelta, budget.visits);
     if (invocationDelta - BigInt(budget.work) > BigInt(LOVE_API_METADATA_RESERVE))
       throw new Error('L2 invocation metadata reserve exceeded');
     if (budget.visits > LOVE_API_VISITS) throw new Error('L2 invocation visit budget exceeded');
@@ -464,8 +474,7 @@ function updateLaneTurn(db: Db, nowMs: number, turn: number, budget: Budget, inv
   const delta = totalChanges(db) - before;
   if (updated > 1 || delta > 1n) throw new Error('L2 lane turn exceeded its metadata reservation');
   const invocationDelta = totalChanges(db) - invocationStart;
-  if (invocationDelta < 0n || invocationDelta > BigInt(LOVE_API_WRITES))
-    throw new Error(`L2 invocation changed-row bound exceeded before lane commit: ${invocationDelta}/96`);
+  assertLoveApiInvocationBudget(invocationDelta, budget.visits);
   if (invocationDelta - BigInt(budget.work) > BigInt(LOVE_API_METADATA_RESERVE))
     throw new Error('L2 invocation metadata reserve exceeded before lane commit');
   budget.metadata += Number(delta);
@@ -563,9 +572,7 @@ export function runLoveApiMaintenance(
     });
   }
   const writeDelta = totalChanges(workDb) - invocationStart;
-  if (writeDelta < 0n || writeDelta > BigInt(LOVE_API_WRITES))
-    throw new Error(`L2 invocation changed-row bound exceeded: ${writeDelta}/96`);
-  if (budget.visits > LOVE_API_VISITS) throw new Error(`L2 invocation visit bound exceeded: ${budget.visits}/16`);
+  assertLoveApiInvocationBudget(writeDelta, budget.visits);
   const actualMetadata = Number(writeDelta) - budget.work;
   if (actualMetadata < 0 || actualMetadata > LOVE_API_METADATA_RESERVE)
     throw new Error(`L2 invocation metadata reserve exceeded: ${actualMetadata}/12`);

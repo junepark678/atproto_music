@@ -457,18 +457,27 @@ whole-L2 acceptance or readiness. The audit and repair direction are
    pending. Migration57 remains frozen at the approved hash above.
 6. Timer wake classification now uses useful semantic outcomes, not visits,
    due rows, or cursor movement: useful L2 work requests a 1-second wake and
-   quiet/metadata-only work requests 30 seconds. The metadata-only timer test
-   records the 30,100 ms schedule. Full useful-mutation, failure-after-earlier-
-   lane-commit, B2 independence, and preserved earlier-deadline timer cases
+   quiet/metadata-only work requests 30 seconds. Timer tests record the 30,100
+   ms metadata-only wake and 1,100 ms useful decision wake. An injected L2
+   initialization failure after a committed B2 `rr` frontier pass leaves that
+   B2 pass intact and preserves the earlier 5,100 ms retry deadline. This
+   covers one failure ordering; broader B2 independence and deadline scenarios
    remain pending.
 7. A replay mismatch now persists a shorter existing horizon before refusing.
    Payload-only mismatch does not create an authorization comparison conflict;
    only an actual action/CID disagreement records sticky negative authority.
    The regression checks the shorter stored horizon and unchanged clean fact.
 
-Scoped evidence for this repair slice: six worker-node files / 72 tests pass;
-four worker-bench files / 16 tests pass; `npm run typecheck`, scoped Biome,
-`git diff --check`, and `scripts/test/secret-scan.test.ts` pass. The audit's
+Scoped evidence for the earlier repair slice: six worker-node files / 72 tests
+pass; four worker-bench files / 16 tests pass. The follow-up bench file passes
+13/13, including production guard controls for >96 invocation rows, >16 visits,
+>128 decision reads, and >28 decision changed rows, plus a real 40-row
+amplification injected inside the decision transaction that rolls back its
+decision, outbox, and amplified rows. The B2 failure control verifies a
+committed `rr` frontier transaction survives the L2 failure. `npm run
+typecheck`, scoped Biome, `git diff --check`, and `scripts/test/secret-scan.test.ts`
+pass. These controls do not replace the remaining invocation-wide and full
+decision matrix scenarios. The audit's
 archived red tests remain the source for the findings; no failing control is
 weakened. The whole restoration/caller matrix is still in progress: populate
 all eight L2 tables from real API admission, exact PDS/SENT and verified

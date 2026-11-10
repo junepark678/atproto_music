@@ -6,7 +6,11 @@ import type { ForwardRuntime } from '../../src/forward/forwarder';
 import { reclaimLoveApiProofRows } from '../../src/forward/love-api-maintenance';
 import { materializeLoveApiRecipientDecisions } from '../../src/forward/love-api-materializer';
 import { prepareLoveApiRecipientHandoff, sealLoveApiDirectAbsence } from '../../src/forward/love-api-recipients';
-import { runLoveApiMaintenance } from '../../src/forward/love-api-scheduler';
+import {
+  assertLoveApiDecisionBudget,
+  assertLoveApiInvocationBudget,
+  runLoveApiMaintenance,
+} from '../../src/forward/love-api-scheduler';
 import { withMigratedDb } from '../node/support/node-db';
 
 const DID = 'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa',
@@ -70,6 +74,12 @@ function seed(db: Db, n: number, pending = 0) {
   }
 }
 const total = (db: Db) => db.one<{ n: number }>('SELECT total_changes() n')!.n;
+it('trips the production invocation and decision budget guards at each bound', () => {
+  expect(() => assertLoveApiInvocationBudget(97n, 0)).toThrow(/changed-row bound exceeded/);
+  expect(() => assertLoveApiInvocationBudget(96n, 17)).toThrow(/visit bound exceeded/);
+  expect(() => assertLoveApiDecisionBudget(129, 0n)).toThrow(/DECISION read bound exceeded/);
+  expect(() => assertLoveApiDecisionBudget(128, 29n)).toThrow(/DECISION unit exceeded 28 changed rows/);
+});
 it.each([1, 8])('enforces combined invocation budget count=%i', async (n) =>
   withMigratedDb((db) => {
     seed(db, n);
@@ -261,4 +271,60 @@ it('audit metadata-only timer should wait thirty seconds', async () =>
     };
     await ext.timers!['link-backfill']!(100, timerContext as never);
     expect(schedules.at(-1)?.[1]).toBe(30100);
+  }));
+
+it('audit useful L2 decision mutation should schedule a one-second wake', async () =>
+  withMigratedDb(async (db) => {
+    seed(db, 1);
+    db.run(
+      `INSERT INTO live_pending_removal_events(uri,rev,action,cid,created_at_ms,expires_at_ms)
+       SELECT authorization_uri,authorization_rev,action,cid,1,10000 FROM love_api_comparison_facts`,
+    );
+    const { linkBackfillExtension } = await import('../../src/forward/backfill');
+    const runtime = { db, random: seededRandom(3), log: { log() {} } } as unknown as ForwardRuntime;
+    const ext = linkBackfillExtension(() => runtime);
+    const schedules: Array<[string, number, { force: boolean }?]> = [];
+    const timerContext = {
+      schedule: (name: string, at: number, options?: { force: boolean }) => schedules.push([name, at, options]),
+    };
+    await ext.timers!['link-backfill']!(100, timerContext as never);
+    expect(db.one('SELECT 1 FROM love_api_unlove_decisions')).toBeNull();
+    expect(db.one('SELECT 1 FROM love_api_recipients')).toBeNull();
+    expect(schedules.at(-1)?.[1]).toBe(1100);
+  }));
+
+it('audit L2 failure after a committed B2 lane preserves its work and the earlier backfill deadline', async () =>
+  withMigratedDb(async (db) => {
+    const { linkBackfillExtension } = await import('../../src/forward/backfill');
+    seed(db, 1);
+    db.run('DELETE FROM love_api_proof_state');
+    db.run(
+      "UPDATE linked_accounts SET forward_scrobbles=1,backfill_state='pending',backfill_next_attempt_ms=5100 WHERE id='link'",
+    );
+    db.run(
+      `INSERT INTO forward_deferred_love_maintenance(singleton,next_head_seq,lane_turn)
+       VALUES(1,2,2)`,
+    );
+    const failed: Db = {
+      all: <T>(sql: string, ...params: SqlParam[]) => db.all<T>(sql, ...params),
+      one: <T>(sql: string, ...params: SqlParam[]) => db.one<T>(sql, ...params),
+      run: (sql: string, ...params: SqlParam[]) => {
+        if (sql.startsWith('INSERT OR IGNORE INTO love_api_proof_state')) throw new Error('injected L2 lane failure');
+        return db.run(sql, ...params);
+      },
+      tx: <T>(fn: () => T extends Promise<unknown> ? never : T) => db.tx(fn),
+    };
+    const runtime = { db: failed, random: seededRandom(3), log: { log() {} } } as unknown as ForwardRuntime;
+    const ext = linkBackfillExtension(() => runtime);
+    const schedules: number[] = [];
+    await ext.timers!['link-backfill']!(100, {
+      schedule: (_name: string, at: number) => schedules.push(at),
+    } as never);
+    expect(db.one('SELECT rr_cursor,rr_frontier,rr_passes FROM forward_deferred_love_maintenance')).toEqual({
+      rr_cursor: 0,
+      rr_frontier: 1,
+      rr_passes: 1,
+    });
+    expect(db.one('SELECT 1 FROM love_api_proof_state WHERE singleton=1')).toBeNull();
+    expect(schedules.at(-1)).toBe(5100);
   }));
