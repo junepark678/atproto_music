@@ -1261,11 +1261,19 @@ describe('link routes', () => {
       "UPDATE linked_accounts SET backfill_state='running',backfill_cursor='cursor-y',backfill_done=7,backfill_total=20 WHERE id=?",
       id,
     );
+    const generationStart = links(w)[0]!.generation_start_seq;
     await call(w, 'PATCH', `/api/v1/links/${id}`, { token, body: { forwardScrobbles: false } });
+    seedBackfillScrobble(w, 4);
+    w.app.db.run("UPDATE users SET indexing_state='current' WHERE did=?", ALICE);
+    const history = w.app.db.one<{ listened_at: string; artist_key: string; track_key: string }>(
+      'SELECT listened_at,artist_key,track_key FROM scrobbles WHERE did=?',
+      ALICE,
+    )!;
+    const disabledKey = projectionListenKey(ALICE, history.listened_at, history.artist_key, history.track_key);
     w.app.db.run(
       'INSERT INTO forward_admissions(did,identity_key,path,source_service,created_at_ms,admission_seq) VALUES(?,?,?,?,?,?)',
       ALICE,
-      'listen-admitted-while-disabled',
+      disabledKey,
       'live',
       null,
       w.clock.nowMs(),
@@ -1279,7 +1287,18 @@ describe('link routes', () => {
       sync: { backfill: { state: 'pending', done: 0, total: 0 } },
     });
     expect(links(w)[0]).toMatchObject({ backfill_state: 'pending', backfill_cursor: null });
-    expect(links(w)[0]?.generation_start_seq).toBe(42);
+    expect(links(w)[0]?.generation_start_seq).toBe(generationStart);
+    expect(
+      w.app.db.all<{ to_seq: number | null }>('SELECT to_seq FROM forward_link_gaps WHERE link_id=?', id).some(
+        (gap) => gap.to_seq !== null && gap.to_seq >= 42,
+      ),
+    ).toBe(true);
+    let backfilled = 0;
+    for (let i = 0; i < 5; i++) backfilled += await runLinkBackfill(w.app.db, seededRandom(420 + i), w.clock.nowMs());
+    expect(backfilled).toBe(1);
+    expect(w.app.db.one('SELECT count(*) AS n FROM forward_outbox WHERE link_id=? AND dedupe_key=?', id, disabledKey)).toEqual({
+      n: 1,
+    });
 
     // Invalid patches and other owners' links.
     expect(

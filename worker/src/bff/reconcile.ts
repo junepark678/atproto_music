@@ -24,6 +24,7 @@ import type { Revocations } from '../app/revocations';
 import type { Logger } from '../do/contracts';
 import type { Db } from '../do/db';
 import type { NodeConfig } from '../node/config';
+import { openLinkGap } from '../forward/coverage';
 import type { OAuthService } from './oauth-client';
 
 export type SignInPolicy = Pick<NodeConfig, 'signinPolicy' | 'signinDids'>;
@@ -76,11 +77,12 @@ function signOutLocally(deps: ReconcileDeps, did: string, changed: Record<string
       add(table, db.run(`DELETE FROM ${table} WHERE did = ?`, did).rowsWritten);
     }
     add('lastfm_tokens', db.run('DELETE FROM lastfm_tokens WHERE did = ?', did).rowsWritten);
-    for (const r of db.all<{ id: string }>(
-      "SELECT id FROM linked_accounts WHERE did = ? AND status != 'revoked'",
+    for (const r of db.all<{ id: string; generation: number }>(
+      "SELECT id,generation FROM linked_accounts WHERE did = ? AND status != 'revoked'",
       did,
     )) {
       revocations.record({ kind: 'linked_account', id: r.id, did });
+      openLinkGap(db, r, 'revoked', now);
     }
     add(
       'linked_accounts',

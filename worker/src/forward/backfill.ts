@@ -12,6 +12,7 @@ import { enqueueForwards } from '../outbox/forward-enqueue';
 import type { ForwardRuntime } from './forwarder';
 import { ensureLegacyLoveIncarnation } from './love-incarnation';
 import { latestExplicitLoveIntent } from './love-intent';
+import { closeOpenLinkGap, ownsAdmissionInGap } from './coverage';
 import { resolveLoveRecording } from './love-recording';
 import { projectionListenKey } from './projection';
 
@@ -208,7 +209,13 @@ function payloadForHistoryRow(
     if (marker?.path === 'import' && sourceService(marker.source_service) === null) return null;
     if (marker?.path === 'import' && sourceService(marker.source_service) === link.service) return null;
   }
-  if (marker !== null && marker.admission_seq > link.generation_start_seq && marker.path !== 'snapshot') return null;
+  if (
+    marker !== null &&
+    marker.admission_seq > link.generation_start_seq &&
+    marker.path !== 'snapshot' &&
+    !ownsAdmissionInGap(db, link, marker.admission_seq)
+  )
+    return null;
   const loveResolution =
     row.kind === 'love' && row.recording_mbid === null
       ? resolveLoveRecording(db, {
@@ -338,6 +345,13 @@ export async function runLinkBackfill(
 ): Promise<number> {
   const maxPageSize = Math.max(1, Math.min(BACKFILL_CHUNK_SIZE, Math.trunc(chunkSize)));
   const link = db.tx(() => {
+    const staleGaps = db.all<{ id: string; generation: number; generation_start_seq: number }>(
+      `SELECT la.id,la.generation,la.generation_start_seq FROM linked_accounts la
+       WHERE la.status='active' AND la.forward_scrobbles=1 AND EXISTS (
+         SELECT 1 FROM forward_link_gaps g WHERE g.link_id=la.id AND g.generation=la.generation AND g.to_seq IS NULL
+       )`,
+    );
+    for (const stale of staleGaps) closeOpenLinkGap(db, stale, stale.generation_start_seq, now);
     const selected = db.one<LinkedAccountRow>(
       `SELECT la.* FROM linked_accounts la JOIN users u ON u.did=la.did
      WHERE la.status='active' AND la.forward_scrobbles=1 AND la.backfill_state IN ('pending','running')

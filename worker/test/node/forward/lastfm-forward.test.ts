@@ -15,12 +15,14 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { routerTransport } from '@atmusic/atproto/test-support/router-transport';
+import { trackKey } from '@atmusic/core/music-key';
 import { type FixedClock, fixedClock } from '@atmusic/core/test-support/clock';
 import { seededRandom } from '@atmusic/core/test-support/random';
 import { afterEach, describe, expect, it } from 'vitest';
 import { MemoryRevocations } from '../../../src/app/revocations';
 import type { ForwardOutboxRow } from '../../../src/app/rows';
 import { ensureAccount } from '../../../src/credentials/accounts';
+import { runLinkBackfill } from '../../../src/forward/backfill';
 import {
   BACKOFF_BASE_MS,
   holdLinkRows,
@@ -33,7 +35,7 @@ import {
 import { type ForwardRuntime, KEY_REJECTED_PROBE_MS, runForward } from '../../../src/forward/forwarder';
 import { LASTFM_CAPS, LastfmClient } from '../../../src/forward/lastfm-client';
 import { saveLink } from '../../../src/forward/links';
-import { admitForwardIdentity } from '../../../src/forward/projection';
+import { admitForwardIdentity, projectionListenKey } from '../../../src/forward/projection';
 import { UpstreamPacing } from '../../../src/forward/upstream-pacing';
 import { type LinksService, linksFeature } from '../../../src/http/links';
 import { bindPolicyFetch, createPolicyFetch } from '../../../src/node/policy-fetch';
@@ -1013,6 +1015,29 @@ describe('Last.fm forwarding', () => {
     // A revoked link gets no new rows and sends nothing.
     w.scrobbles(ALICE, 1, 'after');
     expect(w.rows(ALICE)).toHaveLength(2);
+    const listenedAt = '2026-01-14T01:00:00.000000000Z';
+    const [artistKey, trackValue] = trackKey('Revoked period', 'Covered listen');
+    w.app.db.run("UPDATE users SET indexing_state='current' WHERE did=?", ALICE);
+    w.app.db.run(
+      `INSERT INTO scrobbles(uri,cid,did,rkey,revision,artist,track,listened_at,created_at,indexed_at,artist_key,track_key)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+      `at://${ALICE}/com.example.atmusic.scrobble/revoked-period`,
+      'cid-revoked-period',
+      ALICE,
+      'revoked-period',
+      'rev-1',
+      'Revoked period',
+      'Covered listen',
+      listenedAt,
+      listenedAt,
+      listenedAt,
+      artistKey,
+      trackValue,
+    );
+    const coveredKey = projectionListenKey(ALICE, listenedAt, artistKey, trackValue);
+    expect(admitForwardIdentity(w.app.db, { did: ALICE, identityKey: coveredKey, path: 'live', now: w.clock.nowMs() })).toBe(
+      true,
+    );
     w.clock.advance(MINUTE);
     await w.run();
     expect(w.lastfm.calls.count({ nsid: 'track.scrobble' })).toBe(1);
@@ -1025,10 +1050,19 @@ describe('Last.fm forwarding', () => {
     );
     expect(relinked).toMatchObject({ created: false, resumed: 2 });
     expect(relinked.link).toMatchObject({ id: alice.id, status: 'active', last_error: null });
+    let backfilled = 0;
+    for (let i = 0; i < 5; i++) backfilled += await runLinkBackfill(w.app.db, seededRandom(2100 + i), w.clock.nowMs());
+    expect(backfilled).toBe(1);
+    expect(w.app.db.one('SELECT count(*) AS n FROM forward_link_gaps WHERE link_id=? AND to_seq IS NOT NULL', alice.id)).toEqual({
+      n: 1,
+    });
+    expect(w.app.db.one('SELECT count(*) AS n FROM forward_outbox WHERE link_id=? AND dedupe_key=?', alice.id, coveredKey)).toEqual({
+      n: 1,
+    });
     await w.run();
     expect(w.lastfm.scrobbles.at(-1)).toMatchObject({ sk: sk2 });
-    expect(w.lastfm.scrobbles.at(-1)?.items).toHaveLength(2);
-    expect(statesOf(w.rows(ALICE))).toEqual(['sent', 'sent']);
+    expect(w.lastfm.scrobbles.at(-1)?.items).toHaveLength(3);
+    expect(statesOf(w.rows(ALICE))).toEqual(['sent', 'sent', 'queued']);
 
     // Code 26: our key is suspended. Every Last.fm link pauses; ListenBrainz does not.
     w.linkLastfm(BOB, 'bob_fm');
