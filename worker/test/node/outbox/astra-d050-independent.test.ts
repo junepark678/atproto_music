@@ -3,16 +3,20 @@ import { seededRandom } from '@atmusic/core/test-support/random';
 import { expect, it } from 'vitest';
 import type { CredentialDeps } from '../../../src/credentials/accounts';
 import { ensureAccount } from '../../../src/credentials/accounts';
+import { createBox } from '../../../src/crypto/box';
 import type { Db } from '../../../src/do/db';
 import { enqueueHints } from '../../../src/do/ingest/hints';
 import { executeAuthorizedRemovals, recordPendingRemoval } from '../../../src/do/ingest/live-pending-removals';
 import { migrate } from '../../../src/do/migrate';
 import { MIGRATIONS } from '../../../src/do/schema';
 import { applyRecordProof } from '../../../src/do/write/apply-record';
+import { expireRows, HELD_RETENTION_MS, holdLinkRows, settleRows } from '../../../src/forward/forward-outbox';
 import { type ForwardRuntime, runForward } from '../../../src/forward/forwarder';
 import { LastfmClient } from '../../../src/forward/lastfm-client';
+import { saveLink } from '../../../src/forward/links';
 import { ListenbrainzClient } from '../../../src/forward/listenbrainz-client';
 import { conflictDeferredLoveAuthority } from '../../../src/forward/love-coverage-authority';
+import { remoteLoveState } from '../../../src/forward/love-delivery';
 import { noteForwardLoveCurrent } from '../../../src/forward/love-lanes';
 import { UpstreamPacing } from '../../../src/forward/upstream-pacing';
 import { enqueueRevivedLoves } from '../../../src/musicbrainz/revive-loves';
@@ -29,6 +33,7 @@ import {
   scrobble,
   seedUser,
 } from '../../write/support';
+import { testSecrets } from '../support/app';
 import { reopen, withMigratedDb } from '../support/node-db';
 
 const record = scrobble({ artist: 'Björk', track: 'Jóga' });
@@ -251,6 +256,216 @@ for (const error of ['no_recording_mbid', 'mbid_unresolved'] as const) {
     });
   }
 }
+
+for (const source of ['lastfm', 'listenbrainz'] as const) {
+  it(`enforces source exclusion at production enqueue and wire dispatch for ${source}`, async () => {
+    await withMigratedDb(async (db) => {
+      seedLink(db);
+      const target = source === 'listenbrainz' ? 'excluded-target-lastfm' : 'excluded-target-listenbrainz';
+      const targetService = source === 'listenbrainz' ? 'lastfm' : 'listenbrainz';
+      if (source === 'lastfm') db.run("UPDATE linked_accounts SET service='lastfm' WHERE id='replacement-link'");
+      db.run(
+        `INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,created_at_ms,updated_at_ms)
+         VALUES(?,?,?,'target',X'00','fixture',?,?)`,
+        target,
+        ALICE,
+        targetService,
+        NOW_MS,
+        NOW_MS,
+      );
+      const operationId = `source-excluded-${source}`;
+      expect(
+        enqueueForwards(db, {
+          did: ALICE,
+          excludeSourceService: source,
+          items: [
+            {
+              kind: 'unlove',
+              operationId,
+              payload: {
+                artist: 'Excluded Artist',
+                track: 'Excluded Track',
+                origin: source,
+                recordingMbid: REVIVAL_MBID,
+              },
+            },
+          ],
+          now: NOW_MS,
+          random: rng,
+        }),
+      ).toBe(1);
+      expect(
+        db.all<{ link_id: string }>(
+          'SELECT link_id FROM forward_outbox WHERE dedupe_key=? ORDER BY link_id',
+          operationId,
+        ),
+      ).toEqual([{ link_id: target }]);
+      const sent = await forward(db);
+      expect(sent.report.requests).toBe(1);
+      expect(
+        db.one<{ state: string }>(
+          'SELECT state FROM forward_outbox WHERE link_id=? AND dedupe_key=?',
+          target,
+          operationId,
+        ),
+      ).toEqual({ state: 'sent' });
+      expect(
+        db.one<{ n: number }>(
+          'SELECT count(*) AS n FROM forward_outbox WHERE link_id=? AND dedupe_key=?',
+          'replacement-link',
+          operationId,
+        ),
+      ).toEqual({ n: 0 });
+    });
+  });
+}
+
+it('keeps equal-millisecond love/unlove FIFO through settlement and uses the delivery ledger after row cleanup', async () => {
+  await withMigratedDb(async (db) => {
+    seedLink(db);
+    const items = [
+      {
+        kind: 'love' as const,
+        operationId: 'fifo-love-1',
+        payload: { artist: 'FIFO Artist', track: 'FIFO Track', recordingMbid: REVIVAL_MBID },
+      },
+      {
+        kind: 'unlove' as const,
+        operationId: 'fifo-unlove',
+        payload: { artist: 'FIFO Artist', track: 'FIFO Track', recordingMbid: REVIVAL_MBID },
+      },
+      {
+        kind: 'love' as const,
+        operationId: 'fifo-love-2',
+        payload: { artist: 'FIFO Artist', track: 'FIFO Track', recordingMbid: REVIVAL_MBID },
+      },
+    ];
+    expect(enqueueForwards(db, { did: ALICE, items, now: NOW_MS, random: rng })).toBe(3);
+    const feedback: number[] = [];
+    for (let attempt = 0; attempt < 4 && feedback.length < items.length; attempt++)
+      feedback.push(...(await forward(db)).feedbacks.map((row) => row.score));
+    expect(feedback).toEqual([1, 0, 1]);
+    const [fifoArtist, fifoTrack] = trackKey('FIFO Artist', 'FIFO Track');
+    expect(remoteLoveState(db, { id: 'replacement-link', generation: 1 }, fifoArtist, fifoTrack)).toBe('love');
+    expect(
+      db.one(
+        'SELECT last_sent_kind,last_sent_dedupe_key FROM forward_love_delivery WHERE link_id=? AND love_artist_key=? AND love_track_key=?',
+        'replacement-link',
+        fifoArtist,
+        fifoTrack,
+      ),
+    ).toEqual({ last_sent_kind: 'love', last_sent_dedupe_key: 'fifo-love-2' });
+    db.run("DELETE FROM forward_outbox WHERE link_id='replacement-link' AND kind IN ('love','unlove')");
+    expect(remoteLoveState(db, { id: 'replacement-link', generation: 1 }, fifoArtist, fifoTrack)).toBe('love');
+  });
+});
+
+it('resumes a held love through same-remote relink and sends it exactly once', async () => {
+  await withMigratedDb(async (db) => {
+    seedLink(db);
+    const operationId = 'held-resumed-love';
+    expect(
+      enqueueForwards(db, {
+        did: ALICE,
+        items: [
+          {
+            kind: 'love',
+            operationId,
+            payload: { artist: 'Held Artist', track: 'Held Track', recordingMbid: REVIVAL_MBID },
+          },
+        ],
+        now: NOW_MS,
+        random: rng,
+      }),
+    ).toBe(1);
+    const row = db.one<{ id: string }>('SELECT id FROM forward_outbox WHERE dedupe_key=?', operationId)!;
+    expect(holdLinkRows(db, 'replacement-link', NOW_MS, 1)).toBe(1);
+    const relinked = saveLink(
+      {
+        db,
+        clock: { nowMs: () => NOW_MS },
+        random: rng,
+        box: createBox(testSecrets().encryptionKeys, rng),
+      },
+      { did: ALICE, service: 'listenbrainz', remoteUser: 'alice', credential: 'replacement-token' },
+    );
+    expect(relinked).toMatchObject({ created: false, resumed: 1, link: { generation: 1 } });
+    expect(db.one('SELECT state FROM forward_outbox WHERE id=?', row.id)).toEqual({ state: 'queued' });
+    expect((await forward(db)).feedbacks).toEqual([{ recordingMbid: REVIVAL_MBID, score: 1 }]);
+    expect((await forward(db)).feedbacks).toEqual([]);
+  });
+});
+
+it('expires a held row without transport and retains its local receipt', async () => {
+  await withMigratedDb(async (db) => {
+    seedLink(db);
+    const operationId = 'held-expired-unlove';
+    enqueueForwards(db, {
+      did: ALICE,
+      items: [
+        {
+          kind: 'unlove',
+          operationId,
+          payload: { artist: 'Expired Artist', track: 'Expired Track', recordingMbid: REVIVAL_MBID },
+        },
+      ],
+      now: NOW_MS,
+      random: rng,
+    });
+    const row = db.one<{ id: string }>('SELECT id FROM forward_outbox WHERE dedupe_key=?', operationId)!;
+    expect(holdLinkRows(db, 'replacement-link', NOW_MS, 1)).toBe(1);
+    db.run('UPDATE forward_outbox SET updated_at_ms=? WHERE id=?', NOW_MS - HELD_RETENTION_MS - 1, row.id);
+    expect(expireRows(db, NOW_MS).held).toBe(1);
+    expect(db.one('SELECT state,last_error FROM forward_outbox WHERE id=?', row.id)).toEqual({
+      state: 'expired',
+      last_error: 'held_expired',
+    });
+    expect(
+      db.one(
+        "SELECT retired_at_ms FROM forward_receipts WHERE link_id='replacement-link' AND kind='unlove' AND dedupe_key=?",
+        operationId,
+      ),
+    ).toEqual({ retired_at_ms: null });
+    expect((await forward(db)).feedbacks).toEqual([]);
+  });
+});
+
+it('does not settle or dispatch a stale-generation row after a real remote rotation', async () => {
+  await withMigratedDb(async (db) => {
+    seedLink(db);
+    const operationId = 'stale-generation-love';
+    enqueueForwards(db, {
+      did: ALICE,
+      items: [
+        {
+          kind: 'love',
+          operationId,
+          payload: { artist: 'Stale Artist', track: 'Stale Track', recordingMbid: REVIVAL_MBID },
+        },
+      ],
+      now: NOW_MS,
+      random: rng,
+    });
+    const row = db.one<{ id: string; generation: number }>(
+      'SELECT id,generation FROM forward_outbox WHERE dedupe_key=?',
+      operationId,
+    )!;
+    const rotated = saveLink(
+      {
+        db,
+        clock: { nowMs: () => NOW_MS },
+        random: seededRandom(889),
+        box: createBox(testSecrets().encryptionKeys, rng),
+      },
+      { did: ALICE, service: 'listenbrainz', remoteUser: 'alice-v2', credential: 'replacement-token' },
+    );
+    expect(rotated.link.generation).toBe(2);
+    settleRows(db, [row.id], 'sent', NOW_MS + 1, null, true, row.generation);
+    expect(db.one('SELECT state FROM forward_outbox WHERE id=?', row.id)).toEqual({ state: 'expired' });
+    expect((await forward(db)).feedbacks).toEqual([]);
+    expect(db.one('SELECT count(*) AS n FROM forward_love_delivery')).toEqual({ n: 0 });
+  });
+});
 
 for (const error of ['no_recording_mbid', 'mbid_unresolved'] as const) {
   it(`revives an owned ${error} unlove with an exact child witness and one ListenBrainz effect`, async () => {
