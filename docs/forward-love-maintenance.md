@@ -72,7 +72,7 @@ finding01 closure.
 | Full prior-state transport matrix | The named transport tests above cover selected queued, held, sent, expired, and rotated states. | RESIDUAL for the complete current/no-prior-love × queued/held/sent/failed/expired/ignored/cancelled matrix, revoke→unlove→resume/relink permutations, and after-DONE cancel/rearm `[1,0]` proof on both services. MBID revival is ListenBrainz-only. |
 | Source-excluded relove and survivor controls | No current test combines `stageLovePage`/`writePullSlice`/verified `applyRecordProof` with source-excluded real wire effects and both survivor/no-survivor unlove outcomes. | RESIDUAL. Do not infer these producer-to-wire controls from enqueue/evaluator helpers. |
 | Verified love-record update caller | `docs/planning/PLAN-sync-nowplaying-musicbrainz.md` records that a verified canonical identity change currently does not enqueue the replacement love or remove the old remote love. `worker/test/node/forward/love-authority-signed.test.ts` labels manual update cases as a FUTURE producer model. | ACCEPTED best-effort limitation; old remote love may remain. Manual-enqueue tests are not current caller coverage. No automatic update behavior is implemented here. |
-| Cross-slice acceptance | L2, R12, and the separate 48-hour acceptance work | DEFERRED to their owning slices; this B2 matrix does not close those requirements or all of finding01. |
+| Cross-slice acceptance | L2, R12, and finding 48 (pull-love cancellation) | DEFERRED to their owning slices; this B2 matrix does not close those requirements or all of finding01. |
 
 Focused commands for the new restore and wire rows:
 
