@@ -24,17 +24,30 @@ const item: NowPlaying = {
 };
 const response = { nowPlaying: item, serverTime: '2026-01-15T12:00:00Z' };
 type NowPlayingResponse = { nowPlaying: NowPlaying | null; serverTime: string };
-function setup(value: typeof response = response, profileDid: Did = did, serverOffsetMs = 0) {
+async function setup(
+  value: typeof response = response,
+  profileDid: Did = did,
+  serverOffsetMs = 0,
+  serverTimeNow = false,
+) {
+  Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
   const nowPlaying = vi.fn(async () => ({
     ...value,
-    serverTime: serverOffsetMs === 0 ? value.serverTime : new Date(Date.now() + serverOffsetMs).toISOString(),
+    serverTime: serverTimeNow
+      ? new Date(Date.now() + serverOffsetMs).toISOString()
+      : serverOffsetMs === 0
+        ? value.serverTime
+        : new Date(Date.now() + serverOffsetMs).toISOString(),
   }));
   const api = { nowPlaying } as unknown as ApiClient;
   const root = document.createElement('div');
   document.body.append(root);
   const renderProfile = (nextDid: Did, owner = true) =>
     render(<NowPlayingCard api={api} did={nextDid} owner={owner} />, root);
-  renderProfile(profileDid);
+  await act(async () => {
+    renderProfile(profileDid);
+    await Promise.resolve();
+  });
   return {
     root,
     nowPlaying,
@@ -65,10 +78,12 @@ it('ticks elapsed time against the server clock skew and refreshes on visibility
   Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
   vi.setSystemTime(new Date('2026-01-15T12:00:00Z'));
   const clockItem = { ...item, startedAt: '2026-01-15T11:48:31Z' };
-  const app = setup({ nowPlaying: clockItem, serverTime: response.serverTime }, did, 30_000);
+  const app = await setup({ nowPlaying: clockItem, serverTime: response.serverTime }, did, 30_000);
   await vi.waitFor(() => expect(app.root.textContent).toContain('for 11 min'));
   expect(app.root.querySelector('time')?.getAttribute('datetime')).toBe(clockItem.startedAt);
-  await vi.advanceTimersByTimeAsync(15_000);
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(15_000);
+  });
   await vi.waitFor(() => expect(app.root.textContent).toContain('for 12 min'));
   await vi.advanceTimersByTimeAsync(45_000);
   await vi.waitFor(() => expect(app.root.textContent).toContain('for 12 min'));
@@ -171,22 +186,24 @@ it('clears an owner-only snapshot synchronously and fences its old session respo
 });
 
 it('keeps the newer empty listening feed when an older request completes later', async () => {
-  const older = deferred<{ items: (typeof feedItem)[] }>();
-  const newer = deferred<{ items: (typeof feedItem)[] }>();
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2026-01-15T12:00:00Z'));
+  const older = deferred<{ items: (typeof feedItem)[]; serverTime: string }>();
+  const newer = deferred<{ items: (typeof feedItem)[]; serverTime: string }>();
   const nowPlayingFeed = vi.fn().mockReturnValueOnce(older.promise).mockReturnValueOnce(newer.promise);
   const api = { nowPlayingFeed } as unknown as ApiClient;
   const root = document.createElement('div');
   document.body.append(root);
-  render(<ListeningNow api={api} />, root);
+  render(<ListeningNow api={api} viewer={did} />, root);
   await vi.waitFor(() => expect(nowPlayingFeed).toHaveBeenCalledTimes(1));
   document.dispatchEvent(new Event('visibilitychange'));
   await vi.waitFor(() => expect(nowPlayingFeed).toHaveBeenCalledTimes(2));
   await act(async () => {
-    newer.resolve({ items: [] });
+    newer.resolve({ items: [], serverTime: response.serverTime });
     await newer.promise;
   });
   await act(async () => {
-    older.resolve({ items: [feedItem] });
+    older.resolve({ items: [feedItem], serverTime: response.serverTime });
     await older.promise;
   });
   expect(root.querySelector('.listening-now')).toBeNull();
@@ -195,24 +212,26 @@ it('keeps the newer empty listening feed when an older request completes later',
 });
 
 it('clears listening feed state on API replacement and ignores old API responses', async () => {
-  const oldRefresh = deferred<{ items: (typeof feedItem)[] }>();
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2026-01-15T12:00:00Z'));
+  const oldRefresh = deferred<{ items: (typeof feedItem)[]; serverTime: string }>();
   const oldApi = {
     nowPlayingFeed: vi
       .fn()
-      .mockResolvedValueOnce({ items: [feedItem] })
+      .mockResolvedValueOnce({ items: [feedItem], serverTime: response.serverTime })
       .mockReturnValueOnce(oldRefresh.promise),
   };
   const newApi = { nowPlayingFeed: vi.fn().mockRejectedValue(new Error('session unavailable')) };
   const root = document.createElement('div');
   document.body.append(root);
-  const renderFeed = (api: ApiClient) => render(<ListeningNow api={api} />, root);
+  const renderFeed = (api: ApiClient) => render(<ListeningNow api={api} viewer={did} />, root);
   renderFeed(oldApi as unknown as ApiClient);
   await vi.waitFor(() => expect(root.textContent).toContain('Jóga'));
   document.dispatchEvent(new Event('visibilitychange'));
   await vi.waitFor(() => expect(oldApi.nowPlayingFeed).toHaveBeenCalledTimes(2));
   renderFeed(newApi as unknown as ApiClient);
   expect(root.querySelector('.listening-now')).toBeNull();
-  oldRefresh.resolve({ items: [feedItem] });
+  oldRefresh.resolve({ items: [feedItem], serverTime: response.serverTime });
   await Promise.resolve();
   await vi.waitFor(() => expect(newApi.nowPlayingFeed).toHaveBeenCalledTimes(1));
   expect(root.querySelector('.listening-now')).toBeNull();
@@ -223,7 +242,13 @@ it('clears listening feed state on API replacement and ignores old API responses
 it('clamps progress, exposes progress values, and displays private sharing without DID text', async () => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date('2026-01-15T12:10:00Z'));
-  const app = setup({ ...response, serverTime: '2026-01-15T12:10:00Z' });
+  const app = await setup({
+    nowPlaying: { ...item, expiresAt: '2026-01-15T12:13:00Z' },
+    serverTime: '2026-01-15T12:10:00Z',
+  });
+  await act(async () => {
+    await Promise.resolve();
+  });
   await vi.waitFor(() => expect(app.root.querySelector('progress')).not.toBeNull());
   const bar = app.root.querySelector('progress')!;
   expect(bar.value).toBe(180);
@@ -241,7 +266,7 @@ it('omits progress when duration is unknown', async () => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date('2026-01-15T12:00:00Z'));
   const { durationSeconds: _durationSeconds, ...withoutDuration } = item;
-  const app = setup({
+  const app = await setup({
     nowPlaying: {
       ...withoutDuration,
       musicbrainz: {
@@ -268,7 +293,7 @@ it('formats elapsed and track duration labels beyond one hour', async () => {
     startedAt: '2026-01-15T10:45:00Z',
     durationSeconds: 3700,
   };
-  const app = setup({ nowPlaying: longTrack, serverTime: '2026-01-15T12:00:30Z' });
+  const app = await setup({ nowPlaying: longTrack, serverTime: '2026-01-15T12:00:30Z' });
   await vi.waitFor(() => expect(app.root.textContent).toContain('for 1 hr 15 min'));
   expect(app.root.querySelector('progress')?.getAttribute('aria-valuetext')).toBe('1:01:40 / 1:01:40');
   app.cleanup();
@@ -279,7 +304,7 @@ it('fills an absent submitted album with a muted MusicBrainz release title', asy
   vi.setSystemTime(new Date('2026-01-15T12:00:00Z'));
   const { album: _album, ...withoutAlbum } = item;
   const { durationSeconds: _duration, ...withoutDuration } = withoutAlbum;
-  const app = setup({
+  const app = await setup({
     nowPlaying: {
       ...withoutDuration,
       musicbrainz: {
@@ -307,7 +332,7 @@ it('fills an absent submitted album with a muted MusicBrainz release title', asy
 it('keeps submitted album text ahead of the matched MusicBrainz release title', async () => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date('2026-01-15T12:00:00Z'));
-  const app = setup({
+  const app = await setup({
     nowPlaying: {
       ...item,
       musicbrainz: {
@@ -336,7 +361,7 @@ it('keeps submitted album text ahead of the matched MusicBrainz release title', 
 it('links current track, artist and release with validated IDs and safe external-link attributes', async () => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date('2026-01-15T12:00:00Z'));
-  const app = setup({
+  const app = await setup({
     nowPlaying: {
       ...item,
       recordingMbid,
@@ -374,7 +399,7 @@ it('links current track, artist and release with validated IDs and safe external
 it('loads matched release art from the same-origin cache endpoint with a decorative lazy image', async () => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date('2026-01-15T12:00:00Z'));
-  const app = setup({
+  const app = await setup({
     nowPlaying: {
       ...item,
       releaseMbid: artistMbid,
@@ -407,7 +432,7 @@ it('loads matched release art from the same-origin cache endpoint with a decorat
 it('uses a valid submitted release ID when no matched release ID exists', async () => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date('2026-01-15T12:00:00Z'));
-  const app = setup({ nowPlaying: { ...item, releaseMbid }, serverTime: response.serverTime });
+  const app = await setup({ nowPlaying: { ...item, releaseMbid }, serverTime: response.serverTime });
   await vi.waitFor(() =>
     expect(app.root.querySelector('.now-playing-cover')?.getAttribute('src')).toBe(`/api/v1/cover-art/${releaseMbid}`),
   );
@@ -417,7 +442,7 @@ it('uses a valid submitted release ID when no matched release ID exists', async 
 it('omits cover art when the release ID is missing or invalid', async () => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date('2026-01-15T12:00:00Z'));
-  const app = setup({ nowPlaying: { ...item, releaseMbid: 'not-a-uuid' }, serverTime: response.serverTime });
+  const app = await setup({ nowPlaying: { ...item, releaseMbid: 'not-a-uuid' }, serverTime: response.serverTime });
   await vi.waitFor(() => expect(app.root.textContent).toContain('Jóga'));
   expect(app.root.querySelector('.now-playing-cover')).toBeNull();
   app.cleanup();
@@ -453,6 +478,110 @@ it('falls back to the glyph after an image error and resets when the release cha
   });
   expect(next.getAttribute('alt')).toBe('');
   expect(root.textContent).not.toContain(did);
+  render(null, root);
+  root.remove();
+});
+
+it('drops the listening rail synchronously on viewer change and fences the prior request', async () => {
+  Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+  const oldViewer = did;
+  const nextViewer = 'did:plc:bbbbbbbbbbbbbbbbbbbbbbbb' as Did;
+  const oldRead = deferred<{ items: (typeof feedItem)[]; serverTime: string }>();
+  const nextRead = deferred<{ items: (typeof feedItem)[]; serverTime: string }>();
+  const nowPlayingFeed = vi
+    .fn()
+    .mockResolvedValueOnce({ items: [feedItem], serverTime: response.serverTime })
+    .mockReturnValueOnce(oldRead.promise)
+    .mockReturnValueOnce(nextRead.promise);
+  const api = { nowPlayingFeed } as unknown as ApiClient;
+  const root = document.createElement('div');
+  document.body.append(root);
+  const renderViewer = (viewer: Did) => render(<ListeningNow api={api} viewer={viewer} />, root);
+  renderViewer(oldViewer);
+  await act(async () => {
+    await Promise.resolve();
+  });
+  await vi.waitFor(() => expect(nowPlayingFeed).toHaveBeenCalledTimes(1));
+  await vi.waitFor(() => expect(root.textContent).toContain('Jóga'));
+  document.dispatchEvent(new Event('visibilitychange'));
+  await vi.waitFor(() => expect(nowPlayingFeed).toHaveBeenCalledTimes(2));
+  renderViewer(nextViewer);
+  expect(root.querySelector('.listening-now')).toBeNull();
+  await vi.waitFor(() => expect(nowPlayingFeed).toHaveBeenCalledTimes(3));
+  oldRead.resolve({ items: [feedItem], serverTime: response.serverTime });
+  nextRead.resolve({ items: [], serverTime: response.serverTime });
+  await Promise.resolve();
+  expect(root.querySelector('.listening-now')).toBeNull();
+  render(null, root);
+  root.remove();
+});
+
+it('expires a profile at the next existing elapsed tick and treats equality as expired', async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2026-01-15T12:02:45Z'));
+  const app = await setup({ nowPlaying: item, serverTime: '2026-01-15T12:02:45Z' }, did, 0, true);
+  await vi.waitFor(() => expect(app.root.querySelector('.now-playing-card')).not.toBeNull());
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(15_000);
+  });
+  expect(app.root.querySelector('.now-playing-card')).toBeNull();
+  expect(app.root.textContent).toContain('Nothing playing right now');
+  app.cleanup();
+
+  vi.setSystemTime(new Date('2026-01-15T12:03:00Z'));
+  const equal = await setup({ nowPlaying: item, serverTime: '2026-01-15T12:03:00Z' });
+  await vi.waitFor(() => expect(equal.root.textContent).toContain('Nothing playing right now'));
+  expect(equal.root.querySelector('.now-playing-card')).toBeNull();
+  equal.cleanup();
+});
+
+it('uses server skew on both sides of client time at the expiry boundary', async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2026-01-15T12:02:30Z'));
+  const ahead = await setup({ nowPlaying: item, serverTime: response.serverTime }, did, 30_000);
+  expect(ahead.root.querySelector('.now-playing-card')).toBeNull();
+  expect(ahead.root.textContent).toContain('Nothing playing right now');
+  ahead.cleanup();
+
+  vi.setSystemTime(new Date('2026-01-15T12:03:30Z'));
+  const behind = await setup({ nowPlaying: item, serverTime: response.serverTime }, did, -30_000);
+  expect(behind.root.querySelector('.now-playing-card')).toBeNull();
+  expect(behind.root.textContent).toContain('Nothing playing right now');
+  behind.cleanup();
+
+  vi.setSystemTime(new Date('2026-01-15T12:02:59.999Z'));
+  const before = await setup({ nowPlaying: item, serverTime: response.serverTime }, did, 0, true);
+  expect(before.root.querySelector('.now-playing-card')).not.toBeNull();
+  before.cleanup();
+});
+
+it('expires rail entries at successive skew-corrected deadlines without renewing on poll failure', async () => {
+  vi.useFakeTimers();
+  Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+  vi.setSystemTime(new Date('2026-01-15T12:00:00Z'));
+  const first = { ...item, track: 'First expires', expiresAt: '2026-01-15T12:01:00Z' };
+  const second = { ...item, track: 'Second expires', expiresAt: '2026-01-15T12:02:00Z' };
+  const nowPlayingFeed = vi
+    .fn()
+    .mockResolvedValueOnce({
+      items: [
+        { ...feedItem, nowPlaying: first },
+        { ...feedItem, did: 'did:plc:bbbbbbbbbbbbbbbbbbbbbbbb' as Did, handle: 'second.example', nowPlaying: second },
+      ],
+      serverTime: '2026-01-15T12:00:00Z',
+    })
+    .mockRejectedValue(new Error('temporary read failure'));
+  const api = { nowPlayingFeed } as unknown as ApiClient;
+  const root = document.createElement('div');
+  document.body.append(root);
+  render(<ListeningNow api={api} viewer={did} />, root);
+  await vi.waitFor(() => expect(root.textContent).toContain('First expires'));
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(root.textContent).not.toContain('First expires');
+  expect(root.textContent).toContain('Second expires');
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(root.querySelector('.listening-now')).toBeNull();
+  expect(nowPlayingFeed).toHaveBeenCalledTimes(5);
   render(null, root);
   root.remove();
 });
