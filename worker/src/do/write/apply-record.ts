@@ -55,8 +55,8 @@ import { reasonText, type ScrobbleRow, validateScrobbleRecord } from '@atmusic/c
 import { MAX_INGEST_CBOR_BYTES, validateScrobbleBatchRecord } from '@atmusic/core/scrobble-batch';
 import { isTid } from '@atmusic/core/syntax';
 import { toStorage } from '@atmusic/core/timestamp';
-import { ensureLegacyLoveIncarnation } from '../../forward/love-incarnation';
 import { executeListenRemovals } from '../../forward/live-removal-effects';
+import { ensureLegacyLoveIncarnation } from '../../forward/love-incarnation';
 import {
   admitForwardIdentity,
   admitProjectedIdentity,
