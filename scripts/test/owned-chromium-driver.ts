@@ -16,6 +16,16 @@ const launched = startOwnedChromium({
   ...(scenario === 'reset' ? { executablePath: process.execPath, args: resetFixture } : {}),
 });
 
+if (process.send !== undefined) {
+  await new Promise<void>((resolve, reject) => {
+    process.send?.({ type: 'owned-chromium', pid: launched.pid, root: launched.root }, (error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
+  process.disconnect?.();
+}
+
 if (scenario === 'immediate') {
   void launched.terminate();
 } else if (scenario === 'microtask') {

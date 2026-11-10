@@ -1,6 +1,6 @@
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { access, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { existsSync, rmSync } from 'node:fs';
+import { access, mkdtemp, readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -20,15 +20,22 @@ import {
   spec,
 } from '../live/node_ingest_check.ts';
 import { NODE_ENV, type NodeGateContext, type NodeGateIO, runNodeGate } from '../live/node-live-gate.ts';
-import { startOwnedChromium } from '../live/owned-chromium.ts';
+import type { OwnedChromiumLaunch, OwnedChromiumStop } from '../live/owned-chromium.ts';
 import { OAUTH_ENV } from '../live/workers_oauth_check.ts';
+import { createOwnedIngestTestOwner, type OwnedIngestTestOwner } from './owned-ingest-test-owner.ts';
 
 const REPO = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const TSX = createRequire(resolve(REPO, 'package.json')).resolve('tsx/cli');
 
-const ownedRmBarriers = vi.hoisted(() => ({
-  beforeRm: null as null | ((path: string) => Promise<void>),
-  afterRm: null as null | ((path: string) => void),
+const ownedRmHook = vi.hoisted(() => ({
+  current: null as null | {
+    matches(path: string): boolean;
+    before(path: string): Promise<void>;
+    track(path: string, operation: Promise<void>): void;
+    succeeded(path: string): void;
+    failed(path: string, error: unknown): void;
+    settled(path: string): void;
+  },
 }));
 
 vi.mock('node:fs/promises', async (importOriginal) => {
@@ -37,12 +44,22 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     ...actual,
     rm: async (...args: Parameters<typeof actual.rm>) => {
       const path = String(args[0]);
-      await ownedRmBarriers.beforeRm?.(path);
-      try {
-        return await actual.rm(...args);
-      } finally {
-        ownedRmBarriers.afterRm?.(path);
-      }
+      const hook = ownedRmHook.current;
+      if (hook === null || !hook.matches(path)) return actual.rm(...args);
+      const operation = (async () => {
+        try {
+          await hook.before(path);
+          await actual.rm(...args);
+          hook.succeeded(path);
+        } catch (error) {
+          hook.failed(path, error);
+          throw error;
+        } finally {
+          hook.settled(path);
+        }
+      })();
+      hook.track(path, operation);
+      return operation;
     },
   };
 });
@@ -96,12 +113,151 @@ function makeContext(
   };
 }
 
-function killGroupForCleanup(pid: number): void {
+function processAlive(pid: number): boolean {
   try {
-    process.kill(-pid, 'SIGKILL');
-  } catch {
-    // terminate() below owns confirmation; this is only a final best-effort guard.
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== 'ESRCH';
   }
+}
+
+function deferred<T = void>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((r, j) => {
+    resolve = r;
+    reject = j;
+  });
+  return { promise, resolve, reject };
+}
+
+function rootRmProbe(owner: OwnedIngestTestOwner, root: () => string | undefined, mode: 'allow' | 'hold' | 'reject') {
+  const started = deferred<void>();
+  const settled = deferred<void>();
+  const gate = deferred<void>();
+  const state: { succeeded: boolean; error?: string; operation?: Promise<void> } = { succeeded: false };
+  const control = {
+    matches: (path: string) => path === root(),
+    async before() {
+      started.resolve();
+      if (mode === 'hold') await gate.promise;
+      if (mode === 'reject') throw new Error('injected owned-root rm failure');
+    },
+    track(path: string, operation: Promise<void>) {
+      state.operation = operation;
+      owner.trackOperation('owned-root rm ' + path, operation);
+    },
+    succeeded() {
+      state.succeeded = true;
+    },
+    failed(_path: string, error: unknown) {
+      state.error = error instanceof Error ? error.message : String(error);
+    },
+    settled() {
+      settled.resolve();
+    },
+  };
+  owner.assertActive();
+  ownedRmHook.current = control;
+  owner.deferCleanup(() => {
+    gate.resolve();
+    if (ownedRmHook.current === control) ownedRmHook.current = null;
+  });
+  return { started: started.promise, settled: settled.promise, state, release: () => gate.resolve() };
+}
+
+function observeBrowser(
+  browser: Browser,
+  contextRequested: { resolve(): void },
+  browserCloseRequested: { resolve(): void },
+): Browser {
+  return new Proxy(browser, {
+    get(target, property, receiver) {
+      if (property === 'newContext') {
+        return (...args: Parameters<Browser['newContext']>) => {
+          contextRequested.resolve();
+          return target.newContext(...args);
+        };
+      }
+      if (property === 'close') {
+        return (...args: Parameters<Browser['close']>) => {
+          browserCloseRequested.resolve();
+          return target.close(...args);
+        };
+      }
+      return Reflect.get(target, property, receiver);
+    },
+  });
+}
+
+function installStoppedBrowser(
+  owner: OwnedIngestTestOwner,
+  deps: IngestDependencies,
+): {
+  launch: () => OwnedChromiumLaunch | undefined;
+  contextRequested: Promise<void>;
+  browserCloseRequested: Promise<void>;
+  readyFulfilled: () => boolean;
+  sigstopSucceeded: () => boolean;
+  termination: () => OwnedChromiumStop | undefined;
+} {
+  let launch: OwnedChromiumLaunch | undefined;
+  let readyFulfilled = false;
+  let sigstopSucceeded = false;
+  let termination: OwnedChromiumStop | undefined;
+  let terminatePromise: Promise<OwnedChromiumStop> | undefined;
+  const contextRequested = deferred<void>();
+  const browserCloseRequested = deferred<void>();
+  deps.startBrowser = (launchDeadlineAt, cleanupDeadlineAt) => {
+    launch = owner.startChromium({ interactive: false, launchDeadlineAt, cleanupDeadlineAt });
+    const ready = launch.ready.then(
+      (browser) => {
+        readyFulfilled = true;
+        if (launch?.pid === undefined) throw new Error('owned Chromium PID is missing after ready');
+        process.kill(-launch.pid, 'SIGSTOP');
+        sigstopSucceeded = true;
+        contextRequested.resolve();
+        return observeBrowser(browser, contextRequested, browserCloseRequested);
+      },
+      (error: unknown) => {
+        contextRequested.reject(error);
+        throw error;
+      },
+    );
+    owner.trackOperation('ready and SIGSTOP witness', ready);
+    return {
+      ...launch,
+      ready,
+      terminate() {
+        terminatePromise ??= launch!.terminate();
+        owner.trackOperation('owned Chromium termination', terminatePromise);
+        void terminatePromise.then((status) => {
+          termination = status;
+        });
+        return terminatePromise;
+      },
+    };
+  };
+  return {
+    launch: () => launch,
+    contextRequested: contextRequested.promise,
+    browserCloseRequested: browserCloseRequested.promise,
+    readyFulfilled: () => readyFulfilled,
+    sigstopSucceeded: () => sigstopSucceeded,
+    termination: () => termination,
+  };
+}
+
+function ingestBudget(clockStartedAt: number) {
+  const timeoutMs = 3_000;
+  const recoveryReserveMs = Math.min(60_000, Math.floor(timeoutMs * 0.2));
+  const teardownReserveMs = Math.min(2_000, Math.floor(recoveryReserveMs / 2));
+  return {
+    launchDeadlineAt: clockStartedAt + timeoutMs - recoveryReserveMs,
+    recoveryDeadlineAt: clockStartedAt + timeoutMs - teardownReserveMs,
+    deadlineAt: clockStartedAt + timeoutMs,
+  };
 }
 
 function ioCapture() {
@@ -838,11 +994,13 @@ test('a forever-pending browser launch is terminated before evidence can return'
 });
 
 test('Node ingest reaps the actual owned startup process before returning timeout evidence', async () => {
+  const owner = createOwnedIngestTestOwner('startup timeout fixture');
   const { deps } = mockDependencies();
   const fixtureDir = await mkdtemp(join(tmpdir(), 'atmusic-ingest-test-'));
+  owner.deferCleanup(() => rmSync(fixtureDir, { recursive: true, force: true }));
   const pidFile = join(fixtureDir, 'pid');
   deps.startBrowser = (launchDeadlineAt, cleanupDeadlineAt) =>
-    startOwnedChromium({
+    owner.startChromium({
       interactive: false,
       launchDeadlineAt,
       cleanupDeadlineAt,
@@ -855,159 +1013,128 @@ test('Node ingest reaps the actual owned startup process before returning timeou
   const failures: string[] = [];
   const cleanup: string[] = [];
   const startedAt = performance.now();
-  await runNodeIngest(makeContext(failures, cleanup, { ...goodEnv, [NODE_INGEST_ENV.timeoutSeconds]: '1' }), deps);
-  const pid = Number(await readFile(pidFile, 'utf8'));
-  const emittedFailures = [...failures];
-  const emittedCleanup = [...cleanup];
+  try {
+    await runNodeIngest(makeContext(failures, cleanup, { ...goodEnv, [NODE_INGEST_ENV.timeoutSeconds]: '1' }), deps);
+    const pid = Number(await readFile(pidFile, 'utf8'));
+    const emittedFailures = [...failures];
+    const emittedCleanup = [...cleanup];
 
-  expect(performance.now() - startedAt).toBeLessThan(1_300);
-  expect(() => process.kill(pid, 0)).toThrow();
-  await new Promise((resolve) => setTimeout(resolve, 30));
-  expect(failures).toEqual(emittedFailures);
-  expect(cleanup).toEqual(emittedCleanup);
-  expect(failures).toContain('Node ingest failed during PDS identity checks');
-  await rm(fixtureDir, { recursive: true, force: true });
+    expect(performance.now() - startedAt).toBeLessThan(1_300);
+    expect(() => process.kill(pid, 0)).toThrow();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(failures).toEqual(emittedFailures);
+    expect(cleanup).toEqual(emittedCleanup);
+    expect(failures).toContain('Node ingest failed during PDS identity checks');
+  } finally {
+    await owner.cleanup();
+  }
 });
 
-test('a stopped ready Chromium is killed within the ingest deadline and its profile is confirmed removed', async () => {
+test('controlled completed teardown removes a stopped ready Chromium before the virtual hard deadline', async () => {
+  const owner = createOwnedIngestTestOwner('completed ingest teardown');
+  const clock = owner.useControlledBudgetClock();
+  const budget = ingestBudget(clock.startedAt);
   const { deps } = mockDependencies();
-  let owned: ReturnType<typeof startOwnedChromium> | undefined;
-  let readyFulfilled = false;
-  let sigstopSucceeded = false;
-  deps.startBrowser = (launchDeadlineAt, cleanupDeadlineAt) => {
-    owned = startOwnedChromium({ interactive: false, launchDeadlineAt, cleanupDeadlineAt });
-    return {
-      ...owned,
-      ready: owned.ready.then((browser) => {
-        readyFulfilled = true;
-        if (owned?.pid === undefined) throw new Error('owned Chromium PID is missing after ready');
-        process.kill(-owned.pid, 'SIGSTOP');
-        sigstopSucceeded = true;
-        return browser;
-      }),
-    };
-  };
+  const stopped = installStoppedBrowser(owner, deps);
+  const rmProbe = rootRmProbe(owner, () => stopped.launch()?.root, 'allow');
   const failures: string[] = [];
   const cleanup: string[] = [];
-  const startedAt = performance.now();
   let ingest: Promise<Awaited<ReturnType<typeof runNodeIngest>>> | undefined;
   try {
     ingest = runNodeIngest(makeContext(failures, cleanup, { ...goodEnv, [NODE_INGEST_ENV.timeoutSeconds]: '3' }), deps);
+    await stopped.contextRequested;
+    await clock.advanceTo(budget.launchDeadlineAt);
+    await stopped.browserCloseRequested;
+    await clock.advanceTo(budget.recoveryDeadlineAt);
+    await rmProbe.started;
     await ingest;
-    const elapsedMs = performance.now() - startedAt;
-    expect(owned).toBeDefined();
-    const launch = owned!;
-    const status = await launch.terminate();
+    await rmProbe.settled;
+    const launch = stopped.launch()!;
+    const status = stopped.termination();
     const evidence = {
-      readyFulfilled,
-      sigstopSucceeded,
+      readyFulfilled: stopped.readyFulfilled(),
+      sigstopSucceeded: stopped.sigstopSucceeded(),
       status,
       failures,
       cleanup,
       rootExists: existsSync(launch.root),
+      rmSucceeded: rmProbe.state.succeeded,
+      rmError: rmProbe.state.error,
+      virtualNow: clock.now(),
+      deadlineAt: budget.deadlineAt,
     };
-    expect(elapsedMs, JSON.stringify(evidence)).toBeLessThan(3_100);
-    expect(readyFulfilled, JSON.stringify(evidence)).toBe(true);
-    expect(sigstopSucceeded, JSON.stringify(evidence)).toBe(true);
+    expect(stopped.readyFulfilled(), JSON.stringify(evidence)).toBe(true);
+    expect(stopped.sigstopSucceeded(), JSON.stringify(evidence)).toBe(true);
+    expect(clock.now() - clock.startedAt, JSON.stringify(evidence)).toBeLessThanOrEqual(3_000);
+    expect(clock.now(), JSON.stringify(evidence)).toBeLessThan(budget.deadlineAt);
     expect(status, JSON.stringify(evidence)).toEqual({
       processStopped: true,
       connectionSettled: true,
       profileRemoved: true,
     });
-    expect(() => process.kill(launch.pid!, 0), JSON.stringify(evidence)).toThrow();
-    expect(() => process.kill(-launch.pid!, 0), JSON.stringify(evidence)).toThrow();
+    expect(processAlive(launch.pid!), JSON.stringify(evidence)).toBe(false);
+    owner.assertGroupGone(launch.pid!);
     await expect(access(launch.root), JSON.stringify(evidence)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(rmProbe.state.succeeded).toBe(true);
+    expect(rmProbe.state.error).toBeUndefined();
     expect(failures).not.toContain('owned browser process termination was not confirmed during teardown');
+    expect(failures).not.toContain('owned browser temporary profile removal was not confirmed during teardown');
     expect(cleanup).not.toContain(
       'owned browser temporary profile removal was not confirmed; inspect the runner temp directory',
     );
   } finally {
+    rmProbe.release();
+    await owner.cleanup();
     if (ingest !== undefined) await ingest.catch(() => undefined);
-    if (owned !== undefined) {
-      killGroupForCleanup(owned.pid!);
-      await owned.terminate();
-      await owned.ready.catch(() => undefined);
-      await rm(owned.root, { recursive: true, force: true });
-    }
   }
 });
 
-test('a deadline-expired root removal reports failure until the held real removal completes', async () => {
+test('controlled deadline expiry reports failed rm until the held real removal completes', async () => {
+  const owner = createOwnedIngestTestOwner('expired ingest teardown');
+  const clock = owner.useControlledBudgetClock();
+  const budget = ingestBudget(clock.startedAt);
   const { deps } = mockDependencies();
-  let owned: ReturnType<typeof startOwnedChromium> | undefined;
-  let readyFulfilled = false;
-  let sigstopSucceeded = false;
-  let rootToHold: string | undefined;
-  let rootRmStarted = false;
-  let rootRmSettled = false;
-  let releaseRootRm!: () => void;
-  const rootRmBarrier = new Promise<void>((resolve) => {
-    releaseRootRm = resolve;
-  });
-  let resolveRootRmSettled!: () => void;
-  const rootRmDone = new Promise<void>((resolve) => {
-    resolveRootRmSettled = resolve;
-  });
-  ownedRmBarriers.beforeRm = async (path) => {
-    if (path === rootToHold) {
-      rootRmStarted = true;
-      await rootRmBarrier;
-    }
-  };
-  ownedRmBarriers.afterRm = (path) => {
-    if (path === rootToHold) {
-      rootRmSettled = true;
-      resolveRootRmSettled();
-    }
-  };
-  deps.startBrowser = (launchDeadlineAt, cleanupDeadlineAt) => {
-    owned = startOwnedChromium({ interactive: false, launchDeadlineAt, cleanupDeadlineAt });
-    rootToHold = owned.root;
-    return {
-      ...owned,
-      ready: owned.ready.then((browser) => {
-        readyFulfilled = true;
-        if (owned?.pid === undefined) throw new Error('owned Chromium PID is missing after ready');
-        process.kill(-owned.pid, 'SIGSTOP');
-        sigstopSucceeded = true;
-        return browser;
-      }),
-    };
-  };
+  const stopped = installStoppedBrowser(owner, deps);
+  const rmProbe = rootRmProbe(owner, () => stopped.launch()?.root, 'hold');
   const failures: string[] = [];
   const cleanup: string[] = [];
-  const startedAt = performance.now();
   let ingest: Promise<Awaited<ReturnType<typeof runNodeIngest>>> | undefined;
   try {
     ingest = runNodeIngest(makeContext(failures, cleanup, { ...goodEnv, [NODE_INGEST_ENV.timeoutSeconds]: '3' }), deps);
+    await stopped.contextRequested;
+    await clock.advanceTo(budget.launchDeadlineAt);
+    await stopped.browserCloseRequested;
+    await clock.advanceTo(budget.recoveryDeadlineAt);
+    await rmProbe.started;
+    expect(rmProbe.state.succeeded).toBe(false);
+    await clock.advanceTo(budget.deadlineAt);
     await ingest;
-    const elapsedMs = performance.now() - startedAt;
-    expect(owned).toBeDefined();
-    const launch = owned!;
-    const status = await launch.terminate();
+    const launch = stopped.launch()!;
+    const status = stopped.termination();
     const rootExistsOnReturn = existsSync(launch.root);
     const evidence = {
-      readyFulfilled,
-      sigstopSucceeded,
-      rootRmStarted,
-      rootRmSettled,
+      readyFulfilled: stopped.readyFulfilled(),
+      sigstopSucceeded: stopped.sigstopSucceeded(),
+      rmSettled: false,
+      rmSucceeded: rmProbe.state.succeeded,
+      rmError: rmProbe.state.error,
       status,
       rootExistsOnReturn,
       failures,
       cleanup,
+      virtualNow: clock.now(),
+      deadlineAt: budget.deadlineAt,
     };
-    expect(elapsedMs, JSON.stringify(evidence)).toBeLessThan(3_100);
-    expect(readyFulfilled, JSON.stringify(evidence)).toBe(true);
-    expect(sigstopSucceeded, JSON.stringify(evidence)).toBe(true);
-    expect(rootRmStarted, JSON.stringify(evidence)).toBe(true);
-    expect(rootRmSettled, JSON.stringify(evidence)).toBe(false);
+    expect(clock.now(), JSON.stringify(evidence)).toBe(budget.deadlineAt);
+    expect(stopped.readyFulfilled(), JSON.stringify(evidence)).toBe(true);
+    expect(stopped.sigstopSucceeded(), JSON.stringify(evidence)).toBe(true);
     expect(status, JSON.stringify(evidence)).toEqual({
       processStopped: true,
       connectionSettled: true,
       profileRemoved: false,
     });
-    expect(() => process.kill(launch.pid!, 0), JSON.stringify(evidence)).toThrow();
-    expect(() => process.kill(-launch.pid!, 0), JSON.stringify(evidence)).toThrow();
+    expect(processAlive(launch.pid!), JSON.stringify(evidence)).toBe(false);
+    owner.assertGroupGone(launch.pid!);
     expect(rootExistsOnReturn, JSON.stringify(evidence)).toBe(true);
     expect(
       failures.some((failure) => failure.startsWith('Node ingest failed during ')),
@@ -1019,24 +1146,58 @@ test('a deadline-expired root removal reports failure until the held real remova
     );
     expect(failures).not.toContain('owned browser process termination was not confirmed during teardown');
 
-    releaseRootRm();
-    await rootRmDone;
+    rmProbe.release();
+    await rmProbe.settled;
+    expect(rmProbe.state.succeeded).toBe(true);
+    expect(rmProbe.state.error).toBeUndefined();
     expect(existsSync(launch.root)).toBe(false);
   } finally {
-    releaseRootRm();
+    rmProbe.release();
+    await owner.cleanup();
     if (ingest !== undefined) await ingest.catch(() => undefined);
-    if (owned !== undefined) {
-      killGroupForCleanup(owned.pid!);
-      await owned.terminate();
-      await owned.ready.catch(() => undefined);
-      if (rootRmStarted) await rootRmDone;
-      ownedRmBarriers.beforeRm = null;
-      ownedRmBarriers.afterRm = null;
-      await rm(owned.root, { recursive: true, force: true });
-    } else {
-      ownedRmBarriers.beforeRm = null;
-      ownedRmBarriers.afterRm = null;
-    }
+  }
+});
+
+test('a rejected owned-root rm is reported and is not mistaken for successful cleanup', async () => {
+  const owner = createOwnedIngestTestOwner('rejected ingest rm');
+  const clock = owner.useControlledBudgetClock();
+  const budget = ingestBudget(clock.startedAt);
+  const { deps } = mockDependencies();
+  const stopped = installStoppedBrowser(owner, deps);
+  const rmProbe = rootRmProbe(owner, () => stopped.launch()?.root, 'reject');
+  const failures: string[] = [];
+  const cleanup: string[] = [];
+  let ingest: Promise<Awaited<ReturnType<typeof runNodeIngest>>> | undefined;
+  try {
+    ingest = runNodeIngest(makeContext(failures, cleanup, { ...goodEnv, [NODE_INGEST_ENV.timeoutSeconds]: '3' }), deps);
+    await stopped.contextRequested;
+    await clock.advanceTo(budget.launchDeadlineAt);
+    await stopped.browserCloseRequested;
+    await clock.advanceTo(budget.recoveryDeadlineAt);
+    await rmProbe.started;
+    await rmProbe.settled;
+    await ingest;
+    const launch = stopped.launch()!;
+    const status = stopped.termination();
+    const evidence = { status, rmSucceeded: rmProbe.state.succeeded, rmError: rmProbe.state.error, failures, cleanup };
+    expect(stopped.readyFulfilled(), JSON.stringify(evidence)).toBe(true);
+    expect(stopped.sigstopSucceeded(), JSON.stringify(evidence)).toBe(true);
+    expect(status, JSON.stringify(evidence)).toMatchObject({
+      processStopped: true,
+      connectionSettled: true,
+      profileRemoved: false,
+    });
+    expect(rmProbe.state.succeeded).toBe(false);
+    expect(rmProbe.state.error).toBe('injected owned-root rm failure');
+    expect(existsSync(launch.root)).toBe(true);
+    expect(failures).toContain('owned browser temporary profile removal was not confirmed during teardown');
+    expect(cleanup).toContain(
+      'owned browser temporary profile removal was not confirmed; inspect the runner temp directory',
+    );
+  } finally {
+    rmProbe.release();
+    await owner.cleanup();
+    if (ingest !== undefined) await ingest.catch(() => undefined);
   }
 });
 
