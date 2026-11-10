@@ -399,12 +399,13 @@ Probe artifacts: `/tmp/atproto-followup-sol/finding32-sol-actual209-cost-probe.t
 `finding32-sol-actual209-cost-results.json`, and `finding32-sol-actual209-cost-probe.log`.
 Those artifacts measured materialization plus one link-scoped enqueue only.
 
-## Independent CORE audit repairs (pinned `cdb78de`)
+## Independent CORE audit repair progress (pinned `cdb78de`; fresh source acceptance pending)
 
 The independent Astra CORE/runtime/accounting audit found seven source defects;
-Sol accepted all seven. This work repairs those findings on top of the
-preserved `cdb78def7e4d7abf832bfe7a9587c9bc1c1f0af3` head. It does not claim
-whole-L2 acceptance or readiness. The audit and repair direction are
+Sol accepted the findings and repair direction. The source changes below are
+implemented on top of the preserved `cdb78def7e4d7abf832bfe7a9587c9bc1c1f0af3`
+head and await fresh source acceptance. They do not establish whole-L2
+acceptance or readiness. The audit and repair direction are
 `/tmp/atproto-followup-sol/pr210-astra-core-cdb78de.md` and
 `/tmp/atproto-followup-sol/pr210-sol-core-cdb-repair-direction.md`.
 
@@ -691,7 +692,7 @@ producer-backed handoff assertions.
 
 ## Current post-audit verification (2026-11-11)
 
-The seven Sol-accepted cdb78de repairs and the later exact-recipient backfill correction are present on branch `fix/api-love-recipient-proof`. The source snapshot measured here is `d35d1dad413bbc73f7cb7d3a4cd6a1b3dab542be`; the current PR head is `7dfa09a` plus this documentation-only provenance correction. Exact source-only `git diff cdb78de..d35d1da -- worker/src` SHA-256 is `6c2177fb05a370d66a6ff1ab5caae761e9074f381eac78f2f68aa02980f6e872` (7 files, 904 insertions, 125 deletions). The worktree was clean before the documentation updates.
+The seven findings and repair direction were accepted by Sol; the implementation awaits fresh source acceptance. The exact source-only `git diff cdb78de..b2aa525 -- worker/src` SHA-256 is `6c2177fb05a370d66a6ff1ab5caae761e9074f381eac78f2f68aa02980f6e872` (7 files, 904 insertions, 125 deletions). The backfill correction is included. No schema, DDL, or budget change occurred in that source delta; the frozen57 hash remains `54dc2d344097763e055b0f8f7f10d8f85993ccdaf0e31620b699726c35256a96`.
 
 Current scoped reruns passed: core/retention accounting 48/48 Node tests and 19/19 worker-bench tests; producer, handoff, module-boundary, backfill, and delayed-removal suites 96/96; producer-derived real CLI restore 25/25. Typecheck, scoped Biome (10 files), diff check, and secret-scan test passed. The eight-decision/eight-orphan actual scheduler bench acknowledges all eight and removes all eight orphan bindings over bounded invocations; each reported invocation is at most 96 changed rows and 16 visits, and one reaches 16 visits. The production reclaim over-visit control rolls back six fetched rows against a five-visit reservation. The decision amplification control rolls back the durable recipient/decision/outbox and all 40 injected row updates after exceeding 28 changed rows. Matching released-history query work remains flat at 100/1k/10k while the old-prefix negative control grows 1,294/12,094/120,094 SQLite VM steps.
 
