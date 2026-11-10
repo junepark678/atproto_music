@@ -4,6 +4,8 @@ import { describe, expect, it } from 'vitest';
 import type { Db, SqlParam } from '../../../src/do/db';
 import { settleRows } from '../../../src/forward/forward-outbox';
 import {
+  type AcceptedApiLoveRecipientEnvelope,
+  type ApiRecipientUnloveAck,
   type ApiRecipientUnloveArgs,
   enqueueApiRecipientUnlove,
   enqueueForwards,
@@ -31,18 +33,26 @@ function addLink(db: Db, id: string, service: 'lastfm' | 'listenbrainz', mode: '
   );
 }
 
-function addApiFact(db: Db, source: 'web' | 'lastfm' | 'listenbrainz' = 'web', sourceService: string | null = null) {
+function addApiFact(
+  db: Db,
+  source: 'web' | 'lastfm' | 'listenbrainz' = 'web',
+  sourceService: string | null = null,
+  path: 'api' | 'snapshot' | 'import' = 'api',
+  requestRkey = 'request-rkey-differs',
+) {
   db.run(
     `INSERT INTO operations(id,did,kind,origin,priority,collection,rkey,state,due_at,created_at_ms,updated_at_ms)
-     VALUES('original-love-put',?,'love.put',?,0,'com.example.atmusic.love','api-recipient','succeeded',1,1,1)`,
+     VALUES('original-love-put',?,'love.put',?,0,'com.example.atmusic.love',?,'succeeded',1,1,1)`,
     DID,
     source,
+    requestRkey,
   );
   db.run(
     `INSERT INTO love_incarnations(uri,incarnation_key,state,path,source_service,updated_at_ms)
-     VALUES(?,?,'absent','api',?,1)`,
+     VALUES(?,?,'absent',?,?,1)`,
     URI,
     INCARNATION,
+    path,
     sourceService,
   );
   db.run(
@@ -67,17 +77,28 @@ function args(
   linkId: string,
   source: 'web' | 'lastfm' | 'listenbrainz' = 'web',
   excludeSourceServices: readonly ('lastfm' | 'listenbrainz')[] = [],
+  overrides: Partial<AcceptedApiLoveRecipientEnvelope> = {},
 ): ApiRecipientUnloveArgs {
+  const envelope: AcceptedApiLoveRecipientEnvelope = {
+    did: DID,
+    recordUri: URI,
+    incarnationKey: INCARNATION,
+    apiOperationId: 'original-love-put',
+    apiRequestRkey: 'request-rkey-differs',
+    projectionRkey: 'api-recipient',
+    source,
+    sourceExclusions: excludeSourceServices,
+    projection: { artist: 'Artist', track: 'Track' },
+    authorization: { uri: URI, rev: REV },
+    ...overrides,
+  };
   return {
     did: DID,
     linkId,
     generation: 1,
     broadOperationId: BROAD,
     operationId: NARROW,
-    payload: { artist: 'Artist', track: 'Track', origin: source },
-    authorization: { uri: URI, rev: REV },
-    source,
-    excludeSourceServices,
+    envelope,
     now: NOW,
     random: seededRandom(911),
   };
@@ -136,47 +157,49 @@ function measuredRecipient(db: Db, input: ApiRecipientUnloveArgs) {
 describe('API recipient unlove handoff acknowledgements', () => {
   for (const mode of ['active', 'disabled', 'revoked'] as const) {
     for (const service of ['lastfm', 'listenbrainz'] as const) {
-      for (const reverse of [false, true]) {
-        it(`${service} ${mode}: broad and api-recipient identities coexist, reverse=${reverse}`, async () => {
-          await withMigratedDb((db) => {
-            addLink(db, 'recipient-link', service, mode);
-            addApiFact(db);
-            const broadItem = {
-              kind: 'unlove' as const,
-              operationId: BROAD,
-              payload: { artist: 'Artist', track: 'Track', origin: 'web' },
-              authorization: { uri: URI, rev: REV },
-            };
-            const recipient = () => measuredRecipient(db, args('recipient-link'));
-            if (reverse) expect(recipient().ack.status).toBe(mode === 'active' ? 'queued' : 'deferred');
-            enqueueForwards(db, {
-              did: DID,
-              linkId: 'recipient-link',
-              items: [broadItem],
-              now: NOW,
-              random: seededRandom(1),
-            });
-            if (!reverse) expect(recipient().ack.status).toBe(mode === 'active' ? 'queued' : 'deferred');
-            expect(
-              db.all<{ operation_id: string }>(
-                'SELECT operation_id FROM forward_deferred_love_witnesses WHERE link_id=? AND generation=1 ORDER BY operation_id',
+      for (const source of ['web', 'lastfm', 'listenbrainz'] as const) {
+        for (const reverse of [false, true]) {
+          it(`${source} API origin -> ${service} ${mode}: broad and api-recipient identities coexist, reverse=${reverse}`, async () => {
+            await withMigratedDb((db) => {
+              addLink(db, 'recipient-link', service, mode);
+              addApiFact(db, source);
+              const broadItem = {
+                kind: 'unlove' as const,
+                operationId: BROAD,
+                payload: { artist: 'Artist', track: 'Track', origin: source },
+                authorization: { uri: URI, rev: REV },
+              };
+              const recipient = () => measuredRecipient(db, args('recipient-link', source));
+              if (reverse) expect(recipient().ack.status).toBe(mode === 'active' ? 'queued' : 'deferred');
+              enqueueForwards(db, {
+                did: DID,
+                linkId: 'recipient-link',
+                items: [broadItem],
+                now: NOW,
+                random: seededRandom(1),
+              });
+              if (!reverse) expect(recipient().ack.status).toBe(mode === 'active' ? 'queued' : 'deferred');
+              expect(
+                db.all<{ operation_id: string }>(
+                  'SELECT operation_id FROM forward_deferred_love_witnesses WHERE link_id=? AND generation=1 ORDER BY operation_id',
+                  'recipient-link',
+                ),
+              ).toEqual([{ operation_id: BROAD }, { operation_id: NARROW }]);
+              const expected = mode === 'active' ? [BROAD, NARROW] : [BROAD, NARROW];
+              const outbox = db.all<{ dedupe_key: string }>(
+                "SELECT dedupe_key FROM forward_outbox WHERE link_id=? AND kind='unlove' ORDER BY dedupe_key",
                 'recipient-link',
-              ),
-            ).toEqual([{ operation_id: BROAD }, { operation_id: NARROW }]);
-            const expected = mode === 'active' ? [BROAD, NARROW] : [BROAD, NARROW];
-            const outbox = db.all<{ dedupe_key: string }>(
-              "SELECT dedupe_key FROM forward_outbox WHERE link_id=? AND kind='unlove' ORDER BY dedupe_key",
-              'recipient-link',
-            );
-            const intents = db.all<{ operation_id: string }>(
-              'SELECT operation_id FROM forward_deferred_love_intents WHERE link_id=? ORDER BY operation_id',
-              'recipient-link',
-            );
-            expect(
-              mode === 'active' ? outbox.map((row) => row.dedupe_key) : intents.map((row) => row.operation_id),
-            ).toEqual(expected);
+              );
+              const intents = db.all<{ operation_id: string }>(
+                'SELECT operation_id FROM forward_deferred_love_intents WHERE link_id=? ORDER BY operation_id',
+                'recipient-link',
+              );
+              expect(
+                mode === 'active' ? outbox.map((row) => row.dedupe_key) : intents.map((row) => row.operation_id),
+              ).toEqual(expected);
+            });
           });
-        });
+        }
       }
     }
   }
@@ -254,19 +277,24 @@ describe('API recipient unlove handoff acknowledgements', () => {
       });
       expect(
         enqueueApiRecipientUnlove(db, {
-          ...args('guard-link'),
-          authorization: { uri: URI, rev: '3lbcdefghijkm' },
+          ...args('guard-link', 'web', ['lastfm']),
+          envelope: {
+            ...args('guard-link', 'web', ['lastfm']).envelope,
+            authorization: { uri: URI, rev: '3lbcdefghijkm' },
+          },
         }),
       ).toMatchObject({ status: 'refused' });
       expect(
         enqueueApiRecipientUnlove(db, {
-          ...args('guard-link', 'listenbrainz', ['lastfm']),
-          source: 'listenbrainz',
-          payload: { artist: 'Artist', track: 'Track', origin: 'listenbrainz' },
+          ...args('guard-link', 'web', ['lastfm']),
+          envelope: {
+            ...args('guard-link', 'web', ['lastfm']).envelope,
+            source: 'import' as AcceptedApiLoveRecipientEnvelope['source'],
+          },
         }),
       ).toEqual({
         status: 'refused',
-        reason: 'api_source_mismatch',
+        reason: 'accepted_envelope_invalid',
       });
       expect(db.one('SELECT count(*) AS n FROM forward_deferred_love_witnesses')).toEqual({ n: 0 });
 
@@ -315,7 +343,10 @@ describe('API recipient unlove handoff acknowledgements', () => {
       expect(
         enqueueApiRecipientUnlove(db, {
           ...args('rebind-link'),
-          payload: { artist: 'Other Artist', track: 'Track', origin: 'web' },
+          envelope: {
+            ...args('rebind-link').envelope,
+            projection: { artist: 'Other Artist', track: 'Track' },
+          },
         }),
       ).toEqual({ status: 'refused', reason: 'witness_missing_or_mismatched' });
       expect(db.one("SELECT count(*) AS n FROM forward_outbox WHERE link_id='rebind-link'")).toEqual({ n: 1 });
@@ -336,6 +367,100 @@ describe('API recipient unlove handoff acknowledgements', () => {
       expect(db.one("SELECT count(*) AS n FROM forward_outbox WHERE link_id='rebind-link'")).toEqual({ n: 1 });
     });
   });
+
+  it('uses accepted snapshot/import reuse correspondence, independent of rkey reuse, operation GC, and mutable source rows', async () => {
+    for (const path of ['snapshot', 'import'] as const) {
+      for (const mode of ['active', 'disabled', 'revoked'] as const) {
+        for (const reverse of [false, true]) {
+          await withMigratedDb((db) => {
+            addLink(db, 'original-import-recipient', 'lastfm', mode);
+            addLink(db, 'broad-target', 'listenbrainz', 'active');
+            addApiFact(db, 'lastfm', 'lastfm', path, 'different-api-request-rkey');
+            db.run(
+              `INSERT INTO love_import_bridges(did,operation_id,uri,incarnation_key,source_service,state,created_at_ms)
+             VALUES(?,?,?,?,'lastfm','consumed',1)`,
+              DID,
+              'mutable-import-bridge',
+              URI,
+              INCARNATION,
+            );
+            db.run('DELETE FROM operations WHERE id=?', 'original-love-put');
+            db.run("UPDATE love_incarnations SET path='api',source_service='listenbrainz' WHERE uri=?", URI);
+            db.run("UPDATE love_import_bridges SET source_service='listenbrainz' WHERE uri=?", URI);
+            const broad = () =>
+              enqueueForwards(db, {
+                did: DID,
+                items: [
+                  {
+                    kind: 'unlove',
+                    operationId: BROAD,
+                    payload: { artist: 'Artist', track: 'Track', origin: 'lastfm' },
+                    authorization: { uri: URI, rev: REV },
+                  },
+                ],
+                excludeSourceServices: ['lastfm'],
+                now: NOW,
+                random: seededRandom(20),
+              });
+            const recipient = () =>
+              measuredRecipient(
+                db,
+                args('original-import-recipient', 'lastfm', [], {
+                  apiRequestRkey: 'different-api-request-rkey',
+                  source: 'lastfm',
+                }),
+              );
+            let ack: ApiRecipientUnloveAck | undefined;
+            if (reverse) ack = recipient().ack;
+            broad();
+            if (!reverse) ack = recipient().ack;
+            expect(ack).toEqual({ status: mode === 'active' ? 'queued' : 'deferred' });
+
+            expect(
+              db.all<{ operation_id: string }>(
+                'SELECT operation_id FROM forward_deferred_love_witnesses WHERE link_id=? ORDER BY operation_id',
+                'original-import-recipient',
+              ),
+            ).toEqual([{ operation_id: NARROW }]);
+            expect(
+              db.all<{ link_id: string; operation_id: string }>(
+                'SELECT link_id,operation_id FROM forward_deferred_love_witnesses WHERE operation_id=?',
+                BROAD,
+              ),
+            ).toEqual([{ link_id: 'broad-target', operation_id: BROAD }]);
+          });
+        }
+      }
+    }
+  });
+
+  it.each(['scrobble', 'nowplaying'] as const)(
+    'rejects exact %s identity collisions with bounded kind seeks',
+    async (kind) => {
+      await withMigratedDb((db) => {
+        addLink(db, `wrong-kind-${kind}`, 'listenbrainz', 'active');
+        addApiFact(db);
+        db.run(
+          `INSERT INTO forward_outbox(id,link_id,generation,did,kind,dedupe_key,payload_json,state,attempts,due_at,created_at_ms,updated_at_ms)
+         VALUES(?,?,?,?,?,?,'{}','queued',0,?,?,?)`,
+          `wrong-kind-row-${kind}`,
+          `wrong-kind-${kind}`,
+          1,
+          DID,
+          kind,
+          NARROW,
+          NOW,
+          NOW,
+          NOW,
+        );
+        expect(enqueueApiRecipientUnlove(db, args(`wrong-kind-${kind}`))).toEqual({
+          status: 'refused',
+          reason: 'identity_collision',
+        });
+        expect(db.one('SELECT count(*) AS n FROM forward_deferred_love_witnesses')).toEqual({ n: 0 });
+      });
+    },
+  );
 
   it('filters a source-excluded broad witness before the separately scoped recipient in both orders', async () => {
     for (const reverse of [false, true]) {

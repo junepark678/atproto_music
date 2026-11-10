@@ -607,12 +607,22 @@ describe('ListenBrainz forwarding', () => {
        ORDER BY created_at_ms DESC,rowid DESC LIMIT 1`,
       ALICE,
     )!;
-    const uri = `at://${ALICE}/com.example.atmusic.love/${operation.rkey}`;
-    const incarnationKey = `love:${uri}:api:${operation.id}`;
+    const reusedRecordRkey = '3kreusedlove1';
+    const uri = `at://${ALICE}/com.example.atmusic.love/${reusedRecordRkey}`;
+    const incarnationKey = `love:${uri}:import:${operation.id}`;
     w.app.db.run("UPDATE operations SET state='succeeded' WHERE id=?", operation.id);
     w.app.db.run(
       `INSERT INTO love_incarnations(uri,incarnation_key,state,path,source_service,updated_at_ms)
-       VALUES(?,?,'absent','api',NULL,?)`,
+       VALUES(?,?,'absent','import','lastfm',?)`,
+      uri,
+      incarnationKey,
+      w.clock.nowMs(),
+    );
+    w.app.db.run(
+      `INSERT INTO love_import_bridges(did,operation_id,uri,incarnation_key,source_service,state,created_at_ms)
+       VALUES(?,?,?,?,'lastfm','consumed',?)`,
+      ALICE,
+      'accepted-import-origin',
       uri,
       incarnationKey,
       w.clock.nowMs(),
@@ -635,10 +645,18 @@ describe('ListenBrainz forwarding', () => {
       generation: 1,
       broadOperationId,
       operationId: `${broadOperationId}:api-recipient`,
-      payload: { artist, track, recordingMbid: MBID, origin: 'web' },
-      authorization: { uri, rev: revision },
-      source: 'web',
-      excludeSourceServices: [],
+      envelope: {
+        did: ALICE,
+        recordUri: uri,
+        incarnationKey,
+        apiOperationId: operation.id,
+        apiRequestRkey: operation.rkey,
+        projectionRkey: reusedRecordRkey,
+        source: 'web',
+        sourceExclusions: [],
+        projection: { artist, track, recordingMbid: MBID },
+        authorization: { uri, rev: revision },
+      },
       now: w.clock.nowMs(),
       random: w.rt.random,
     });

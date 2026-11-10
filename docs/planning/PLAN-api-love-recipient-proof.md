@@ -34,40 +34,76 @@ rows from their transition statements. A typed synchronous observer sees those
 rows inside the transition transaction; no L2 proof hook is claimed before the
 recipient tables exist. The existing expiry report shape is unchanged.
 
-The handoff preserves ordinary `enqueueForwards`' row-count return contract.
-It preflights current link generation, API operation/source lineage, source
-exclusions, track keys, canonical survivor, identity collisions, and trusted
-authority before recording a witness or effect. Its four acknowledgements come
-from exact durable current-generation state; a witness alone is never deferred
-or replay acceptance. The witness key `(link_id,generation,operation_id)` holds
-distinct broad and `:api-recipient` identities without schema changes. Durable
-Node coverage exercises both orders, active/disabled/revoked targets and both
-services, stale/current generation, refused/replayed/queued/deferred states,
-receipt and B2-ledger non-proof, source exclusions, collisions, survivor
-checks, and paused zero-egress then exactly-once same-remote resume through
-ListenBrainz and Last.fm test transports.
+Fresh Astra stage-one review of
+`0e61254bb0f8a53af3a0e5986efbb1791f34d45e` returned **REJECT**. Sol accepted
+all four actionable findings and directed this interface repair, without a
+policy question or schema57 allocation. The retained
+verified-authority helper and shared settlement `UPDATE RETURNING` contract
+remain accepted.
 
-Actual schema-56 cold/warm adapter traces are asserted in worker-node. Across
-the service, status, and invocation-order matrix, the maximum was 11 SQLite
-changed rows (the handoff allowance is 13), 43 facade read calls, 14 facade
-mutation calls, and 21 returned rows. The cold active queued handoff measured
-9 changed rows; cold disabled/revoked deferred handoffs measured 11. Warm
-queued, terminal replay, stale-receipt refusal and retired-receipt replay
-measured zero changed rows. SQLite `total_changes()` is sampled around the
-adapter call, so counters, pointer changes and trigger/cascade effects are
-included. `one`/read `all` calls, mutating method calls, returned rows and
-changed rows are reported separately. A deliberate 14-row injected-write
-control crosses 13 and trips the hard assertion. Sol's older 24-case probe
-remains evidence for the prior #209 materialization-plus-enqueue path only.
+`enqueueApiRecipientUnlove` preserves ordinary `enqueueForwards`' row-count
+contract. It now consumes a trusted accepted API-recipient envelope from the
+future L2 binding owner. The envelope carries DID, projected record URI and
+incarnation, API operation ID and request rkey, distinct projection rkey,
+source/exclusion context, immutable projected track fields, and exact A2
+authorization. The adapter validates URI/DID/rkey/incarnation/key/auth/current
+link generation consistency, then maps that envelope to the B2 payload. It
+does not read current incarnation path/source, operations, or import-bridge
+history. Stage-one tests validate this contract but cannot claim that the
+future binder/table producer supplies it or that original API delivery has
+been proved SENT. No public caller or L2 proof hook is present.
+
+Current API-love forwarding from web, Last.fm, and ListenBrainz has no source
+exclusion. An API origin label does not imply import provenance or exclude the
+same-named recipient service. Only exclusions captured in the accepted
+envelope can refuse the target, before witnesses/effects. Broad import
+exclusions remain unchanged. The production `love.put` executor test also
+proves that a reused record can have a request `rkey` different from its
+projection URI `rkey`; an accepted envelope can preserve both through
+operation cleanup. Snapshot/import reuse fixtures and operation-GC/mutable-
+source controls exercise the adapter without consulting those mutable rows.
+
+Effect acknowledgements use exact `(link_id,kind,dedupe_key)` seeks without
+rowid ordering. Wrong-kind collisions use bounded exact seeks for the four
+existing forward kinds. There is no bridge-history query, broad link-history
+scan, new index, or schema change. Durable Node coverage exercises both
+broad/narrow orders, all three API origin labels, both services,
+active/disabled/revoked targets, current/stale generation,
+queued/deferred/replay/refused acknowledgements, exact payload/auth/key checks,
+wrong-kind collision, receipt/witness/ledger non-proof, source exclusions,
+authority and survivor negatives, and zero-egress paused then exactly-once
+same-remote resume through both production fake transports. Executor reuse and
+transport tests do not establish the future immutable L2 binding or
+positive-SENT producer proof.
+
+Current schema-56 cold/warm helper-plus-adapter costs are measured around the
+actual adapter with SQLite `total_changes()` and facade row/call accounting.
+At both 1k and 10k unrelated same-link outbox rows plus matching import bridges,
+the traces were identical: cold deferred 11 changed rows /45 read calls /14
+mutation calls /19 returned rows; warm deferred 0 /13 /0 /8; missing-authority
+refusal 1 /14 /1 /1; explicit target-exclusion refusal 0 /1 /0 /1; queued 6
+/39 /7 /15; terminal replay 0 /12 /0 /8. The 13 changed-row allowance holds;
+counters and pointer/receipt/cascade changes are included. The adapter issued
+zero bridge-history queries and zero unbounded outbox-identity queries.
+
+Worker-bench direct-SQL growth controls connect the instrumented production
+adapter and its exported exact-effect SQL to 1k/10k fixtures. Exact miss/hit
+and exact-kind VM work stayed at 15/28/28 steps with the same full unique-index
+plan at both sizes. The rejected outbox miss grew 5,021→50,021 VM steps; the
+rejected matching-bridge history query grew 6,038→60,038 steps and rows
+1,000→10,000. Break controls prove production-query monitors catch each old
+shape. Ratios and bounded work are asserted, not elapsed time or exact opcode
+pins. The previous 43-read/11-row report from rejected head `0e61254` is
+historical; the current adapter remeasured at 45 reads/11 rows.
 
 The terminal observer rejects Promise/thenable results before transaction
-commit. Three regressions verify rollback of ordinary settlement and SENT
-ledger, age expiry, and held expiry. The new hook is a trusted synchronous
-internal contract, not cancellation of arbitrary asynchronous callback work.
-Sol's pre-guard probe reproduced the missing rejection; all three durable cases
-fail when only the Promise guard is bypassed and pass with the guard. Empty
-transition batches do not invoke the observer; expiry controls each observe
-the actual changed love row before verifying rollback.
+commit. The old `settleRows` return contract remains `void`; sent transitions
+still feed the existing B2 ledger. Age, stale-nowplaying, and held expiry
+consume exact changed rows, and the expiry report shape is unchanged. Three
+durable regressions verify rollback of settlement/SENT ledger, age expiry, and
+held expiry; they fail when only the Promise guard is bypassed. The observer is
+a trusted synchronous contract, not cancellation of arbitrary async work.
+Empty transition batches do not invoke it.
 
 ## Read-cap relaxation and evidence gate
 

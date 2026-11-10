@@ -37,7 +37,7 @@
 import { createHash } from 'node:crypto';
 import type { Random } from '@atmusic/core/deps';
 import { MusicKeyError, trackKey } from '@atmusic/core/music-key';
-import { parseRecordUri } from '@atmusic/core/syntax';
+import { isRecordKey, parseRecordUri } from '@atmusic/core/syntax';
 import type { ForwardKind, Origin } from '../app/rows';
 import type { Db } from '../do/db';
 import { countLinkCoverage } from '../forward/coverage';
@@ -117,18 +117,47 @@ export type ApiRecipientUnloveAck =
   | { status: 'replay' }
   | { status: 'refused'; reason: string };
 
+/**
+ * Trusted input owned by the future L2 binding leaf. This describes one
+ * accepted API love operation and the immutable projection it corresponded
+ * to; it is not constructed from current incarnation/import history.
+ */
+export interface AcceptedApiLoveRecipientEnvelope {
+  readonly did: string;
+  readonly recordUri: string;
+  readonly incarnationKey: string;
+  readonly apiOperationId: string;
+  /** The API request rkey may differ from the reused projection record rkey. */
+  readonly apiRequestRkey: string;
+  readonly projectionRkey: string;
+  readonly source: Exclude<Origin, 'import'>;
+  /** Captured with API acceptance; current API-love admission supplies an empty list. */
+  readonly sourceExclusions: readonly ('lastfm' | 'listenbrainz')[];
+  readonly projection: {
+    readonly artist: string;
+    readonly track: string;
+    readonly album?: string;
+    readonly recordingMbid?: string;
+  };
+  readonly authorization: { readonly uri: string; readonly rev: string };
+}
+
 export interface ApiRecipientUnloveArgs {
   did: string;
   linkId: string;
   generation: number;
   broadOperationId: string;
   operationId: string;
+  envelope: AcceptedApiLoveRecipientEnvelope;
+  now: number;
+  random: Random;
+}
+
+interface ResolvedApiRecipientUnloveArgs extends ApiRecipientUnloveArgs {
   payload: Record<string, unknown>;
   authorization: { uri: string; rev: string };
   source: Exclude<Origin, 'import'>;
-  excludeSourceServices?: readonly ('lastfm' | 'listenbrainz')[];
-  now: number;
-  random: Random;
+  excludeSourceServices: readonly ('lastfm' | 'listenbrainz')[];
 }
 
 interface ApiRecipientLink {
@@ -160,6 +189,61 @@ interface ApiRecipientEffect {
   payload_json: string;
   authorization_uri: string | null;
   authorization_rev: string | null;
+}
+
+export const API_RECIPIENT_EXACT_EFFECT_SQL = `SELECT id,did,generation,kind,dedupe_key,state,love_artist_key,love_track_key,payload_json,
+       authorization_uri,authorization_rev FROM forward_outbox WHERE link_id=? AND kind=? AND dedupe_key=?`;
+
+const API_RECIPIENT_EFFECT_KINDS: readonly ForwardKind[] = ['unlove', 'love', 'scrobble', 'nowplaying'];
+
+function apiRecipientPayload(envelope: AcceptedApiLoveRecipientEnvelope): Record<string, unknown> {
+  return {
+    artist: envelope.projection.artist,
+    track: envelope.projection.track,
+    ...(envelope.projection.album === undefined ? {} : { album: envelope.projection.album }),
+    ...(envelope.projection.recordingMbid === undefined ? {} : { recordingMbid: envelope.projection.recordingMbid }),
+    origin: envelope.source,
+  };
+}
+
+function acceptedApiEnvelopeValid(envelope: AcceptedApiLoveRecipientEnvelope, did: string): boolean {
+  if (
+    envelope === null ||
+    typeof envelope !== 'object' ||
+    envelope.projection === null ||
+    typeof envelope.projection !== 'object' ||
+    !Array.isArray(envelope.sourceExclusions) ||
+    envelope.authorization === null ||
+    typeof envelope.authorization !== 'object' ||
+    typeof envelope.recordUri !== 'string'
+  )
+    return false;
+  const parsed = parseRecordUri(envelope.recordUri);
+  const exclusionSet = new Set(envelope.sourceExclusions);
+  const projectionKeys = Object.keys(envelope.projection);
+  return (
+    envelope.did === did &&
+    parsed !== null &&
+    parsed.did === did &&
+    parsed.rkey === envelope.projectionRkey &&
+    envelope.authorization.uri === envelope.recordUri &&
+    typeof envelope.incarnationKey === 'string' &&
+    envelope.incarnationKey.length > 0 &&
+    typeof envelope.apiOperationId === 'string' &&
+    envelope.apiOperationId.length > 0 &&
+    isRecordKey(envelope.projectionRkey) &&
+    isRecordKey(envelope.apiRequestRkey) &&
+    typeof envelope.authorization.uri === 'string' &&
+    typeof envelope.authorization.rev === 'string' &&
+    (envelope.source === 'web' || envelope.source === 'lastfm' || envelope.source === 'listenbrainz') &&
+    exclusionSet.size === envelope.sourceExclusions.length &&
+    envelope.sourceExclusions.every((service) => service === 'lastfm' || service === 'listenbrainz') &&
+    typeof envelope.projection.artist === 'string' &&
+    typeof envelope.projection.track === 'string' &&
+    (envelope.projection.album === undefined || typeof envelope.projection.album === 'string') &&
+    (envelope.projection.recordingMbid === undefined || typeof envelope.projection.recordingMbid === 'string') &&
+    projectionKeys.every((key) => ['artist', 'track', 'album', 'recordingMbid'].includes(key))
+  );
 }
 
 interface ApiRecipientIntent {
@@ -195,7 +279,7 @@ function samePayloadJson(stored: string, expected: unknown): boolean {
 function ackFromDurableState(
   db: Db,
   link: ApiRecipientLink,
-  args: ApiRecipientUnloveArgs,
+  args: ResolvedApiRecipientUnloveArgs,
   artistKey: string,
   trackKeyValue: string,
 ): ApiRecipientUnloveAck {
@@ -217,14 +301,13 @@ function ackFromDurableState(
     return { status: 'refused', reason: 'witness_missing_or_mismatched' };
 
   const storedKey = storedForwardDedupeKey(link.generation, args.operationId);
-  const rows = db.all<ApiRecipientEffect>(
-    `SELECT id,did,generation,kind,dedupe_key,state,love_artist_key,love_track_key,payload_json,
-       authorization_uri,authorization_rev FROM forward_outbox
-     WHERE link_id=? AND dedupe_key=? ORDER BY rowid`,
-    link.id,
-    storedKey,
+  const effects = API_RECIPIENT_EFFECT_KINDS.map((kind) =>
+    db.one<ApiRecipientEffect>(API_RECIPIENT_EXACT_EFFECT_SQL, link.id, kind, storedKey),
   );
-  for (const row of rows) {
+  const wrongKind = effects.slice(1).some((row) => row !== null);
+  if (wrongKind) return { status: 'refused', reason: 'identity_collision' };
+  const row = effects[0] ?? null;
+  if (row !== null) {
     if (
       row.did !== args.did ||
       row.generation !== link.generation ||
@@ -238,8 +321,8 @@ function ackFromDurableState(
     )
       return { status: 'refused', reason: 'effect_mismatch' };
   }
-  if (rows.some((row) => row.state === 'queued' || row.state === 'held')) return { status: 'queued' };
-  if (rows.length > 0) return { status: 'replay' };
+  if (row?.state === 'queued' || row?.state === 'held') return { status: 'queued' };
+  if (row !== null) return { status: 'replay' };
 
   const intent = db.one<ApiRecipientIntent>(
     `SELECT kind,operation_id,love_artist_key,love_track_key,payload_json,authorization_uri,authorization_rev
@@ -271,7 +354,11 @@ function ackFromDurableState(
  */
 export function enqueueApiRecipientUnlove(db: Db, args: ApiRecipientUnloveArgs): ApiRecipientUnloveAck {
   return db.tx(() => {
-    const uri = args.authorization.uri;
+    const envelope = args.envelope;
+    if (!acceptedApiEnvelopeValid(envelope, args.did))
+      return { status: 'refused', reason: 'accepted_envelope_invalid' };
+    const authorization = envelope.authorization;
+    const payload = apiRecipientPayload(envelope);
     const link = db.one<ApiRecipientLink>(
       `SELECT id,did,generation,service,status,forward_scrobbles FROM linked_accounts WHERE id=? AND did=?`,
       args.linkId,
@@ -281,79 +368,34 @@ export function enqueueApiRecipientUnlove(db: Db, args: ApiRecipientUnloveArgs):
       return { status: 'refused', reason: 'link_missing_or_generation_invalid' };
     if (link.generation !== args.generation) return { status: 'refused', reason: 'stale_generation' };
 
-    const [artist, track] = [args.payload.artist, args.payload.track];
     if (
-      typeof artist !== 'string' ||
-      typeof track !== 'string' ||
-      args.payload.origin !== args.source ||
       !Number.isSafeInteger(args.now) ||
       args.now < 0 ||
       args.operationId !== `${args.broadOperationId}:api-recipient` ||
-      !args.broadOperationId.startsWith('love-delete:') ||
-      !args.broadOperationId.endsWith(`:rev:${args.authorization.rev}`)
+      args.broadOperationId !== `love-delete:${envelope.incarnationKey}:rev:${authorization.rev}`
     )
       return { status: 'refused', reason: 'recipient_identity_or_payload_invalid' };
 
-    const incarnationKey = args.broadOperationId.slice('love-delete:'.length, -`:rev:${args.authorization.rev}`.length);
-    if (incarnationKey.length === 0) return { status: 'refused', reason: 'incarnation_missing' };
-    const incarnation = db.one<{ incarnation_key: string; path: string; source_service: string | null }>(
-      'SELECT incarnation_key,path,source_service FROM love_incarnations WHERE uri=?',
-      uri,
-    );
-    if (
-      incarnation === null ||
-      incarnation.incarnation_key !== incarnationKey ||
-      incarnation.path !== 'api' ||
-      (incarnation.source_service !== null &&
-        incarnation.source_service !== 'lastfm' &&
-        incarnation.source_service !== 'listenbrainz')
-    )
-      return { status: 'refused', reason: 'api_incarnation_mismatch' };
-
-    const expectedExclusions = new Set<'lastfm' | 'listenbrainz'>();
-    if (incarnation.source_service !== null) expectedExclusions.add(incarnation.source_service);
-    const parsedUri = parseRecordUri(uri);
-    if (parsedUri === null || parsedUri.did !== args.did) return { status: 'refused', reason: 'record_uri_mismatch' };
-    const operationOrigin = db.one<{ origin: Origin }>(
-      `SELECT origin FROM operations WHERE did=? AND collection=? AND rkey=? AND kind='love.put'
-       ORDER BY created_at_ms DESC,rowid DESC LIMIT 1`,
-      args.did,
-      parsedUri.collection,
-      parsedUri.rkey,
-    );
-    if (operationOrigin === null || operationOrigin.origin !== args.source)
-      return { status: 'refused', reason: 'api_source_mismatch' };
-    const bridges = db.all<{ source_service: string | null }>(
-      `SELECT source_service FROM love_import_bridges WHERE did=? AND uri=? AND incarnation_key=? AND state IN ('bound','consumed')`,
-      args.did,
-      uri,
-      incarnationKey,
-    );
-    for (const bridge of bridges) {
-      if (bridge.source_service !== 'lastfm' && bridge.source_service !== 'listenbrainz')
-        return { status: 'refused', reason: 'unknown_source_exclusion' };
-      expectedExclusions.add(bridge.source_service);
-    }
-    if (args.source === 'lastfm' || args.source === 'listenbrainz') expectedExclusions.add(args.source);
-    const suppliedExclusions = new Set(args.excludeSourceServices ?? []);
-    if (
-      suppliedExclusions.size !== (args.excludeSourceServices ?? []).length ||
-      suppliedExclusions.size !== expectedExclusions.size ||
-      [...expectedExclusions].some((service) => !suppliedExclusions.has(service))
-    )
-      return { status: 'refused', reason: 'source_exclusion_mismatch' };
-    if (suppliedExclusions.has(link.service)) return { status: 'refused', reason: 'source_excluded' };
+    if (envelope.sourceExclusions.includes(link.service)) return { status: 'refused', reason: 'source_excluded' };
 
     let artistKey: string;
     let trackKeyValue: string;
     try {
-      [artistKey, trackKeyValue] = trackKey(artist, track);
+      [artistKey, trackKeyValue] = trackKey(envelope.projection.artist, envelope.projection.track);
     } catch (error) {
       if (error instanceof MusicKeyError) return { status: 'refused', reason: 'invalid_track' };
       throw error;
     }
     if (hasPresentTrackLove(db, args.did, artistKey, trackKeyValue))
       return { status: 'refused', reason: 'canonical_survivor' };
+
+    const resolved: ResolvedApiRecipientUnloveArgs = {
+      ...args,
+      authorization,
+      source: envelope.source,
+      payload,
+      excludeSourceServices: envelope.sourceExclusions,
+    };
 
     const existingWitness = db.one<ApiRecipientWitness>(
       `SELECT kind,love_artist_key,love_track_key,authorization_uri,authorization_rev
@@ -363,14 +405,14 @@ export function enqueueApiRecipientUnlove(db: Db, args: ApiRecipientUnloveArgs):
       args.operationId,
     );
     if (existingWitness !== null) {
-      const accepted = ackFromDurableState(db, link, args, artistKey, trackKeyValue);
+      const accepted = ackFromDurableState(db, link, resolved, artistKey, trackKeyValue);
       if (accepted.status === 'refused' && accepted.reason !== 'no_durable_acceptance') {
         countLinkCoverage(db, 'deferred_rebind_rejected');
         return accepted;
       }
       if (accepted.status !== 'refused') {
-        const authority = materializeLoveAuthority(db, args.authorization, args.now);
-        if (authority === 'active' && deferredAuthorityValid(db, args.authorization)) return accepted;
+        const authority = materializeLoveAuthority(db, authorization, args.now);
+        if (authority === 'active' && deferredAuthorityValid(db, authorization)) return accepted;
         const missing = authority === 'missing';
         countLinkCoverage(db, missing ? 'deferred_authority_unmaterialized' : 'deferred_authority_conflicted');
         return { status: 'refused', reason: missing ? 'authority_missing' : 'authority_conflicted' };
@@ -380,6 +422,10 @@ export function enqueueApiRecipientUnlove(db: Db, args: ApiRecipientUnloveArgs):
 
     const ownCoverage = forwardCoverage(db, link, 'unlove', args.operationId);
     const oppositeCoverage = forwardCoverage(db, link, 'love', args.operationId);
+    const storedKey = storedForwardDedupeKey(link.generation, args.operationId);
+    const otherKindCollision = (['scrobble', 'nowplaying'] as const).some(
+      (kind) => db.one<ApiRecipientEffect>(API_RECIPIENT_EXACT_EFFECT_SQL, link.id, kind, storedKey) !== null,
+    );
     const orphanIntent = db.one(
       `SELECT 1 AS present FROM forward_deferred_love_intents WHERE link_id=? AND generation=? AND operation_id=?`,
       link.id,
@@ -395,6 +441,7 @@ export function enqueueApiRecipientUnlove(db: Db, args: ApiRecipientUnloveArgs):
     if (
       orphanIntent !== null ||
       collision !== null ||
+      otherKindCollision ||
       oppositeCoverage === 'row' ||
       oppositeCoverage === 'retired' ||
       ownCoverage === 'row' ||
@@ -403,8 +450,8 @@ export function enqueueApiRecipientUnlove(db: Db, args: ApiRecipientUnloveArgs):
       countLinkCoverage(db, 'deferred_rebind_rejected');
       return { status: 'refused', reason: 'identity_collision' };
     }
-    const authority = materializeLoveAuthority(db, args.authorization, args.now);
-    if (authority !== 'active' || !deferredAuthorityValid(db, args.authorization)) {
+    const authority = materializeLoveAuthority(db, authorization, args.now);
+    if (authority !== 'active' || !deferredAuthorityValid(db, authorization)) {
       countLinkCoverage(
         db,
         authority === 'missing' ? 'deferred_authority_unmaterialized' : 'deferred_authority_conflicted',
@@ -415,14 +462,12 @@ export function enqueueApiRecipientUnlove(db: Db, args: ApiRecipientUnloveArgs):
     enqueueForwards(db, {
       did: args.did,
       linkId: args.linkId,
-      items: [
-        { kind: 'unlove', operationId: args.operationId, payload: args.payload, authorization: args.authorization },
-      ],
-      excludeSourceServices: args.excludeSourceServices,
+      items: [{ kind: 'unlove', operationId: args.operationId, payload, authorization }],
+      excludeSourceServices: envelope.sourceExclusions,
       now: args.now,
       random: args.random,
     });
-    const result = ackFromDurableState(db, link, args, artistKey, trackKeyValue);
+    const result = ackFromDurableState(db, link, resolved, artistKey, trackKeyValue);
     return result.status === 'refused' && result.reason === 'no_durable_acceptance'
       ? { status: 'refused', reason: 'enqueue_not_accepted' }
       : result;

@@ -71,6 +71,9 @@ it('a second love for the same (artist_key, track_key) succeeds without a new re
       result_uri: created.result_uri,
       result_cid: created.result_cid,
     });
+    expect(h.op(second.operation.id).rkey).toBe(second.operation.rkey);
+    expect(h.op(second.operation.id).rkey).not.toBe(created.rkey);
+    expect(h.op(second.operation.id).result_uri).toBe(`at://${h.alice}/${LOVE}/${created.rkey}`);
     expect(await remoteRecords(h.kit, 'Alice', LOVE)).toHaveLength(1);
 
     // Another app wrote a duplicate love of the same track, and a love of another track.

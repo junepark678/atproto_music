@@ -1326,12 +1326,13 @@ describe('Last.fm forwarding', () => {
     ).toBe(1);
     await w.run();
     expect(w.lastfm.loveCalls.map(({ method }) => method)).toEqual(['track.love']);
-    const uri = `at://${ALICE}/com.example.atmusic.love/recipient-lastfm-api`;
+    const projectionRkey = '3kreusedlove1';
+    const uri = `at://${ALICE}/com.example.atmusic.love/${projectionRkey}`;
     const revision = '3lbcdefghijmu';
     const incarnationKey = `love:${uri}:api:recipient-lastfm-put`;
     w.app.db.run(
       `INSERT INTO operations(id,did,kind,origin,priority,collection,rkey,state,due_at,created_at_ms,updated_at_ms)
-       VALUES('recipient-lastfm-put',?,'love.put','web',0,'com.example.atmusic.love','recipient-lastfm-api','succeeded',?,?,?)`,
+       VALUES('recipient-lastfm-put',?,'love.put','lastfm',0,'com.example.atmusic.love','recipient-lastfm-api','succeeded',?,?,?)`,
       ALICE,
       now,
       now,
@@ -1339,7 +1340,16 @@ describe('Last.fm forwarding', () => {
     );
     w.app.db.run(
       `INSERT INTO love_incarnations(uri,incarnation_key,state,path,source_service,updated_at_ms)
-       VALUES(?,?,'absent','api',NULL,?)`,
+       VALUES(?,?,'absent','import','lastfm',?)`,
+      uri,
+      incarnationKey,
+      now,
+    );
+    w.app.db.run(
+      `INSERT INTO love_import_bridges(did,operation_id,uri,incarnation_key,source_service,state,created_at_ms)
+       VALUES(?,?,?,?,'lastfm','consumed',?)`,
+      ALICE,
+      'accepted-lastfm-import-origin',
       uri,
       incarnationKey,
       now,
@@ -1361,9 +1371,18 @@ describe('Last.fm forwarding', () => {
         generation: link.generation,
         broadOperationId,
         operationId: `${broadOperationId}:api-recipient`,
-        payload: { artist: 'Paused Artist', track: 'Paused Track', origin: 'web' },
-        authorization: { uri, rev: revision },
-        source: 'web',
+        envelope: {
+          did: ALICE,
+          recordUri: uri,
+          incarnationKey,
+          apiOperationId: 'recipient-lastfm-put',
+          apiRequestRkey: 'recipient-lastfm-api',
+          projectionRkey,
+          source: 'lastfm',
+          sourceExclusions: [],
+          projection: { artist: 'Paused Artist', track: 'Paused Track' },
+          authorization: { uri, rev: revision },
+        },
         now,
         random: w.rt.random,
       }),
