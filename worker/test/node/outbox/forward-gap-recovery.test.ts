@@ -37,8 +37,9 @@ async function accept(h: Harness, index: number) {
   return { ...item, listenKey: item.listenKey, operationId: item.operationId };
 }
 
-async function publishAndProject(h: Harness): Promise<void> {
+async function publishAndProject(h: Harness, checkpoint?: () => void): Promise<void> {
   await h.runUntilIdle();
+  checkpoint?.();
   for (const operation of h.ops("state='succeeded' AND kind='scrobble.create'")) {
     if (operation.collection === null || operation.rkey === null)
       throw new Error('published scrobble lacks record identity');
@@ -59,6 +60,7 @@ async function publishAndProject(h: Harness): Promise<void> {
         live: authorizedLiveOptions(h.db, proof, h.m.random).live,
       }),
     );
+    checkpoint?.();
   }
 }
 
@@ -297,35 +299,81 @@ describe('forward coverage gap recovery', () => {
       h.seedUser(h.alice);
       h.account(h.alice);
       const link = saveSameLink(h).link;
-      const assertCoverage = (generation = link.generation) => {
-        const receipts = h.db.all<{ dedupe_key: string; retired_at_ms: number | null }>(
-          'SELECT dedupe_key,retired_at_ms FROM forward_receipts WHERE link_id=? AND generation=?',
+      type Expected = { payload: unknown; state: string; attempts: number; last_error: string | null };
+      const expected = new Map<string, Expected>();
+      const identity = (generation: number, kind: string, storedKey: string) =>
+        JSON.stringify([generation, kind, storedKey]);
+      const assertCoverage = () => {
+        const receipts = h.db.all<{
+          generation: number;
+          kind: string;
+          dedupe_key: string;
+          retired_at_ms: number | null;
+        }>('SELECT generation,kind,dedupe_key,retired_at_ms FROM forward_receipts WHERE link_id=?', link.id);
+        const rows = h.db.all<{
+          generation: number;
+          kind: string;
+          dedupe_key: string;
+          state: string;
+          attempts: number;
+          last_error: string | null;
+          payload_json: string;
+        }>(
+          'SELECT generation,kind,dedupe_key,state,attempts,last_error,payload_json FROM forward_outbox WHERE link_id=?',
           link.id,
-          generation,
-        );
-        const rows = h.db.all<{ dedupe_key: string; state: string; attempts: number; payload_json: string }>(
-          'SELECT dedupe_key,state,attempts,payload_json FROM forward_outbox WHERE link_id=? AND generation=?',
-          link.id,
-          generation,
         );
         for (const receipt of receipts) {
-          const row = rows.find(
-            (candidate) => candidate.dedupe_key === storedForwardDedupeKey(generation, receipt.dedupe_key),
+          const tuple = identity(
+            receipt.generation,
+            receipt.kind,
+            storedForwardDedupeKey(receipt.generation, receipt.dedupe_key),
           );
-          if (receipt.retired_at_ms === null) expect(row, `live receipt ${receipt.dedupe_key}`).toBeDefined();
+          expect(expected.has(tuple), `unexpected receipt ${tuple}`).toBe(true);
+          const matches = rows.filter((row) => identity(row.generation, row.kind, row.dedupe_key) === tuple);
+          if (receipt.retired_at_ms === null) expect(matches, `live receipt ${tuple}`).toHaveLength(1);
         }
         for (const row of rows) {
+          const tuple = identity(row.generation, row.kind, row.dedupe_key);
           expect(
-            receipts.some((receipt) => storedForwardDedupeKey(generation, receipt.dedupe_key) === row.dedupe_key),
-          ).toBe(true);
-          expect(JSON.parse(row.payload_json)).toBeTruthy();
+            receipts.filter(
+              (receipt) =>
+                identity(
+                  receipt.generation,
+                  receipt.kind,
+                  storedForwardDedupeKey(receipt.generation, receipt.dedupe_key),
+                ) === tuple,
+            ),
+            `receipt for ${tuple}`,
+          ).toHaveLength(1);
+          const wanted = expected.get(tuple);
+          expect(wanted, `unexpected forward row ${tuple}`).toBeDefined();
+          expect(JSON.parse(row.payload_json), tuple).toEqual(wanted!.payload);
+          expect({ state: row.state, attempts: row.attempts, last_error: row.last_error }, tuple).toEqual({
+            state: wanted!.state,
+            attempts: wanted!.attempts,
+            last_error: wanted!.last_error,
+          });
         }
-        return rows;
+      };
+      const trackedAccept = async (index: number, generation = 1) => {
+        const item = await accept(h, index);
+        const tuple = identity(generation, 'scrobble', storedForwardDedupeKey(generation, item.listenKey));
+        expected.set(tuple, {
+          payload: { listen: listenInput(index), origin: 'web' },
+          state: 'queued',
+          attempts: 0,
+          last_error: null,
+        });
+        assertCoverage();
+        return { ...item, tuple };
+      };
+      const transition = (tuple: string, state: string, attempts: number, last_error: string | null = null) => {
+        expected.set(tuple, { ...expected.get(tuple)!, state, attempts, last_error });
       };
 
-      const cancelled = await accept(h, 45);
-      assertCoverage();
+      const cancelled = await trackedAccept(45);
       expect(cancelUnsent(h.db, cancelled.operationId, T0 + 1)).toBe(true);
+      expected.delete(cancelled.tuple);
       expect(
         h.db.one('SELECT 1 FROM forward_outbox WHERE link_id=? AND dedupe_key=?', link.id, cancelled.listenKey),
       ).toBeNull();
@@ -335,86 +383,55 @@ describe('forward coverage gap recovery', () => {
       assertCoverage();
 
       const finish = async (index: number, terminal: 'sent' | 'ignored' | 'failed') => {
-        const item = await accept(h, index);
-        await publishAndProject(h);
+        const item = await trackedAccept(index);
+        await publishAndProject(h, assertCoverage);
         const row = h.db.one<{ id: string }>(
           'SELECT id FROM forward_outbox WHERE link_id=? AND dedupe_key=?',
           link.id,
           item.listenKey,
-        );
+        )!;
         expect(row).not.toBeNull();
         const error = terminal === 'ignored' ? 'ignored' : terminal === 'failed' ? 'retry_exhausted' : null;
-        settleRows(h.db, [row!.id], terminal, T0 + index, error, true, link.generation);
-        const state = h.db.one<{ state: string; attempts: number; last_error: string | null }>(
-          'SELECT state,attempts,last_error FROM forward_outbox WHERE id=?',
-          row!.id,
-        );
-        expect(state).toEqual({ state: terminal, attempts: 1, last_error: error });
+        transition(item.tuple, terminal, 1, error);
+        settleRows(h.db, [row.id], terminal, T0 + index, error, true, link.generation);
         assertCoverage();
-        return { item, row: row!, state };
+        return { item, row };
       };
       await finish(46, 'sent');
       await finish(47, 'ignored');
       const failed = await finish(48, 'failed');
 
-      const held = await accept(h, 49);
-      await publishAndProject(h);
+      const held = await trackedAccept(49);
+      await publishAndProject(h, assertCoverage);
+      transition(held.tuple, 'held', 0);
       expect(holdLinkRows(h.db, link.id, T0 + 49, link.generation)).toBeGreaterThan(0);
-      expect(
-        h.db.one('SELECT state FROM forward_outbox WHERE link_id=? AND dedupe_key=?', link.id, held.listenKey),
-      ).toEqual({
-        state: 'held',
-      });
       assertCoverage();
+      transition(held.tuple, 'queued', 0);
       expect(resumeHeldRows(h.db, link.id, T0 + 50, link.generation)).toBeGreaterThan(0);
-      expect(
-        h.db.one('SELECT state FROM forward_outbox WHERE link_id=? AND dedupe_key=?', link.id, held.listenKey),
-      ).toEqual({
-        state: 'queued',
-      });
       assertCoverage();
+      transition(held.tuple, 'held', 0);
       expect(holdLinkRows(h.db, link.id, T0 + 51, link.generation)).toBeGreaterThan(0);
+      assertCoverage();
       h.db.run('UPDATE forward_outbox SET updated_at_ms=0 WHERE link_id=? AND dedupe_key=?', link.id, held.listenKey);
+      assertCoverage();
+      transition(held.tuple, 'expired', 0, 'held_expired');
       expect(expireRows(h.db, T0 + 31 * 24 * 60 * 60 * 1000).held).toBeGreaterThan(0);
-      expect(
-        h.db.one(
-          'SELECT state,last_error FROM forward_outbox WHERE link_id=? AND dedupe_key=?',
-          link.id,
-          held.listenKey,
-        ),
-      ).toEqual({
-        state: 'expired',
-        last_error: 'held_expired',
-      });
       assertCoverage();
 
-      const pending = await accept(h, 51);
-      await publishAndProject(h);
-      const pendingBeforeRotation = h.db.one<{ id: string; state: string; attempts: number }>(
-        'SELECT id,state,attempts FROM forward_outbox WHERE link_id=? AND dedupe_key=?',
+      const pending = await trackedAccept(51);
+      await publishAndProject(h, assertCoverage);
+      const oldRow = h.db.one<{ id: string }>(
+        'SELECT id FROM forward_outbox WHERE link_id=? AND dedupe_key=?',
         link.id,
         pending.listenKey,
       )!;
-      expect(pendingBeforeRotation).toMatchObject({ state: 'queued', attempts: 0 });
-      assertCoverage();
-
       const rotated = saveSameLink(h, 'recovery-rotated').link;
       expect(rotated).toMatchObject({ id: link.id, generation: 2, remote_user: 'recovery-rotated' });
-      const oldRow = h.db.one<{ state: string; attempts: number; id: string }>(
-        'SELECT id,state,attempts FROM forward_outbox WHERE link_id=? AND dedupe_key=?',
-        link.id,
-        pending.listenKey,
-      )!;
-      expect(oldRow).toMatchObject({ state: 'expired', attempts: 0 });
-      expect(h.db.one('SELECT state,attempts FROM forward_outbox WHERE id=?', oldRow.id)).toEqual({
-        state: oldRow.state,
-        attempts: oldRow.attempts,
-      });
+      transition(pending.tuple, 'expired', 0, 'account_changed');
+      assertCoverage();
+      // This old row is already terminal: its queued-state guard is sufficient.
       settleRows(h.db, [oldRow.id], 'sent', T0 + 60, null, true, link.generation);
-      expect(h.db.one('SELECT state,attempts FROM forward_outbox WHERE id=?', oldRow.id)).toEqual({
-        state: oldRow.state,
-        attempts: oldRow.attempts,
-      });
+      assertCoverage();
       expect(h.db.one('SELECT state,last_error FROM forward_outbox WHERE id=?', failed.row.id)).toEqual({
         state: 'failed',
         last_error: 'retry_exhausted',
@@ -425,17 +442,22 @@ describe('forward coverage gap recovery', () => {
       expect(h.db.one('SELECT count(*) AS n FROM forward_receipts WHERE link_id=? AND generation=2', link.id)).toEqual({
         n: 0,
       });
-      assertCoverage(1);
-      const current = await accept(h, 50);
-      await publishAndProject(h);
-      const gen2Row = h.db.one<{ generation: number; state: string; attempts: number; dedupe_key: string }>(
-        'SELECT generation,state,attempts,dedupe_key FROM forward_outbox WHERE link_id=? AND generation=2 AND did=?',
+
+      const current = await trackedAccept(50, 2);
+      await publishAndProject(h, assertCoverage);
+      const gen2Row = h.db.one<{ id: string; dedupe_key: string }>(
+        'SELECT id,dedupe_key FROM forward_outbox WHERE link_id=? AND generation=2 AND did=?',
         link.id,
         h.alice,
-      );
-      expect(gen2Row).toMatchObject({ generation: 2, state: 'queued', attempts: 0 });
-      expect(gen2Row?.dedupe_key).not.toBe(current.listenKey);
-      assertCoverage(2);
+      )!;
+      expect(gen2Row.dedupe_key).toBe(`g2:${current.listenKey}`);
+      // An adversarial settlement argument exercises the generation fence on a
+      // live queued row; it does not claim an old job actually owns this new ID.
+      settleRows(h.db, [gen2Row.id], 'sent', T0 + 61, null, true, link.generation);
+      assertCoverage();
+      transition(current.tuple, 'sent', 1);
+      settleRows(h.db, [gen2Row.id], 'sent', T0 + 62, null, true, rotated.generation);
+      assertCoverage();
     });
   });
 
