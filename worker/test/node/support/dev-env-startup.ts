@@ -123,6 +123,9 @@ async function cleanupFailedServer(kind: Kind, captured: CapturedServer): Promis
   } else {
     try {
       await server.destroy();
+      // Public PDS.destroy resolves only after its finally-await of ctx.destroy.
+      // The external owner may have thrown before our tracker was installed.
+      captured.contextCleanupSucceeded = true;
     } catch (error) {
       // PDS.destroy() calls ctx.destroy() in a finally block. Its terminator
       // reports this exact condition when start() failed before listening.
@@ -177,7 +180,6 @@ async function createOwned<T extends { close(): Promise<void> }>(
           // before any shape/descriptor checks so malformed test doubles still
           // take the ordinary partial-resource cleanup path.
           captured.push(record);
-          options.onCaptured?.(kind, server, record.roots);
           const env = args[0] as
             | { dataDirectory?: unknown; blobstoreDiskLocation?: unknown; blobstoreDiskTmpLocation?: unknown }
             | undefined;
@@ -188,6 +190,9 @@ async function createOwned<T extends { close(): Promise<void> }>(
               ),
             );
           }
+          // A closed external owner may reject this returned handle. Populate
+          // its owned roots first so the internal fallback can still dispose it.
+          options.onCaptured?.(kind, server, record.roots);
           const port = portOf(kind, server);
           const attempt: DevEnvAttempt =
             kind === 'plc'

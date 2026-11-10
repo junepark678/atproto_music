@@ -88,6 +88,76 @@ describe('owned dev-env startup', () => {
     expect(lateServer.listening).toBe(false);
   });
 
+  it('removes confirmed-safe roots when a public PDS return arrives after its owner closed', async () => {
+    const owner = ownTestResources();
+    const descriptor = Object.getOwnPropertyDescriptor(PDS, 'fromEnv')!;
+    const originalFactory = descriptor.value as typeof PDS.fromEnv;
+    let release!: () => void;
+    const returned = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let allocated!: () => void;
+    const allocatedPublic = new Promise<void>((resolve) => {
+      allocated = resolve;
+    });
+    let captured: TestPds['server'] | undefined;
+    let roots: string[] = [];
+    let destroyed = 0;
+    Object.defineProperty(PDS, 'fromEnv', {
+      ...descriptor,
+      value: async function (this: unknown, ...args: Parameters<typeof PDS.fromEnv>) {
+        const server = await Reflect.apply(originalFactory, this, args);
+        captured = server;
+        roots = pdsRoots({ kind: 'pds', attempt: 1, port: server.ctx.cfg.service.port, server });
+        const destroy = server.ctx.destroy.bind(server.ctx);
+        server.ctx.destroy = async () => {
+          await destroy();
+          destroyed += 1;
+        };
+        allocated();
+        await returned;
+        return server;
+      },
+    });
+    const outcome = owner
+      .acquire(
+        () =>
+          createOwnedTestPds(
+            { didPlcUrl: 'http://127.0.0.1:1', hostname: 'late-public.test' },
+            undefined,
+            ownedStartup(owner),
+          ),
+        (fixture) => fixture.close(),
+      )
+      .then(
+        (value) => ({ value, error: undefined }),
+        (error: unknown) => ({ value: undefined, error }),
+      );
+    try {
+      await Promise.race([
+        allocatedPublic,
+        outcome.then((result) => {
+          if (result.error) throw result.error;
+        }),
+      ]);
+      await owner.close();
+      release();
+      const result = await outcome;
+      expect(result.error).toBeInstanceOf(Error);
+      expect((result.error as Error).message).toContain('owner is already closed');
+      expect(captured?.server?.listening ?? false).toBe(false);
+      expect(destroyed).toBe(1);
+      // Measure before the independent exact-resource fallback below.
+      for (const root of roots) expect(await isMissing(root)).toBe(true);
+    } finally {
+      release();
+      await outcome;
+      Object.defineProperty(PDS, 'fromEnv', descriptor);
+      if (captured && destroyed === 0) await captured.destroy();
+      if (destroyed > 0) for (const root of roots) await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('cleans a returned PLC server before rejecting a malformed public port', async () => {
     const owner = ownTestResources();
     const factoryDescriptor = Object.getOwnPropertyDescriptor(PlcServer, 'create')!;
