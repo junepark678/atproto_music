@@ -1,9 +1,10 @@
 import { spawn } from 'node:child_process';
-import { existsSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { access, mkdtemp, readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { setTimeout as realDelay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { expect, test, vi } from 'vitest';
 import { MIN_CDP_CONNECT_MS } from '../live/owned-chromium.ts';
@@ -117,6 +118,28 @@ test('owner guards synchronous acquisition failure and blocks late resource acqu
   expect(vi.isMockFunction(chromium.connectOverCDP)).toBe(false);
 });
 
+test('owner cleans a failed spawn without a PID and preserves root ownership', async () => {
+  const owner = createOwnedIngestTestOwner('missing executable');
+  const launch = owner.startChromium({
+    interactive: false,
+    ...deadlines(2_000, 2_500),
+    executablePath: join(tmpdir(), 'atmusic-nonexistent-chromium', 'chrome'),
+  });
+  expect(launch.pid).toBeUndefined();
+  await expect(launch.ready).rejects.toThrow('failed to spawn');
+  expect(await launch.terminate()).toEqual({ processStopped: true, profileRemoved: true, connectionSettled: true });
+  await owner.cleanup();
+  await expect(access(launch.root)).rejects.toMatchObject({ code: 'ENOENT' });
+});
+
+test('owner cancels the operation-drain deadline when pending work settles first', async () => {
+  const owner = createOwnedIngestTestOwner('operation drain timer');
+  const before = process.getActiveResourcesInfo().filter((name) => name === 'Timeout').length;
+  owner.trackOperation('short real operation', realDelay(10));
+  await owner.cleanup();
+  expect(process.getActiveResourcesInfo().filter((name) => name === 'Timeout').length).toBeLessThanOrEqual(before);
+});
+
 test.fails('runner failure hook kills an owned group before releasing a suspended continuation', async () => {
   const owner = createOwnedIngestTestOwner('runner failure hook control');
   const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
@@ -227,6 +250,60 @@ test('CDP connection is never started below the minimum remaining budget', async
   }
 });
 
+test('owner reaps a resource adopted after its first cleanup has completed', async () => {
+  const owner = createOwnedIngestTestOwner('late IPC adoption');
+  await owner.cleanup();
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {},1000)'], {
+    detached: true,
+    stdio: 'ignore',
+  });
+  expect(child.pid).toBeDefined();
+  const closed = new Promise<void>((resolve) => child.once('close', () => resolve()));
+  owner.adoptOwnedGroup(child.pid, undefined, 'late adopted child');
+  owner.trackOperation('late adopted child close', closed);
+  await owner.cleanup();
+  expect(processExists(child.pid!)).toBe(false);
+  expect(processExists(child.pid!, true)).toBe(false);
+});
+
+test('owner discovers and reaps Chromium when its driver stops before the PID handoff', async () => {
+  const owner = createOwnedIngestTestOwner('interrupted driver handoff');
+  let acquisitionRoot = '';
+  let evidence: { pid: number; root: string; driverPid: number } | undefined;
+  const driverResult = spawnDriver('handoff-stop', owner, process.env, (root) => {
+    acquisitionRoot = root;
+  });
+  owner.trackOperation('interrupted driver close', driverResult);
+  try {
+    const until = Date.now() + 5_000;
+    while (evidence === undefined) {
+      try {
+        evidence = JSON.parse(await readFile(join(acquisitionRoot, 'handoff.json'), 'utf8')) as typeof evidence;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        if (Date.now() >= until) throw new Error('driver did not reach the pre-IPC handoff barrier');
+        await realDelay(10);
+      }
+    }
+    expect(evidence.pid).toBeDefined();
+    expect(processExists(evidence.pid, true)).toBe(true);
+    expect(await readFile(`/proc/${evidence.driverPid}/stat`, 'utf8')).toMatch(/\) T /);
+    // No Chromium IPC message has arrived: discovery must use pre-spawn ownership.
+    await owner.cleanup();
+    await driverResult;
+    expect(processExists(evidence.driverPid, true)).toBe(false);
+    expect(processExists(evidence.pid)).toBe(false);
+    expect(processExists(evidence.pid, true)).toBe(false);
+    await expect(access(evidence.root)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(access(acquisitionRoot)).rejects.toMatchObject({ code: 'ENOENT' });
+  } finally {
+    // Safety guard for a deliberately broken discovery control, exact PID only.
+    if (evidence !== undefined && processExists(evidence.pid, true))
+      owner.adoptOwnedGroup(evidence.pid, evidence.root, 'handoff negative-control safety guard');
+    await owner.cleanup();
+  }
+});
+
 test('Playwright ECONNRESET is observed and its artifacts stay inside the removed owned root', async () => {
   const owner = createOwnedIngestTestOwner('Playwright ECONNRESET');
   const tempRoot = await mkdtemp(join(tmpdir(), 'atmusic-owned-artifact-test-'));
@@ -251,15 +328,20 @@ function spawnDriver(
   scenario: string,
   owner: ReturnType<typeof createOwnedIngestTestOwner>,
   env: NodeJS.ProcessEnv = process.env,
+  onAcquisition?: (root: string) => void,
 ): Promise<{ status: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
+    owner.assertActive();
+    const acquisitionRoot = mkdtempSync(join(env.TMPDIR ?? tmpdir(), 'atmusic-owned-driver-'));
+    owner.adoptOwnedGroup(undefined, acquisitionRoot, `driver acquisition directory ${scenario}`);
+    onAcquisition?.(acquisitionRoot);
     const processChild = spawn(process.execPath, [tsx, driver, scenario], {
       detached: true,
       stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
-      env,
+      env: owner.childEnvironment({ ...env, TMPDIR: acquisitionRoot }),
     });
     if (processChild.pid !== undefined)
-      owner.adoptOwnedGroup(processChild.pid, undefined, 'owned Chromium driver ' + scenario);
+      owner.adoptOwnedGroup(processChild.pid, undefined, `owned Chromium driver ${scenario}`);
     let stdout = '';
     let stderr = '';
     processChild.stdout?.setEncoding('utf8').on('data', (chunk: string) => (stdout += chunk));
@@ -273,7 +355,7 @@ function spawnDriver(
         typeof message.pid === 'number' &&
         typeof message.root === 'string'
       )
-        owner.adoptOwnedGroup(message.pid, message.root, 'driver Chromium ' + scenario);
+        owner.adoptOwnedGroup(message.pid, message.root, `driver Chromium ${scenario}`);
     });
     processChild.once('error', reject);
     processChild.once('close', (status) => resolve({ status, stdout, stderr }));

@@ -1,3 +1,4 @@
+import { writeFileSync } from 'node:fs';
 import { access } from 'node:fs/promises';
 import { join } from 'node:path';
 import { startOwnedChromium } from '../live/owned-chromium.ts';
@@ -16,6 +17,16 @@ const launched = startOwnedChromium({
   ...(scenario === 'reset' ? { executablePath: process.execPath, args: resetFixture } : {}),
 });
 
+// The parent has registered this TMPDIR and inherited owner marker before
+// spawning the driver. Stop before IPC to exercise interrupted ownership handoff.
+if (scenario === 'handoff-stop') {
+  writeFileSync(
+    join(process.env.TMPDIR!, 'handoff.json'),
+    JSON.stringify({ pid: launched.pid, root: launched.root, driverPid: process.pid }),
+  );
+  process.kill(process.pid, 'SIGSTOP');
+}
+
 if (process.send !== undefined) {
   await new Promise<void>((resolve, reject) => {
     process.send?.({ type: 'owned-chromium', pid: launched.pid, root: launched.root }, (error) => {
@@ -26,7 +37,7 @@ if (process.send !== undefined) {
   process.disconnect?.();
 }
 
-if (scenario === 'immediate') {
+if (scenario === 'immediate' || scenario === 'handoff-stop') {
   void launched.terminate();
 } else if (scenario === 'microtask') {
   queueMicrotask(() => void launched.terminate());
