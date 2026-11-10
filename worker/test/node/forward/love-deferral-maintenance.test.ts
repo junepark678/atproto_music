@@ -126,6 +126,37 @@ describe('deferred love maintenance', () => {
     });
   });
 
+  it('reopens a completed history run only for coverage and preserves its history progress', async () => {
+    await withMigratedDb((db) => {
+      link(db);
+      db.run(
+        `UPDATE linked_accounts SET forward_scrobbles=1,backfill_state='done',backfill_cursor='history-cursor',
+           backfill_total=24,backfill_done=24,backfill_failures=2,backfill_run_revision=8,
+           backfill_discovery_cursor='discovery-cursor',backfill_discovery_done=1,backfill_last_error='prior-error'
+         WHERE id='maintenance-link'`,
+      );
+      db.run(`INSERT INTO forward_deferred_love_heads(link_id,generation,love_artist_key,love_track_key,head_seq,created_at_ms)
+        VALUES('maintenance-link',1,'artist','track',1,1)`);
+      expect(db.tx(() => armLoveCoverage(db, { id: 'maintenance-link', generation: 1 }, 'artist', 'track'))).toBe(true);
+      expect(
+        db.one(`SELECT backfill_state,backfill_cursor,backfill_total,backfill_done,backfill_failures,
+          backfill_run_revision,backfill_discovery_cursor,backfill_discovery_done,backfill_last_error
+          FROM linked_accounts WHERE id='maintenance-link'`),
+      ).toEqual({
+        backfill_state: 'running',
+        backfill_cursor: 'history-cursor',
+        backfill_total: 24,
+        backfill_done: 24,
+        backfill_failures: 2,
+        backfill_run_revision: 9,
+        backfill_discovery_cursor: 'discovery-cursor',
+        backfill_discovery_done: 1,
+        backfill_last_error: 'prior-error',
+      });
+      expect(db.one('SELECT armed_seq FROM forward_deferred_love_heads')).toEqual({ armed_seq: 1 });
+    });
+  });
+
   it('starts frozen integer passes, removes cancellations, and stays within whole-call budgets', async () => {
     await withMigratedDb((db) => {
       link(db);

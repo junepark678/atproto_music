@@ -243,6 +243,57 @@ describe('ListenBrainz forwarding', () => {
     ).toEqual({ retired_at_ms: null });
   });
 
+  it('fails closed when an exact B2 deferred witness has lost its positive authority row', async () => {
+    const w = await world();
+    const linkId = w.link();
+    const operationId = 'owned-without-authority';
+    const uri = `at://${ALICE}/com.example.atmusic.love/owned-missing-rkey`;
+    const rev = '3lbcdefghijkm';
+    const [artistKey, trackKeyValue] = trackKey('Owned Artist', 'Owned Track');
+    w.app.db.run(
+      `INSERT INTO live_pending_removal_events(uri,rev,action,cid,conflicted,created_at_ms,expires_at_ms)
+       VALUES(?,?,'delete','',0,?,?)`,
+      uri,
+      rev,
+      w.clock.nowMs(),
+      w.clock.nowMs() + DAY,
+    );
+    w.app.db.run(
+      `INSERT INTO forward_outbox(id,link_id,generation,did,kind,dedupe_key,payload_json,state,attempts,due_at,
+         created_at_ms,updated_at_ms,love_artist_key,love_track_key,authorization_uri,authorization_rev)
+       VALUES(?,?,1,?,'unlove',?,?,'queued',0,?,?,?,?,?,?,?)`,
+      'owned-missing-effect',
+      linkId,
+      ALICE,
+      operationId,
+      JSON.stringify({ artist: 'Owned Artist', track: 'Owned Track', recordingMbid: MBID }),
+      w.clock.nowMs(),
+      w.clock.nowMs(),
+      w.clock.nowMs(),
+      artistKey,
+      trackKeyValue,
+      uri,
+      rev,
+    );
+    w.app.db.run(
+      `INSERT INTO forward_deferred_love_witnesses(link_id,generation,operation_id,group_seq,kind,love_artist_key,
+         love_track_key,authorization_uri,authorization_rev,created_at_ms) VALUES(?,1,?,1,'unlove',?,?,?,?,?)`,
+      linkId,
+      operationId,
+      artistKey,
+      trackKeyValue,
+      uri,
+      rev,
+      w.clock.nowMs(),
+    );
+    await w.run();
+    expect(w.lb.feedback).toEqual([]);
+    expect(w.rows().find((row) => row.id === 'owned-missing-effect')).toMatchObject({
+      state: 'ignored',
+      last_error: 'authorization_unavailable',
+    });
+  });
+
   it('pins every love lane, kind and expiry query to its bounded index plan', async () => {
     const w = await world();
     const linkId = w.link();
