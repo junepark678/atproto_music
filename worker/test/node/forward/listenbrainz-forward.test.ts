@@ -23,6 +23,7 @@ import type { ForwardOutboxRow } from '../../../src/app/rows';
 import { ensureAccount } from '../../../src/credentials/accounts';
 import type { SqlParam } from '../../../src/do/db';
 import { migrate } from '../../../src/do/migrate';
+import { runLinkBackfill } from '../../../src/forward/backfill';
 import { runDeleteSlice } from '../../../src/forward/delete-forwarder';
 import {
   EXPIRY_PROBE_SQL,
@@ -43,7 +44,8 @@ import {
   nextForwardDue,
   runForward,
 } from '../../../src/forward/forwarder';
-import { deleteLink, saveLink } from '../../../src/forward/links';
+import { deleteLink, patchLink, saveLink } from '../../../src/forward/links';
+import { runDeferredLoveMaintenance } from '../../../src/forward/love-deferral-maintenance';
 import { HEAD_SQL, LANE_PICK_SQL, UNFRAMED_SQL, UNKEYED_SQL } from '../../../src/forward/love-lanes';
 import { UpstreamPacing } from '../../../src/forward/upstream-pacing';
 import { type LinksService, linksFeature } from '../../../src/http/links';
@@ -51,6 +53,7 @@ import { parseSecrets } from '../../../src/node/secrets';
 import { openSqliteDb, type SqliteDb } from '../../../src/node/sqlite-db';
 import { enqueueForwards, type ForwardItem } from '../../../src/outbox/forward-enqueue';
 import { enqueueLove, enqueueUnlove } from '../../../src/outbox/love-ops';
+import { cancelUnsent } from '../../../src/outbox/operations';
 import { closeApps, startApp, type TestApp, testSecretsDocument } from '../support/app';
 import { FakeLastfm } from '../support/fake-lastfm';
 import { FakeListenBrainz, type LbSubmission } from '../support/fake-listenbrainz';
@@ -358,6 +361,95 @@ describe('ListenBrainz forwarding', () => {
     expect(w.lb.feedback[1]?.json).toEqual({ recording_mbid: MBID, score: 0 });
   });
 
+  it('carries a disabled API unlove through the production backfill coverage phase exactly once', async () => {
+    const w = await world();
+    const linkId = w.link();
+    const deps = w.app.composed.core.deps;
+    const artist = 'Deferred API Artist';
+    const track = 'Deferred API Track';
+    expect(
+      (await enqueueLove(deps, { did: ALICE, input: { artist, track, recordingMbid: MBID }, origin: 'web' })).ok,
+    ).toBe(true);
+    await w.run();
+    expect(w.lb.feedback.map((entry) => entry.json)).toEqual([{ recording_mbid: MBID, score: 1 }]);
+
+    expect(patchLink({ db: w.app.db, clock: w.clock }, ALICE, linkId, { forwardScrobbles: false })).not.toBeNull();
+    expect((await enqueueUnlove(deps, { did: ALICE, artist, track, origin: 'web' })).ok).toBe(true);
+    expect(w.app.db.one("SELECT count(*) AS n FROM forward_outbox WHERE kind='unlove'")).toEqual({ n: 0 });
+    expect(w.app.db.one('SELECT count(*) AS n FROM forward_deferred_love_intents')).toEqual({ n: 1 });
+
+    expect(patchLink({ db: w.app.db, clock: w.clock }, ALICE, linkId, { forwardScrobbles: true })).not.toBeNull();
+    w.app.db.run("INSERT INTO users(did,joined_at,indexing_state) VALUES(?,'2026-01-15T00:00:00Z','current')", ALICE);
+    await runLinkBackfill(w.app.db, w.rt.random, w.clock.nowMs());
+    await runLinkBackfill(w.app.db, w.rt.random, w.clock.nowMs());
+    expect(w.app.db.all("SELECT kind,state,dedupe_key FROM forward_outbox WHERE kind='unlove'")).toEqual([
+      expect.objectContaining({ kind: 'unlove', state: 'queued' }),
+    ]);
+    expect(w.app.db.one('SELECT count(*) AS n FROM forward_deferred_love_intents')).toEqual({ n: 1 });
+    w.clock.advance(SECOND);
+    await w.run();
+    expect(w.lb.feedback.map((entry) => entry.json)).toEqual([
+      { recording_mbid: MBID, score: 1 },
+      { recording_mbid: MBID, score: 0 },
+    ]);
+    expect(w.app.db.one("SELECT count(*) AS n FROM forward_outbox WHERE kind='unlove'")).toEqual({ n: 1 });
+  });
+
+  it('re-arms the earlier deferred unlove when a later API love is cancelled before send', async () => {
+    const w = await world();
+    const linkId = w.link();
+    const deps = w.app.composed.core.deps;
+    const artist = 'Cancelled Relove Artist';
+    const track = 'Cancelled Relove Track';
+    await enqueueLove(deps, { did: ALICE, input: { artist, track, recordingMbid: MBID }, origin: 'web' });
+    await w.run();
+    expect(w.lb.feedback.map((entry) => entry.json)).toEqual([{ recording_mbid: MBID, score: 1 }]);
+    patchLink({ db: w.app.db, clock: w.clock }, ALICE, linkId, { forwardScrobbles: false });
+    await enqueueUnlove(deps, { did: ALICE, artist, track, origin: 'web' });
+    const relove = await enqueueLove(deps, {
+      did: ALICE,
+      input: { artist, track, recordingMbid: MBID },
+      origin: 'web',
+    });
+    expect(relove.ok).toBe(true);
+    if (!relove.ok) return;
+    expect(w.app.db.all('SELECT kind,origin_class FROM forward_deferred_love_intents ORDER BY intent_seq')).toEqual([
+      { kind: 'unlove', origin_class: 'operation' },
+      { kind: 'love', origin_class: 'live_love' },
+    ]);
+    runDeferredLoveMaintenance(w.app.db, w.clock.nowMs());
+    expect(w.app.db.all('SELECT live_from_seq FROM forward_deferred_love_heads')).toEqual([{ live_from_seq: 1 }]);
+    expect(cancelUnsent(w.app.db, relove.operation.id, w.clock.nowMs())).toBe(true);
+    expect(w.app.db.all('SELECT kind,operation_id FROM forward_deferred_love_intents')).toEqual([
+      expect.objectContaining({ kind: 'unlove' }),
+    ]);
+
+    patchLink({ db: w.app.db, clock: w.clock }, ALICE, linkId, { forwardScrobbles: true });
+    w.app.db.run("INSERT INTO users(did,joined_at,indexing_state) VALUES(?,'2026-01-15T00:00:00Z','current')", ALICE);
+    await runLinkBackfill(w.app.db, w.rt.random, w.clock.nowMs());
+    await runLinkBackfill(w.app.db, w.rt.random, w.clock.nowMs());
+    expect(
+      w.app.db.one('SELECT backfill_state,backfill_discovery_done FROM linked_accounts WHERE id=?', linkId),
+    ).toEqual({
+      backfill_state: 'running',
+      backfill_discovery_done: 1,
+    });
+    expect(w.app.db.all('SELECT kind,operation_id,origin_class FROM forward_deferred_love_intents')).toEqual([
+      expect.objectContaining({ kind: 'unlove', origin_class: 'operation' }),
+    ]);
+    expect(w.app.db.all('SELECT live_from_seq FROM forward_deferred_love_heads')).toEqual([{ live_from_seq: 1 }]);
+    expect(w.app.db.all("SELECT kind,state FROM forward_outbox WHERE kind='unlove'")).toEqual([
+      { kind: 'unlove', state: 'queued' },
+    ]);
+    w.clock.advance(SECOND);
+    await w.run();
+    expect(w.lb.feedback.map((entry) => entry.json)).toEqual([
+      { recording_mbid: MBID, score: 1 },
+      { recording_mbid: MBID, score: 0 },
+    ]);
+    expect(w.app.db.one("SELECT count(*) AS n FROM forward_outbox WHERE kind='unlove'")).toEqual({ n: 1 });
+  });
+
   it('persists the matched upstream target, then deletes that exact listen on a later paced invocation', async () => {
     const w = await world();
     const linkId = w.link();
@@ -470,7 +562,7 @@ describe('ListenBrainz forwarding', () => {
     await w.app.close();
     let db: SqliteDb | null = openSqliteDb(path, { busyTimeoutMs: 200 });
     try {
-      expect(migrate(db)).toEqual({ status: 'ready', version: 55 });
+      expect(migrate(db)).toEqual({ status: 'ready', version: 56 });
       expect(
         db.one('SELECT target_msid,target_listened_at FROM listenbrainz_deletes WHERE id=?', 'restart-delete'),
       ).toEqual({
@@ -495,7 +587,7 @@ describe('ListenBrainz forwarding', () => {
       expect(retry).toMatchObject({ target_msid: msid, target_listened_at: listenedAt + 1 });
       db.close();
       db = openSqliteDb(path, { busyTimeoutMs: 200 });
-      expect(migrate(db)).toEqual({ status: 'ready', version: 55 });
+      expect(migrate(db)).toEqual({ status: 'ready', version: 56 });
       w.clock.set(new Date(retry!.due_at).toISOString());
       expect(
         (
@@ -1967,6 +2059,18 @@ it('review: external unlove retains its known MBID after terminal forward GC', a
   w.app.db.run("DELETE FROM forward_outbox WHERE state='sent'");
   w.clock.advance(2000);
   const d = await deleteProof(repo, `${PREFIX}.love`, 'review-love');
+  const { enqueueHints } = await import('../../../src/do/ingest/hints');
+  enqueueHints(w.app.db, [
+    {
+      did: ALICE,
+      collection: `${PREFIX}.love`,
+      rkey: 'review-love',
+      source: 'jetstream',
+      hintRev: d.commit.rev,
+      live: { operation: 'delete' },
+      receiptMs: w.clock.nowMs(),
+    },
+  ]);
   w.app.db.tx(() => applyRecordProof(w.app.db, d, authorizedLiveOptions(w.app.db, d, seededRandom(999))));
   await w.run();
   expect(w.rows().filter((r) => r.kind === 'unlove')).toHaveLength(1);

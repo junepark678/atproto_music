@@ -53,6 +53,7 @@
 import type { Random } from '@atmusic/core/deps';
 import type { ForwardKind, ForwardOutboxRow, LinkService } from '../app/rows';
 import type { Db } from '../do/db';
+import { recordLoveDelivery, type SentLoveRow } from './love-delivery';
 import { touchLoveLane } from './love-lanes';
 
 const SECOND = 1_000;
@@ -296,21 +297,28 @@ export function settleRows(
   countAttempt = true,
   generation?: number,
 ): void {
-  inSlices(db, ids, (slice) =>
-    db.run(
-      `UPDATE forward_outbox SET state = ?, last_error = ?, attempts = attempts + ?, updated_at_ms = ?
+  inSlices(db, ids, (slice) => {
+    const sql = `UPDATE forward_outbox SET state = ?, last_error = ?, attempts = attempts + ?, updated_at_ms = ?
        WHERE id IN (${inList(slice)}) AND state='queued'
          AND generation=coalesce(?,generation)
          AND EXISTS (SELECT 1 FROM linked_accounts AS link
-                     WHERE link.id=forward_outbox.link_id AND link.generation=forward_outbox.generation)`,
+                     WHERE link.id=forward_outbox.link_id AND link.generation=forward_outbox.generation)`;
+    const params = [
       state,
       error === null ? null : clip(error),
       countAttempt ? 1 : 0,
       now,
       ...slice,
       generation ?? null,
-    ),
-  );
+    ];
+    if (state === 'sent') {
+      const rows = db.all<SentLoveRow>(
+        `${sql} RETURNING link_id,generation,kind,dedupe_key,love_artist_key,love_track_key,created_at_ms`,
+        ...params,
+      );
+      recordLoveDelivery(db, rows, now);
+    } else db.run(sql, ...params);
+  });
 }
 
 /** Queues `ids` again at `dueAt`; `countAttempt` adds one to their attempts. */

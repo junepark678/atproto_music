@@ -2,6 +2,7 @@ import type { Random } from '@atmusic/core/deps';
 import { trackKey } from '@atmusic/core/music-key';
 import { BATCH_MAX_LISTENS } from '@atmusic/core/scrobble-batch';
 import { executeListenRemovals, type LiveRemovedListen } from '../../forward/live-removal-effects';
+import { conflictDeferredLoveAuthority } from '../../forward/love-coverage-authority';
 import { projectionListenKey } from '../../forward/projection';
 import { enqueueLiveUnlove } from '../../outbox/forward-enqueue';
 import { tombstoneLove } from '../../sync/tombstones';
@@ -460,6 +461,7 @@ export function authorizePendingRemovals(
       event.uri,
       event.rev,
     );
+  if (conflict) conflictDeferredLoveAuthority(db, event.uri, event.rev);
   const scan = db.one<AuthorizationEvent>(
     'SELECT * FROM live_pending_removal_events WHERE uri=? AND rev=?',
     event.uri,

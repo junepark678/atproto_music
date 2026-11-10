@@ -40,6 +40,7 @@ import { MusicKeyError, trackKey } from '@atmusic/core/music-key';
 import type { ForwardKind } from '../app/rows';
 import type { Db } from '../do/db';
 import { countLinkCoverage } from '../forward/coverage';
+import { recordDeferredLoveIntents } from '../forward/love-deferral-storage';
 import { noteForwardLoveCurrent, touchLoveLane } from '../forward/love-lanes';
 import { indexForwardLoveTarget } from '../forward/love-recording-targets';
 import { storedForwardDedupeKey } from './forward-key';
@@ -136,6 +137,7 @@ export function enqueueForwards(db: Db, args: EnqueueForwardsArgs): number {
     throw new RangeError('dueAt must be a non-negative safe integer of epoch ms');
   }
   return db.tx(() => {
+    recordDeferredLoveIntents(db, args);
     const links = db.all<{
       id: string;
       generation: number;

@@ -11,6 +11,9 @@ import { matchedRecordingMbid } from '../musicbrainz/store';
 import { enqueueForwards } from '../outbox/forward-enqueue';
 import { closeOpenLinkGap, ownsAdmissionInGap } from './coverage';
 import type { ForwardRuntime } from './forwarder';
+import { runLoveCoverageChunk } from './love-coverage';
+import { LOVE_MAINTENANCE_QUIET_MS, runDeferredLoveMaintenance } from './love-deferral-maintenance';
+import { hasArmedLoveCoverage } from './love-deferral-storage';
 import { ensureLegacyLoveIncarnation } from './love-incarnation';
 import { latestExplicitLoveIntent } from './love-intent';
 import { resolveLoveRecording } from './love-recording';
@@ -474,7 +477,7 @@ export async function runLinkBackfill(
           link.generation,
           link.backfill_run_revision,
         )?.n;
-        if (remaining === 0 && row.backfill_discovery_done === 1) {
+        if (remaining === 0 && row.backfill_discovery_done === 1 && !hasArmedLoveCoverage(db, link)) {
           db.run(
             "UPDATE linked_accounts SET backfill_state='done',backfill_failures=0,backfill_next_attempt_ms=NULL WHERE id=? AND generation=? AND backfill_run_revision=? AND status='active' AND forward_scrobbles=1 AND backfill_state='running'",
             link.id,
@@ -487,6 +490,15 @@ export async function runLinkBackfill(
       return committed ? page.length : 0;
     }
     if (current.backfill_discovery_done === 1) {
+      const queuedHistory = db.one<{ n: number }>(
+        "SELECT count(*) AS n FROM forward_outbox WHERE priority=1 AND state='queued'",
+      )?.n;
+      if (queuedHistory === undefined) throw new Error('missing history queue count');
+      const queueSpace = BACKFILL_HISTORY_QUEUE_HIGH_WATER - queuedHistory;
+      if (queueSpace <= 0) return 0;
+      const covered = runLoveCoverageChunk(db, link, now, random, Math.min(128, queueSpace));
+      if (covered > 0) return covered;
+      if (hasArmedLoveCoverage(db, link)) return 0;
       db.run(
         "UPDATE linked_accounts SET backfill_state='done',backfill_failures=0,backfill_next_attempt_ms=NULL WHERE id=? AND generation=? AND backfill_run_revision=? AND status='active' AND forward_scrobbles=1 AND backfill_state='running'",
         link.id,
@@ -586,31 +598,49 @@ export function linkBackfillExtension(runtime: () => ForwardRuntime | null): Cor
     timers: {
       'link-backfill': async (now, ctx) => {
         const rt = runtime();
-        if (rt === null) return;
+        let planned: number | null = null;
         try {
+          if (rt === null) return;
           const scanned = await runLinkBackfill(rt.db, rt.random, now);
-          if (scanned > 0) ctx.schedule('link-backfill', now, { force: true });
+          if (scanned > 0) planned = now;
           else {
             const next = rt.db.one<{ next: number | null }>(
               "SELECT min(backfill_next_attempt_ms) AS next FROM linked_accounts WHERE status='active' AND forward_scrobbles=1 AND backfill_state IN ('pending','running') AND backfill_next_attempt_ms>?",
               now,
             )?.next;
-            ctx.schedule(
-              'link-backfill',
-              next === null || next === undefined ? now + BACKFILL_IDLE_MS : Math.min(now + BACKFILL_IDLE_MS, next),
-              { force: true },
-            );
+            planned =
+              next === null || next === undefined ? now + BACKFILL_IDLE_MS : Math.min(now + BACKFILL_IDLE_MS, next);
           }
         } catch (error) {
           if (!(error instanceof BackfillAttemptFailure)) throw error;
+          if (rt === null) throw error;
           const result = recordBackfillFailure(rt.db, error.attempt, now);
-          if (result === null) return;
-          ctx.schedule('link-backfill', result.retryAt ?? now + BACKFILL_IDLE_MS, { force: true });
-          rt.log.log('warn', 'forward.backfill_retry', {
-            generation: error.attempt.generation,
-            delayMs: result.retryAt === null ? null : result.retryAt - now,
-            error: error.originalError instanceof Error ? error.originalError.name : 'UnknownError',
-          });
+          if (result !== null) {
+            planned = result.retryAt ?? now + BACKFILL_IDLE_MS;
+            rt.log.log('warn', 'forward.backfill_retry', {
+              generation: error.attempt.generation,
+              delayMs: result.retryAt === null ? null : result.retryAt - now,
+              error: error.originalError instanceof Error ? error.originalError.name : 'UnknownError',
+            });
+          }
+        } finally {
+          if (rt !== null) {
+            let wake = LOVE_MAINTENANCE_QUIET_MS;
+            try {
+              wake = runDeferredLoveMaintenance(rt.db, now).wakeMs;
+            } catch (error) {
+              try {
+                rt.log.log('warn', 'forward.deferred_love_maintenance_failed', {
+                  error: error instanceof Error ? error.name : 'UnknownError',
+                });
+              } catch {
+                // The maintenance failure remains bounded by the quiet retry.
+              }
+            }
+            ctx.schedule('link-backfill', planned === null ? now + wake : Math.min(planned, now + wake), {
+              force: true,
+            });
+          }
         }
       },
     },

@@ -33,6 +33,7 @@
 
 import { isTid } from '@atmusic/core/syntax';
 import { fromMs, toStorage } from '@atmusic/core/timestamp';
+import { compareDeferredLoveAuthority } from '../../forward/love-coverage-authority';
 import type { Db } from '../db';
 import { recordEvent } from '../status';
 import { schedule } from '../timers';
@@ -152,6 +153,12 @@ function upsertHint(db: Db, h: HintInput): string {
     const conflicted =
       db.one<{ conflict_rev: string | null }>('SELECT conflict_rev FROM live_record_evidence WHERE uri=?', uri)
         ?.conflict_rev === hintRev;
+    const deferredConflicted = compareDeferredLoveAuthority(db, {
+      uri,
+      rev: hintRev!,
+      action: h.live.operation,
+      cid: h.live.cid ?? '',
+    });
     authorizePendingRemovals(
       db,
       {
@@ -159,7 +166,7 @@ function upsertHint(db: Db, h: HintInput): string {
         rev: hintRev!,
         action: h.live.operation,
         ...(h.live.cid === undefined ? {} : { cid: h.live.cid }),
-        conflicted,
+        conflicted: conflicted || deferredConflicted,
       },
       h.receiptMs,
     );

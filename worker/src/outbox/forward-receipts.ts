@@ -1,5 +1,5 @@
 import type { Db } from '../do/db';
-import { storedForwardDedupeKey } from './forward-key';
+import { storedForwardDedupeKey } from './forward-identity';
 
 export type ReceiptKind = 'scrobble' | 'love' | 'unlove';
 export type LinkGeneration = { id: string; generation: number };
