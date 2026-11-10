@@ -1072,8 +1072,9 @@ function allowAuthorizedUnlove(rt: ForwardRuntime, job: Job, now: number): boole
     settleRows(rt.db, [row.id], 'ignored', now, 'authorization_conflicted', false, job.link.generation);
     return false;
   }
-  if (!owned) return true; // Accepted pre-56 effects retain their A2 contract.
   const authority = deferredAuthorityStatus(rt.db, { uri: current.authorization_uri, rev: current.authorization_rev });
+  // Legacy acceptance retains its A2 contract, but never overrides a known sticky negative.
+  if (!owned && authority !== 'conflicted') return true;
   if (authority === 'active') return true;
   settleRows(
     rt.db,

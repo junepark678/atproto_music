@@ -46,6 +46,7 @@ import {
   runForward,
 } from '../../../src/forward/forwarder';
 import { deleteLink, patchLink, saveLink } from '../../../src/forward/links';
+import { conflictDeferredLoveAuthority, materializeLoveAuthority } from '../../../src/forward/love-coverage-authority';
 import { runDeferredLoveMaintenance } from '../../../src/forward/love-deferral-maintenance';
 import { HEAD_SQL, LANE_PICK_SQL, UNFRAMED_SQL, UNKEYED_SQL } from '../../../src/forward/love-lanes';
 import { UpstreamPacing } from '../../../src/forward/upstream-pacing';
@@ -190,58 +191,71 @@ function queueDelete(w: World, linkId: string, id: string, listenedAt: number, a
 }
 
 describe('ListenBrainz forwarding', () => {
-  it('dispatches a genuinely accepted schema-55 authorized unlove after upgrading the same live database to 56', async () => {
-    const w = await world(MIGRATIONS.slice(0, 55));
-    const linkId = w.link();
-    const operationId = 'legacy55-unlove';
-    const uri = `at://${ALICE}/com.example.atmusic.love/legacy55-rkey`;
-    const rev = '3lbcdefghij55';
-    const [artistKey, trackKeyValue] = trackKey('Legacy Artist', 'Legacy Track');
-    w.app.db.run(
-      `INSERT INTO live_pending_removal_events(uri,rev,action,cid,conflicted,created_at_ms,expires_at_ms)
+  it.each([false, true])(
+    'preserves schema-55 accepted effects unless a retained B2 conflict vetoes them (%s)',
+    async (conflicted) => {
+      const w = await world(MIGRATIONS.slice(0, 55));
+      const linkId = w.link();
+      const operationId = 'legacy55-unlove';
+      const uri = `at://${ALICE}/com.example.atmusic.love/legacy55-rkey`;
+      const rev = '3lbcdefghij55';
+      const [artistKey, trackKeyValue] = trackKey('Legacy Artist', 'Legacy Track');
+      w.app.db.run(
+        `INSERT INTO live_pending_removal_events(uri,rev,action,cid,conflicted,created_at_ms,expires_at_ms)
        VALUES(?,?,'delete','',0,?,?)`,
-      uri,
-      rev,
-      w.clock.nowMs(),
-      w.clock.nowMs() + DAY,
-    );
-    w.app.db.run(
-      `INSERT INTO forward_outbox(id,link_id,generation,did,kind,dedupe_key,payload_json,state,attempts,due_at,
+        uri,
+        rev,
+        w.clock.nowMs(),
+        w.clock.nowMs() + DAY,
+      );
+      w.app.db.run(
+        `INSERT INTO forward_outbox(id,link_id,generation,did,kind,dedupe_key,payload_json,state,attempts,due_at,
          created_at_ms,updated_at_ms,love_artist_key,love_track_key,authorization_uri,authorization_rev)
        VALUES(?,?,1,?,'unlove',?,?,'queued',0,?,?,?, ?,?,?,?)`,
-      'legacy55-effect',
-      linkId,
-      ALICE,
-      operationId,
-      JSON.stringify({ artist: 'Legacy Artist', track: 'Legacy Track', recordingMbid: MBID }),
-      w.clock.nowMs(),
-      w.clock.nowMs(),
-      w.clock.nowMs(),
-      artistKey,
-      trackKeyValue,
-      uri,
-      rev,
-    );
-    w.app.db.run(
-      `INSERT INTO forward_receipts(link_id,generation,kind,dedupe_key,created_at_ms)
+        'legacy55-effect',
+        linkId,
+        ALICE,
+        operationId,
+        JSON.stringify({ artist: 'Legacy Artist', track: 'Legacy Track', recordingMbid: MBID }),
+        w.clock.nowMs(),
+        w.clock.nowMs(),
+        w.clock.nowMs(),
+        artistKey,
+        trackKeyValue,
+        uri,
+        rev,
+      );
+      w.app.db.run(
+        `INSERT INTO forward_receipts(link_id,generation,kind,dedupe_key,created_at_ms)
        VALUES(?,1,'unlove',?,?)`,
-      linkId,
-      operationId,
-      w.clock.nowMs(),
-    );
-    expect(migrate(w.app.db).status).toBe('ready');
-    expect(w.app.db.one('SELECT count(*) AS n FROM forward_deferred_love_witnesses')).toEqual({ n: 0 });
-    await w.run();
-    expect(w.lb.feedback.map((entry) => entry.json)).toEqual([{ recording_mbid: MBID, score: 0 }]);
-    expect(w.rows().find((row) => row.id === 'legacy55-effect')?.state).toBe('sent');
-    expect(
-      w.app.db.one(
-        "SELECT retired_at_ms FROM forward_receipts WHERE link_id=? AND kind='unlove' AND dedupe_key=?",
         linkId,
         operationId,
-      ),
-    ).toEqual({ retired_at_ms: null });
-  });
+        w.clock.nowMs(),
+      );
+      expect(migrate(w.app.db).status).toBe('ready');
+      expect(w.app.db.one('SELECT count(*) AS n FROM forward_deferred_love_witnesses')).toEqual({ n: 0 });
+      if (conflicted) {
+        // Legacy provenance never overrides a retained negative after A2 facts are gone.
+        w.app.db.tx(() => {
+          expect(materializeLoveAuthority(w.app.db, { uri, rev }, w.clock.nowMs())).toBe('active');
+          expect(conflictDeferredLoveAuthority(w.app.db, uri, rev)).toBe(true);
+          w.app.db.run('DELETE FROM live_pending_removal_events WHERE uri=? AND rev=?', uri, rev);
+        });
+      }
+      await w.run();
+      expect(w.lb.feedback.map((entry) => entry.json)).toEqual(conflicted ? [] : [{ recording_mbid: MBID, score: 0 }]);
+      expect(w.rows().find((row) => row.id === 'legacy55-effect')?.state).toBe(conflicted ? 'ignored' : 'sent');
+      if (conflicted)
+        expect(w.rows().find((row) => row.id === 'legacy55-effect')?.last_error).toBe('authorization_conflicted');
+      expect(
+        w.app.db.one(
+          "SELECT retired_at_ms FROM forward_receipts WHERE link_id=? AND kind='unlove' AND dedupe_key=?",
+          linkId,
+          operationId,
+        ),
+      ).toEqual({ retired_at_ms: null });
+    },
+  );
 
   it('fails closed when an exact B2 deferred witness has lost its positive authority row', async () => {
     const w = await world();
