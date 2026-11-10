@@ -71,6 +71,7 @@ type OwnedTest = ReturnType<typeof ownTest>;
 
 /** Register test-owned roots and global state before the first render. */
 export function ownTest(signal: AbortSignal) {
+  if (signal.aborted) throw new DOMException('Test owner closed', 'AbortError');
   type Root = { element: HTMLElement; mounted: boolean };
   const roots = new Set<Root>();
   const releases = new Set<() => void>();

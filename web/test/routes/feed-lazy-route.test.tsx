@@ -35,6 +35,25 @@ vi.mock('../../src/components/scrobble-list', async (importOriginal) => {
 });
 
 describe('real cold feed route readiness', () => {
+  it('refuses an already-aborted owner before touching the next test globals', () => {
+    const controller = new AbortController();
+    controller.abort();
+    const fetch = globalThis.fetch;
+    const windowFetch = Object.getOwnPropertyDescriptor(window, 'fetch');
+    const url = window.location.href;
+    let failure: unknown;
+    try {
+      ownTest(controller.signal);
+    } catch (error) {
+      failure = error;
+    }
+    expect(globalThis.fetch).toBe(fetch);
+    expect(Object.getOwnPropertyDescriptor(window, 'fetch')).toEqual(windowFetch);
+    expect(window.location.href).toBe(url);
+    expect(failure).toBeInstanceOf(DOMException);
+    expect((failure as DOMException).name).toBe('AbortError');
+  });
+
   it('holds the real lazy route, then verifies cold and warm route behavior', async ({ signal }) => {
     const owner = ownTest(signal);
     owner.onCleanup(gate.release);
