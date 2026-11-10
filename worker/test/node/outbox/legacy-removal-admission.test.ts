@@ -100,9 +100,30 @@ function seedRecordState(h: Harness, uri: string, collection: string, revision: 
   );
 }
 
+async function forwardingControl(h: Harness) {
+  const links = [h.link(h.alice, 'lastfm'), h.link(h.alice, 'listenbrainz')];
+  const rkey = '3kpositive-forward-control';
+  await h.kit.externalPut('Alice', SCROBBLE, rkey, {
+    $type: SCROBBLE,
+    artist: 'Fresh control artist',
+    track: 'Fresh control track',
+    listenedAt: '2026-01-14T07:00:00Z',
+    createdAt: '2026-01-14T07:00:00Z',
+  });
+  expect(apply(h, await proofAt(h, SCROBBLE, rkey)).outcome).toBe('applied');
+  const rows = h.db.all<{ id: string; link_id: string; kind: string; dedupe_key: string }>(
+    "SELECT id,link_id,kind,dedupe_key FROM forward_outbox WHERE kind='scrobble' ORDER BY link_id",
+  );
+  expect(rows).toHaveLength(2);
+  expect(rows.map((row) => row.link_id).sort()).toEqual(links.sort());
+  expect(new Set(rows.map((row) => row.dedupe_key)).size).toBe(1);
+  return rows;
+}
+
 it('seeds Last.fm and snapshot admissions before absence so a new rkey does not echo', async () => {
   await withHarness(async (h) => {
     h.seedUser(h.alice);
+    const before = await forwardingControl(h);
     const rkey = '3klegacy-removed';
     const uri = `at://${h.alice}/${SCROBBLE}/${rkey}`;
     const body = {
@@ -135,11 +156,14 @@ it('seeds Last.fm and snapshot admissions before absence so a new rkey does not 
     const newRkey = '3klegacy-reprojected';
     await h.kit.externalPut('Alice', SCROBBLE, newRkey, body);
     expect(apply(h, await proofAt(h, SCROBBLE, newRkey)).outcome).toBe('applied');
-    expect(h.db.all("SELECT kind FROM forward_outbox WHERE kind='scrobble'")).toEqual([]);
+    expect(
+      h.db.all("SELECT id,link_id,kind,dedupe_key FROM forward_outbox WHERE kind='scrobble' ORDER BY link_id"),
+    ).toEqual(before);
   });
 
   await withHarness(async (h) => {
     h.seedUser(h.alice);
+    const before = await forwardingControl(h);
     const rkey = '3ksnapshot-removed';
     const uri = `at://${h.alice}/${SCROBBLE}/${rkey}`;
     const listenedAt = '2026-01-14T09:00:00Z';
@@ -175,7 +199,9 @@ it('seeds Last.fm and snapshot admissions before absence so a new rkey does not 
       createdAt: listenedAt,
     });
     expect(apply(h, await proofAt(h, SCROBBLE, newRkey)).outcome).toBe('applied');
-    expect(h.db.all("SELECT kind FROM forward_outbox WHERE kind='scrobble'")).toEqual([]);
+    expect(
+      h.db.all("SELECT id,link_id,kind,dedupe_key FROM forward_outbox WHERE kind='scrobble' ORDER BY link_id"),
+    ).toEqual(before);
   });
 });
 
