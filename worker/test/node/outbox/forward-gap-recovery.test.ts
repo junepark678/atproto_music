@@ -322,7 +322,26 @@ describe('forward coverage gap recovery', () => {
           'SELECT generation,kind,dedupe_key,state,attempts,last_error,payload_json FROM forward_outbox WHERE link_id=?',
           link.id,
         );
+        // This sequence retains every accepted identity except the explicit
+        // cancellation below. Check the complete expected set so losing both
+        // a row and its receipt cannot satisfy the pairwise checks.
+        const expectedIdentities = [...expected.keys()].sort();
+        expect(rows.map((row) => identity(row.generation, row.kind, row.dedupe_key)).sort()).toEqual(
+          expectedIdentities,
+        );
+        expect(
+          receipts
+            .map((receipt) =>
+              identity(
+                receipt.generation,
+                receipt.kind,
+                storedForwardDedupeKey(receipt.generation, receipt.dedupe_key),
+              ),
+            )
+            .sort(),
+        ).toEqual(expectedIdentities);
         for (const receipt of receipts) {
+          expect(receipt.retired_at_ms).toBeNull();
           const tuple = identity(
             receipt.generation,
             receipt.kind,

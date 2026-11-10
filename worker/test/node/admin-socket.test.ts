@@ -189,6 +189,18 @@ describe('admin socket', () => {
       clock.nowMs(),
     );
 
+    server.db.run(
+      `INSERT INTO forward_receipts(link_id,generation,kind,dedupe_key,created_at_ms)
+       VALUES ('metric-link',1,'scrobble','metric-listen',?)`,
+      clock.nowMs(),
+    );
+    server.db.run(
+      `INSERT INTO forward_link_gaps(link_id,generation,from_seq,to_seq,reason,opened_at_ms,closed_at_ms)
+       VALUES ('metric-link',1,0,1,'disabled',?,?)`,
+      clock.nowMs(),
+      clock.nowMs(),
+    );
+
     expect(refreshForwardStorageStats(server.db, clock.nowMs())).toBe(true);
     expect(refreshForwardStorageStats(server.db, clock.nowMs() + FORWARD_STORAGE_STATS_REFRESH_MS - 1)).toBe(false);
     const response = await request({ socketPath: server.adminSocket }, 'GET', '/admin/status');
@@ -235,6 +247,8 @@ describe('admin socket', () => {
         love_delete_bridges: { rows: 1, logicalBytesEstimate: deleteBridgeBytes },
         love_import_bridges: { rows: 1, logicalBytesEstimate: importBridgeBytes },
         forward_outbox: { rows: 1, logicalBytesEstimate: outboxBytes },
+        forward_receipts: { rows: 1, logicalBytesEstimate: byteLength('metric-link', 'scrobble', 'metric-listen') },
+        forward_link_gaps: { rows: 1, logicalBytesEstimate: byteLength('metric-link', 'disabled') },
       },
     });
     expect(response.json.counters).toContainEqual({

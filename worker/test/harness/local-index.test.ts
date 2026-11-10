@@ -262,6 +262,18 @@ const SEED_ROWS: Record<string, Record<string, SqlParam>[]> = {
       updated_at_ms: NOW,
     },
   ],
+  forward_receipts: [{ link_id: 'l1', generation: 1, kind: 'scrobble', dedupe_key: 'k1', created_at_ms: NOW }],
+  forward_link_gaps: [
+    {
+      link_id: 'l1',
+      generation: 1,
+      from_seq: 0,
+      to_seq: 1,
+      reason: 'disabled',
+      opened_at_ms: NOW,
+      closed_at_ms: NOW + 1,
+    },
+  ],
   listenbrainz_deletes: [
     {
       id: 'delete-seed',
@@ -602,7 +614,7 @@ describe('worker/test/harness', () => {
   it('the migration ledger is ordered across the N/M, M4, S1, S2, S3 and S4 stack', async () => {
     const versions = MIGRATIONS.map((m) => m.version);
     expect(versions.slice(0, 14)).toEqual(Array.from({ length: 14 }, (_, i) => i + 1));
-    expect(versions.slice(-22)).toEqual(Array.from({ length: 22 }, (_, i) => i + 33));
+    expect(versions.slice(-23)).toEqual(Array.from({ length: 23 }, (_, i) => i + 33));
     expect(versions.every((version, index) => index === 0 || version > (versions[index - 1] ?? 0))).toBe(true);
     expect(SCHEMA_VERSION).toBe(MIGRATIONS[MIGRATIONS.length - 1]?.version);
     expect(MIGRATIONS.length).toBeGreaterThanOrEqual(2);
