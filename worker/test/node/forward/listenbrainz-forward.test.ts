@@ -17,6 +17,7 @@ import { routerTransport } from '@atmusic/atproto/test-support/router-transport'
 import { albumKey, trackKey } from '@atmusic/core/music-key';
 import { type FixedClock, fixedClock } from '@atmusic/core/test-support/clock';
 import { seededRandom } from '@atmusic/core/test-support/random';
+import { fromMs, toStorage } from '@atmusic/core/timestamp';
 import { afterEach, describe, expect, it } from 'vitest';
 import { MemoryRevocations } from '../../../src/app/revocations';
 import type { ForwardOutboxRow } from '../../../src/app/rows';
@@ -51,9 +52,11 @@ import { runDeferredLoveMaintenance } from '../../../src/forward/love-deferral-m
 import { HEAD_SQL, LANE_PICK_SQL, UNFRAMED_SQL, UNKEYED_SQL } from '../../../src/forward/love-lanes';
 import { UpstreamPacing } from '../../../src/forward/upstream-pacing';
 import { type LinksService, linksFeature } from '../../../src/http/links';
+import { enqueueRevivedLoves } from '../../../src/musicbrainz/revive-loves';
 import { parseSecrets } from '../../../src/node/secrets';
 import { openSqliteDb, type SqliteDb } from '../../../src/node/sqlite-db';
-import { enqueueForwards, type ForwardItem } from '../../../src/outbox/forward-enqueue';
+import { enqueueForwards, enqueueLiveUnlove, type ForwardItem } from '../../../src/outbox/forward-enqueue';
+import { PRESENT_TRACK_LOVE_SQL } from '../../../src/outbox/live-track-survivor';
 import { enqueueLove, enqueueUnlove } from '../../../src/outbox/love-ops';
 import { cancelUnsent } from '../../../src/outbox/operations';
 import { stageLovePage } from '../../../src/sync/pull-staging';
@@ -2282,12 +2285,12 @@ it('keeps a verified live-delete unlove off the wire while a same-track love sur
     w.clock.nowMs(),
     w.clock.nowMs(),
   );
-  w.app.db.run(
-    `INSERT INTO linked_pull_state(link_id,generation,source_service,source_account,listen_watermark_ms,updated_at_ms)
-     VALUES(?,1,'lastfm','remote-fm',0,?)`,
-    sourceLinkId,
-    w.clock.nowMs(),
-  );
+  expect(
+    saveLink(
+      { db: w.app.db, clock: w.clock, random: w.rt.random, box: w.rt.box },
+      { did: ALICE, service: 'lastfm', remoteUser: 'remote-fm', credential: w.lastfm.addSession('remote-fm') },
+    ).link.id,
+  ).toBe(sourceLinkId);
   const recordingMbid = MBID;
   expect(
     stageLovePage(w.app.db, {
@@ -2366,6 +2369,23 @@ it('keeps a verified live-delete unlove off the wire while a same-track love sur
       }),
     );
   };
+  const drainQueued = async () => {
+    for (let step = 0; step < 12; step++) {
+      const queued =
+        w.app.db.one<{ n: number }>("SELECT count(*) AS n FROM forward_outbox WHERE state='queued'")?.n ?? 0;
+      if (queued === 0) return;
+      w.clock.advance(SECOND);
+      await w.run();
+    }
+    throw new Error('forwarding did not drain within deterministic pacing steps');
+  };
+
+  const plan = w.app.db.all<{ detail: string }>(
+    `EXPLAIN QUERY PLAN ${PRESENT_TRACK_LOVE_SQL}`,
+    ALICE,
+    ...trackKey('Projection Artist', 'Projection Track'),
+  );
+  expect(plan.map((entry) => entry.detail).join('\n')).toContain('loves_owner_track');
 
   // These are independent live URIs, not a projection of the queued import
   // operation. Its source exclusion does not propagate to their transitions.
@@ -2373,14 +2393,19 @@ it('keeps a verified live-delete unlove off the wire while a same-track love sur
   await applyVerified(first, 'create', 'projection-survivor-a');
   const second = await putProof(repo, collection, 'projection-survivor-b', makeRecord('2026-01-15T12:02:00Z'));
   await applyVerified(second, 'create', 'projection-survivor-b');
-  expect(
-    w.app.db.one("SELECT count(*) AS n FROM forward_outbox WHERE kind='unlove' AND link_id=?", targetLinkId),
-  ).toEqual({ n: 0 });
+  await drainQueued();
+  expect(w.lb.feedback.map((entry) => entry.json)).toEqual([
+    { recording_mbid: recordingMbid, score: 1 },
+    { recording_mbid: recordingMbid, score: 1 },
+    { recording_mbid: recordingMbid, score: 1 },
+  ]);
+  expect(w.lastfm.calls.count({ nsid: 'track.love' })).toBe(2);
+  expect(w.app.db.one("SELECT count(*) AS n FROM forward_outbox WHERE kind='unlove'")).toEqual({ n: 0 });
   const removeFirst = await deleteProof(repo, collection, 'projection-survivor-a');
   await applyVerified(removeFirst, 'delete', 'projection-survivor-a');
   expect(w.app.db.one('SELECT count(*) AS n FROM loves WHERE did=?', ALICE)).toEqual({ n: 1 });
   expect(
-    w.app.db.one("SELECT count(*) AS n FROM forward_outbox WHERE kind='unlove' AND link_id=?", targetLinkId),
+    w.app.db.one("SELECT count(*) AS n FROM forward_outbox WHERE kind='unlove'"),
     JSON.stringify({
       outbox: w.app.db.all("SELECT kind,state,dedupe_key,last_error FROM forward_outbox WHERE kind='unlove'"),
       loves: w.app.db.all('SELECT rkey,artist,track,recording_mbid FROM loves WHERE did=?', ALICE),
@@ -2390,22 +2415,296 @@ it('keeps a verified live-delete unlove off the wire while a same-track love sur
       ),
     }),
   ).toEqual({ n: 0 });
-  await w.run();
-  expect(w.lb.feedback.map((entry) => entry.json)).not.toContainEqual({ recording_mbid: recordingMbid, score: 0 });
+  await drainQueued();
+  expect(w.lb.feedback.map((entry) => entry.json)).toEqual([
+    { recording_mbid: recordingMbid, score: 1 },
+    { recording_mbid: recordingMbid, score: 1 },
+    { recording_mbid: recordingMbid, score: 1 },
+  ]);
+  expect(w.lastfm.calls.count({ nsid: 'track.unlove' })).toBe(0);
 
   const removeLast = await deleteProof(repo, collection, 'projection-survivor-b');
   await applyVerified(removeLast, 'delete', 'projection-survivor-b');
   expect(w.app.db.one('SELECT count(*) AS n FROM loves WHERE did=?', ALICE)).toEqual({ n: 0 });
-  await w.run();
+  await drainQueued();
   expect(w.lb.feedback.map((entry) => entry.json)).toEqual([
+    { recording_mbid: recordingMbid, score: 1 },
+    { recording_mbid: recordingMbid, score: 1 },
     { recording_mbid: recordingMbid, score: 1 },
     { recording_mbid: recordingMbid, score: 0 },
   ]);
-  expect(w.rows().filter((row) => row.kind === 'unlove' && row.state === 'sent')).toHaveLength(1);
+  expect(w.lastfm.calls.count({ nsid: 'track.unlove' })).toBe(1);
+  expect(
+    w
+      .rows()
+      .filter((row) => row.kind === 'unlove' && row.state === 'sent')
+      .map((row) => row.link_id)
+      .sort(),
+  ).toEqual([sourceLinkId, targetLinkId].sort());
   expect(
     w
       .rows()
       .filter((row) => row.kind === 'love' && row.dedupe_key === importedLoveKey)
       .map((row) => row.link_id),
   ).toEqual([targetLinkId]);
+});
+
+it('keeps explicit API unlove forwarding while the same canonical love remains projected', async () => {
+  const w = await world();
+  w.link();
+  const { seedUser } = await import('../../write/support');
+  seedUser(w.app.db, ALICE);
+  const artist = 'API Survivor Artist';
+  const track = 'API Survivor Track';
+  const [artistKey, trackKeyValue] = trackKey(artist, track);
+  w.app.db.run(
+    `INSERT INTO loves(uri,did,rkey,cid,artist,track,artist_key,track_key,recording_mbid,created_at,indexed_at)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+    `at://${ALICE}/com.example.atmusic.love/api-survivor`,
+    ALICE,
+    'api-survivor',
+    'cid-api-survivor',
+    artist,
+    track,
+    artistKey,
+    trackKeyValue,
+    MBID,
+    toStorage(fromMs(Date.parse('2026-01-15T11:59:00Z'))),
+    toStorage(fromMs(Date.parse('2026-01-15T12:00:00Z'))),
+  );
+  expect((await enqueueUnlove(w.app.composed.core.deps, { did: ALICE, artist, track, origin: 'web' })).ok).toBe(true);
+  expect(w.app.db.one("SELECT count(*) AS n FROM forward_outbox WHERE kind='unlove' AND state='queued'")).toEqual({
+    n: 1,
+  });
+  await w.run();
+  expect(w.lb.feedback.map((entry) => entry.json)).toEqual([{ recording_mbid: MBID, score: 0 }]);
+  expect(
+    w.app.db.one(
+      'SELECT count(*) AS n FROM loves WHERE did=? AND artist_key=? AND track_key=?',
+      ALICE,
+      artistKey,
+      trackKeyValue,
+    ),
+  ).toEqual({ n: 1 });
+});
+
+it('ignores event unlove for same-DID canonical survivors but does not let another DID or key veto it', async () => {
+  const w = await world();
+  const linkId = w.link();
+  const { seedUser } = await import('../../write/support');
+  const bob = 'did:plc:bobbobbobbobbobbobbobbobb';
+  seedUser(w.app.db, ALICE);
+  seedUser(w.app.db, bob);
+  const [artistKey, trackKeyValue] = trackKey('Target Artist', 'Target Track');
+  const [otherArtistKey, otherTrackKey] = trackKey('Different Artist', 'Different Track');
+  const putLove = (did: string, rkey: string, artist: string, track: string, keys: readonly [string, string]) =>
+    w.app.db.run(
+      `INSERT INTO loves(uri,did,rkey,cid,artist,track,artist_key,track_key,recording_mbid,created_at,indexed_at)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+      `at://${did}/com.example.atmusic.love/${rkey}`,
+      did,
+      rkey,
+      `cid-${rkey}`,
+      artist,
+      track,
+      keys[0],
+      keys[1],
+      MBID,
+      toStorage(fromMs(w.clock.nowMs())),
+      toStorage(fromMs(w.clock.nowMs())),
+    );
+  putLove(bob, 'other-did', 'Target Artist', 'Target Track', [artistKey, trackKeyValue]);
+  putLove(ALICE, 'other-key', 'Different Artist', 'Different Track', [otherArtistKey, otherTrackKey]);
+
+  expect(
+    enqueueLiveUnlove(w.app.db, {
+      did: ALICE,
+      operationId: 'event-unlove-other-did-and-key',
+      payload: { artist: '  TARGET ARTIST  ', track: ' target   track ', recordingMbid: MBID },
+      authorization: { uri: `at://${ALICE}/com.example.atmusic.love/removed`, rev: '2222222222222' },
+      now: w.clock.nowMs(),
+      random: w.rt.random,
+    }),
+  ).toBe(1);
+  expect(w.app.db.all("SELECT link_id,kind FROM forward_outbox WHERE kind='unlove'")).toEqual([
+    { link_id: linkId, kind: 'unlove' },
+  ]);
+
+  putLove(ALICE, 'normalized-survivor', 'Target Artist', 'Target Track', [artistKey, trackKeyValue]);
+  patchLink({ db: w.app.db, clock: w.clock }, ALICE, linkId, { forwardScrobbles: false });
+  expect(
+    enqueueForwards(w.app.db, {
+      did: ALICE,
+      linkId,
+      priority: 1,
+      now: w.clock.nowMs(),
+      random: w.rt.random,
+      items: [
+        {
+          kind: 'unlove',
+          operationId: 'coverage-event-unlove-with-survivor',
+          payload: { artist: 'target artist', track: 'TARGET TRACK', recordingMbid: MBID },
+          authorization: { uri: `at://${ALICE}/com.example.atmusic.love/removed-coverage`, rev: '3333333333333' },
+        },
+      ],
+    }),
+  ).toBe(0);
+  w.app.db.run("UPDATE linked_accounts SET status='revoked' WHERE id=?", linkId);
+  expect(
+    enqueueForwards(w.app.db, {
+      did: ALICE,
+      linkId,
+      priority: 1,
+      now: w.clock.nowMs(),
+      random: w.rt.random,
+      items: [
+        {
+          kind: 'unlove',
+          operationId: 'revoked-coverage-event-unlove-with-survivor',
+          payload: { artist: 'Target Artist', track: 'Target Track', recordingMbid: MBID },
+          authorization: { uri: `at://${ALICE}/com.example.atmusic.love/removed-revoked`, rev: '5555555555555' },
+        },
+      ],
+    }),
+  ).toBe(0);
+  expect(w.app.db.all("SELECT link_id,kind FROM forward_outbox WHERE kind='unlove'")).toHaveLength(1);
+  expect(
+    w.app.db.one(
+      'SELECT count(*) AS n FROM forward_deferred_love_intents WHERE operation_id=?',
+      'coverage-event-unlove-with-survivor',
+    ),
+  ).toEqual({ n: 0 });
+  expect(
+    w.app.db.one(
+      'SELECT count(*) AS n FROM forward_deferred_love_intents WHERE operation_id=?',
+      'revoked-coverage-event-unlove-with-survivor',
+    ),
+  ).toEqual({ n: 0 });
+});
+
+it('settles an already queued event unlove locally when a canonical survivor appears before dispatch', async () => {
+  const w = await world();
+  const linkId = w.link();
+  const { seedUser } = await import('../../write/support');
+  seedUser(w.app.db, ALICE);
+  const artist = 'Dispatch Survivor Artist';
+  const track = '  Normalized   Track ';
+  const keys = trackKey(artist, track);
+  const authorizationUri = `at://${ALICE}/com.example.atmusic.love/removed-late`;
+  const authorizationRev = '4444444444444';
+  w.app.db.run(
+    `INSERT INTO live_pending_removal_events(uri,rev,action,created_at_ms,expires_at_ms)
+     VALUES(?,?,'delete',?,?)`,
+    authorizationUri,
+    authorizationRev,
+    w.clock.nowMs(),
+    w.clock.nowMs() + DAY,
+  );
+  expect(materializeLoveAuthority(w.app.db, { uri: authorizationUri, rev: authorizationRev }, w.clock.nowMs())).toBe(
+    'active',
+  );
+  expect(
+    enqueueLiveUnlove(w.app.db, {
+      did: ALICE,
+      operationId: 'late-survivor-event-unlove',
+      payload: { artist, track, recordingMbid: MBID },
+      authorization: { uri: authorizationUri, rev: authorizationRev },
+      now: w.clock.nowMs(),
+      random: w.rt.random,
+    }),
+  ).toBe(1);
+  const queued = w.rows().find((row) => row.kind === 'unlove')!;
+  w.app.db.run(
+    `INSERT INTO loves(uri,did,rkey,cid,artist,track,artist_key,track_key,recording_mbid,created_at,indexed_at)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+    `at://${ALICE}/com.example.atmusic.love/late-survivor`,
+    ALICE,
+    'late-survivor',
+    'cid-late-survivor',
+    ' dispatch survivor artist ',
+    'normalized track',
+    ...trackKey(' dispatch survivor artist ', 'normalized track'),
+    MBID,
+    toStorage(fromMs(w.clock.nowMs())),
+    toStorage(fromMs(w.clock.nowMs())),
+  );
+  expect(
+    w.app.db.one('SELECT 1 FROM loves WHERE did=? AND artist_key=? AND track_key=? LIMIT 1', ALICE, ...keys),
+  ).not.toBeNull();
+  await w.run();
+  expect(w.lb.feedback).toEqual([]);
+  expect(w.rows().find((row) => row.id === queued.id)).toMatchObject({
+    state: 'ignored',
+    last_error: 'local_survivor',
+    attempts: 0,
+  });
+  expect(w.app.db.one('SELECT last_error FROM linked_accounts WHERE id=?', linkId)).toEqual({ last_error: null });
+});
+
+it('copies the authorized generation into an MBID revival child and rechecks its survivor before dispatch', async () => {
+  const w = await world();
+  const linkId = w.link();
+  const { seedUser } = await import('../../write/support');
+  seedUser(w.app.db, ALICE);
+  const artist = 'Revived Event Artist';
+  const track = 'Revived Event Track';
+  const [artistKey, trackKeyValue] = trackKey(artist, track);
+  const authorizationUri = `at://${ALICE}/com.example.atmusic.love/revived-delete`;
+  const authorizationRev = '6666666666666';
+  w.app.db.run(
+    `INSERT INTO live_pending_removal_events(uri,rev,action,created_at_ms,expires_at_ms)
+     VALUES(?,?,'delete',?,?)`,
+    authorizationUri,
+    authorizationRev,
+    w.clock.nowMs(),
+    w.clock.nowMs() + DAY,
+  );
+  expect(materializeLoveAuthority(w.app.db, { uri: authorizationUri, rev: authorizationRev }, w.clock.nowMs())).toBe(
+    'active',
+  );
+  expect(
+    enqueueLiveUnlove(w.app.db, {
+      did: ALICE,
+      operationId: 'revived-event-unlove-parent',
+      payload: { artist, track },
+      authorization: { uri: authorizationUri, rev: authorizationRev },
+      now: w.clock.nowMs(),
+      random: w.rt.random,
+    }),
+  ).toBe(1);
+  w.app.db.run("UPDATE forward_outbox SET state='ignored',last_error='no_recording_mbid' WHERE kind='unlove'");
+  expect(
+    enqueueRevivedLoves(w.app.db, { artistKey, trackKey: trackKeyValue }, MBID, w.clock.nowMs(), 10),
+  ).toMatchObject({ enqueued: 1 });
+  const child = w.rows().find((row) => row.kind === 'unlove' && row.dedupe_key.includes('mb-match:'))!;
+  expect(child).toMatchObject({
+    state: 'queued',
+    generation: w.app.db.one<{ generation: number }>('SELECT generation FROM linked_accounts WHERE id=?', linkId)
+      ?.generation,
+    authorization_uri: authorizationUri,
+    authorization_rev: authorizationRev,
+  });
+  expect(JSON.parse(child.payload_json)).toMatchObject({ recordingMbid: MBID, artist, track });
+
+  w.app.db.run(
+    `INSERT INTO loves(uri,did,rkey,cid,revision,artist,track,artist_key,track_key,recording_mbid,created_at,indexed_at)
+     VALUES(?,?,?,'survivor-cid','7777777777777',?,?,?,?,?,?,?)`,
+    `at://${ALICE}/com.example.atmusic.love/revived-survivor`,
+    ALICE,
+    'revived-survivor',
+    artist,
+    track,
+    artistKey,
+    trackKeyValue,
+    MBID,
+    toStorage(fromMs(w.clock.nowMs())),
+    toStorage(fromMs(w.clock.nowMs())),
+  );
+  await w.run();
+  expect(w.lb.feedback).toEqual([]);
+  expect(w.rows().find((row) => row.id === child.id)).toMatchObject({
+    state: 'ignored',
+    last_error: 'local_survivor',
+    attempts: 0,
+  });
 });

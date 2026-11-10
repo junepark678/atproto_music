@@ -45,6 +45,7 @@ import { noteForwardLoveCurrent, touchLoveLane } from '../forward/love-lanes';
 import { indexForwardLoveTarget } from '../forward/love-recording-targets';
 import { storedForwardDedupeKey } from './forward-key';
 import { dropStaleReceipt, forwardCoverage, noteForwardReceipt } from './forward-receipts';
+import { hasPresentTrackLove } from './live-track-survivor';
 import { newOperationId } from './operations';
 
 export const NOW_PLAYING_KEY_DOMAIN = 'atmusic:nowplaying-key:v1';
@@ -137,7 +138,23 @@ export function enqueueForwards(db: Db, args: EnqueueForwardsArgs): number {
     throw new RangeError('dueAt must be a non-negative safe integer of epoch ms');
   }
   return db.tx(() => {
-    recordDeferredLoveIntents(db, args);
+    const items = args.items.filter((item) => {
+      if (item.kind !== 'unlove' || item.authorization === undefined) return true;
+      const body = item.payload;
+      if (body === null || typeof body !== 'object') return true;
+      const payload = body as Record<string, unknown>;
+      if (typeof payload.artist !== 'string' || typeof payload.track !== 'string') return true;
+      try {
+        const [artistKey, trackKeyValue] = trackKey(payload.artist, payload.track);
+        return !hasPresentTrackLove(db, args.did, artistKey, trackKeyValue);
+      } catch (error) {
+        if (error instanceof MusicKeyError) return true;
+        throw error;
+      }
+    });
+    if (items.length === 0) return 0;
+    const eligibleArgs = items.length === args.items.length ? args : { ...args, items };
+    recordDeferredLoveIntents(db, eligibleArgs);
     const links = db.all<{
       id: string;
       generation: number;
@@ -150,7 +167,7 @@ export function enqueueForwards(db: Db, args: EnqueueForwardsArgs): number {
       ...(args.linkId === undefined ? [args.did] : [args.did, args.linkId]),
     );
     let created = 0;
-    for (const item of args.items) {
+    for (const item of items) {
       const key = dedupeKey(args.did, item);
       const payload = JSON.stringify(item.payload ?? null);
       let loveArtistKey: string | null = null;

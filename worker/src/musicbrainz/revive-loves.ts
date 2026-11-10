@@ -4,6 +4,7 @@ import { deferredAuthorityStatus } from '../forward/love-coverage-authority';
 import { noteForwardLoveCurrent, touchLoveLane } from '../forward/love-lanes';
 import { indexForwardLoveTarget } from '../forward/love-recording-targets';
 import { canonicalForwardDedupeKey, storedForwardDedupeKey } from '../outbox/forward-identity';
+import { hasPresentTrackLove } from '../outbox/live-track-survivor';
 
 const MAX_SCAN = 100;
 type Key = { artistKey: string; trackKey: string };
@@ -148,6 +149,13 @@ export function enqueueRevivedLoves(
           row.authorization_uri,
           row.authorization_rev,
         ) !== null
+      )
+        return 0;
+      if (
+        kind === 'unlove' &&
+        row.authorization_uri !== null &&
+        row.authorization_rev !== null &&
+        hasPresentTrackLove(db, row.did, key.artistKey, key.trackKey)
       )
         return 0;
       const parentOperationId = canonicalForwardDedupeKey(row.generation, row.dedupe_key);

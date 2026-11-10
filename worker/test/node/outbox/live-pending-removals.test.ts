@@ -497,6 +497,68 @@ it('delays love removal while preserving import exclusions, local re-love, and n
   });
 });
 
+it('does not enqueue a delayed event unlove when an older canonical love survives', async () => {
+  await withMigratedDb((db) => {
+    seedUser(db, DID);
+    setup(db);
+    const artist = 'Delayed Survivor Artist';
+    const track = 'Delayed Survivor Track';
+    const [artistKey, trackKeyValue] = trackKey(artist, track);
+    const survivorUri = `at://${DID}/com.example.atmusic.love/survivor`;
+    db.run(
+      `INSERT INTO loves(uri,did,rkey,cid,revision,artist,track,artist_key,track_key,created_at,indexed_at)
+       VALUES(?,?,?,'survivor-cid','1111111111111',?,?,?,?,?,?)`,
+      survivorUri,
+      DID,
+      'survivor',
+      artist,
+      track,
+      artistKey,
+      trackKeyValue,
+      toStorage(fromMs(NOW - 1_000)),
+      toStorage(fromMs(NOW - 1_000)),
+    );
+    const removedUri = `at://${DID}/com.example.atmusic.love/removed`;
+    recordPendingRemoval(db, {
+      did: DID,
+      uri: removedUri,
+      kind: 'love',
+      row: {
+        uri: removedUri,
+        record_uri: null,
+        listen_id: null,
+        cid: 'removed-cid',
+        listened_at: '',
+        artist_key: artistKey,
+        track_key: trackKeyValue,
+        artist,
+        track,
+        recording_mbid: null,
+      },
+      identityKey: 'love:delayed-survivor-removed',
+      windowLo: '1111111111111',
+      windowHi: '2222222222222',
+      replacedByCid: null,
+      nowMs: NOW,
+    });
+    authorizePendingRemovals(db, { uri: removedUri, rev: '2222222222222', action: 'delete' }, NOW);
+    executeAuthorizedRemovals(db, { uri: removedUri, nowMs: NOW, random, limit: 1 });
+
+    expect(db.all("SELECT kind,state FROM forward_outbox WHERE kind='unlove'")).toEqual([]);
+    expect(
+      db.one(
+        'SELECT count(*) AS n FROM loves WHERE did=? AND artist_key=? AND track_key=?',
+        DID,
+        artistKey,
+        trackKeyValue,
+      ),
+    ).toEqual({ n: 1 });
+    expect(
+      db.one('SELECT count(*) AS n FROM forward_deferred_love_intents WHERE operation_id LIKE ?', '%delayed-survivor%'),
+    ).toEqual({ n: 0 });
+  });
+});
+
 function pending(windowLo: string, windowHi: string, cid = 'same-cid'): PendingRemovalInput {
   const artistKey = 'artist-key';
   const trackKey = 'track-key';

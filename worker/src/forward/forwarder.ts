@@ -79,6 +79,7 @@ import type { Logger } from '../do/contracts';
 import type { Db } from '../do/db';
 import { enqueueTrack, matchedRecordingMbid } from '../musicbrainz/store';
 import { canonicalForwardDedupeKey } from '../outbox/forward-key';
+import { hasPresentTrackLove } from '../outbox/live-track-survivor';
 import { nextDeleteWakeAt, runDeleteSlice } from './delete-forwarder';
 import {
   backoffRows,
@@ -1004,6 +1005,7 @@ async function sendListenbrainz(rt: ForwardRuntime, job: Job, token: string): Pr
 // The run
 
 async function execute(rt: ForwardRuntime, job: Job, now: number): Promise<boolean> {
+  if (job.kind === 'unlove' && !allowAuthorizedUnlove(rt, job, now)) return false;
   let credential: string;
   try {
     credential = openLinkCredential(rt.box, job.link);
@@ -1015,11 +1017,9 @@ async function execute(rt: ForwardRuntime, job: Job, now: number): Promise<boole
   }
   if (job.link.service === 'lastfm') {
     if (!rt.pacing.tryLastfm('forward', now)) return false;
-    if (job.kind === 'unlove' && !allowAuthorizedUnlove(rt, job, now)) return false;
     await sendLastfm(rt, job, credential);
   } else {
     if (!rt.pacing.tryListenbrainz(lbKey(job.link), now)) return false;
-    if (job.kind === 'unlove' && !allowAuthorizedUnlove(rt, job, now)) return false;
     await sendListenbrainz(rt, job, credential);
   }
   return true;
@@ -1027,6 +1027,7 @@ async function execute(rt: ForwardRuntime, job: Job, now: number): Promise<boole
 
 /** Re-read the durable authorization at the last synchronous point before either remote effect. */
 function allowAuthorizedUnlove(rt: ForwardRuntime, job: Job, now: number): boolean {
+  if (job.kind !== 'unlove') return true;
   const row = job.rows[0]!;
   const current = rt.db.one<{
     authorization_uri: string | null;
@@ -1070,6 +1071,10 @@ function allowAuthorizedUnlove(rt: ForwardRuntime, job: Job, now: number): boole
     ) !== null;
   if (conflict) {
     settleRows(rt.db, [row.id], 'ignored', now, 'authorization_conflicted', false, job.link.generation);
+    return false;
+  }
+  if (hasPresentTrackLove(rt.db, job.link.did, job.lane.artistKey, job.lane.trackKey)) {
+    settleRows(rt.db, [row.id], 'ignored', now, 'local_survivor', false, job.link.generation);
     return false;
   }
   const authority = deferredAuthorityStatus(rt.db, { uri: current.authorization_uri, rev: current.authorization_rev });

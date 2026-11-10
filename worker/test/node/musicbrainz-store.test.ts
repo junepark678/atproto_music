@@ -141,6 +141,47 @@ describe('MusicBrainz storage', () => {
       db.close();
     }
   });
+  it('does not create an MBID revival child for an authorized event unlove while a canonical love survives', () => {
+    const db = database();
+    try {
+      const did = 'did:plc:dddddddddddddddddddddddd';
+      db.run(
+        "INSERT INTO users(did,joined_at,indexing_state) VALUES(?,'2026-01-15T00:00:00.000000000Z','current')",
+        did,
+      );
+      db.run(
+        `INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,created_at_ms,updated_at_ms)
+         VALUES('revival-survivor-link',?,'listenbrainz','user',x'00','key',1,1)`,
+        did,
+      );
+      db.run(
+        `INSERT INTO forward_outbox(id,link_id,did,kind,dedupe_key,payload_json,state,attempts,due_at,last_error,created_at_ms,updated_at_ms,authorization_uri,authorization_rev)
+         VALUES('authorized-unlove-parent','revival-survivor-link',?,'unlove','authorized-unlove-parent',?, 'ignored',0,0,'no_recording_mbid',1,1,?,?)`,
+        did,
+        JSON.stringify({ artist: 'Artist', track: 'Track' }),
+        `at://${did}/com.example.atmusic.love/removed`,
+        '2222222222222',
+      );
+      const [artistKey, trackKeyValue] = ['artist', 'track'];
+      db.run(
+        `INSERT INTO loves(uri,did,rkey,cid,revision,artist,track,artist_key,track_key,created_at,indexed_at)
+         VALUES(?,?,?,'survivor-cid','1111111111111','Artist','Track',?,?, '2026-01-15T00:00:00.000000000Z','2026-01-15T00:00:00.000000000Z')`,
+        `at://${did}/com.example.atmusic.love/survivor`,
+        did,
+        'survivor',
+        artistKey,
+        trackKeyValue,
+      );
+      expect(backfillLoveReviveKeys(db, 100)).toMatchObject({ complete: true });
+      expect(
+        enqueueRevivedLoves(db, { artistKey, trackKey: trackKeyValue }, '3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10', 10, 10)
+          .enqueued,
+      ).toBe(0);
+      expect(db.all("SELECT id FROM forward_outbox WHERE dedupe_key LIKE 'mb-match:%'")).toEqual([]);
+    } finally {
+      db.close();
+    }
+  });
 
   it('rolls back a revived forward row and love pointer when its lane write fails', () => {
     const db = database();
