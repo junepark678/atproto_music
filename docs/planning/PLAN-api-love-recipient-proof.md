@@ -406,8 +406,10 @@ changed rows, 9 returned rows, and at most 8 visits at all three sizes. Cleanup
 finishes in 13/125/1,250 fair finite passes respectively; the selected
 `listenbrainz` origin survives the pass and is removed in two additional lane
 passes after its aggregate is released. Actual query plans for the production
-page have no L2 table scan or temp sort. Per-page read/mutation/changed-row/visit
-and scan/sort negative controls trip their own guards.
+page have no L2 table scan or temp sort. The scan/sort negative controls now run
+deliberately unbounded L2 SQL through SQLite's real `EXPLAIN QUERY PLAN` and the
+same plan checker; per-page read/mutation/changed-row/visit and scan/sort
+controls trip their own guards.
 
 ## Remaining gates
 

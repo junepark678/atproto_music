@@ -235,14 +235,17 @@ it('trips the actual per-page read, mutation, changed-row and visit bounds', () 
     'origin reclaim changed-row bound exceeded',
   );
   expect(() => assertPageBounds(metric, 9)).toThrow('origin reclaim visit bound exceeded');
-  expect(() =>
-    assertIndexedPlans({ all: () => [{ detail: 'SCAN love_api_bindings' }] } as unknown as Db, [
-      { sql: 'SELECT * FROM love_api_bindings', params: [] },
-    ]),
-  ).toThrow('origin reclaim query scans or sorts an L2 table');
-  expect(() =>
-    assertIndexedPlans({ all: () => [{ detail: 'USE TEMP B-TREE FOR ORDER BY' }] } as unknown as Db, [
-      { sql: 'SELECT * FROM love_api_bindings', params: [] },
-    ]),
-  ).toThrow('origin reclaim query scans or sorts an L2 table');
+});
+
+it('trips scan and sort controls against actual SQLite plans for deliberately unbounded L2 SQL', async () => {
+  await withHarness(async (h) => {
+    const scan = 'SELECT * FROM love_api_bindings';
+    expect(() => assertIndexedPlans(h.db, [{ sql: scan, params: [] }])).toThrow(
+      'origin reclaim query scans or sorts an L2 table',
+    );
+    const sort = 'SELECT did,operation_id FROM love_api_bindings ORDER BY api_origin';
+    expect(() => assertIndexedPlans(h.db, [{ sql: sort, params: [] }])).toThrow(
+      'origin reclaim query scans or sorts an L2 table',
+    );
+  });
 });
