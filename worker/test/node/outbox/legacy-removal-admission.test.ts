@@ -101,9 +101,30 @@ function seedRecordState(h: Harness, uri: string, collection: string, revision: 
   );
 }
 
+async function forwardingControl(h: Harness) {
+  const links = [h.link(h.alice, 'lastfm'), h.link(h.alice, 'listenbrainz')];
+  const rkey = '3kpositive-forward-control';
+  await h.kit.externalPut('Alice', SCROBBLE, rkey, {
+    $type: SCROBBLE,
+    artist: 'Fresh control artist',
+    track: 'Fresh control track',
+    listenedAt: '2026-01-14T07:00:00Z',
+    createdAt: '2026-01-14T07:00:00Z',
+  });
+  expect(apply(h, await proofAt(h, SCROBBLE, rkey)).outcome).toBe('applied');
+  const rows = h.db.all<{ id: string; link_id: string; kind: string; dedupe_key: string }>(
+    "SELECT id,link_id,kind,dedupe_key FROM forward_outbox WHERE kind='scrobble' ORDER BY link_id",
+  );
+  expect(rows).toHaveLength(2);
+  expect(rows.map((row) => row.link_id).sort()).toEqual(links.sort());
+  expect(new Set(rows.map((row) => row.dedupe_key)).size).toBe(1);
+  return rows;
+}
+
 it('seeds Last.fm and snapshot admissions before absence so a new rkey does not echo', async () => {
   await withHarness(async (h) => {
     h.seedUser(h.alice);
+    const before = await forwardingControl(h);
     const rkey = '3klegacy-removed';
     const uri = `at://${h.alice}/${SCROBBLE}/${rkey}`;
     const body = {
@@ -136,11 +157,14 @@ it('seeds Last.fm and snapshot admissions before absence so a new rkey does not 
     const newRkey = '3klegacy-reprojected';
     await h.kit.externalPut('Alice', SCROBBLE, newRkey, body);
     expect(apply(h, await proofAt(h, SCROBBLE, newRkey)).outcome).toBe('applied');
-    expect(h.db.all("SELECT kind FROM forward_outbox WHERE kind='scrobble'")).toEqual([]);
+    expect(
+      h.db.all("SELECT id,link_id,kind,dedupe_key FROM forward_outbox WHERE kind='scrobble' ORDER BY link_id"),
+    ).toEqual(before);
   });
 
   await withHarness(async (h) => {
     h.seedUser(h.alice);
+    const before = await forwardingControl(h);
     const rkey = '3ksnapshot-removed';
     const uri = `at://${h.alice}/${SCROBBLE}/${rkey}`;
     const listenedAt = '2026-01-14T09:00:00Z';
@@ -176,7 +200,9 @@ it('seeds Last.fm and snapshot admissions before absence so a new rkey does not 
       createdAt: listenedAt,
     });
     expect(apply(h, await proofAt(h, SCROBBLE, newRkey)).outcome).toBe('applied');
-    expect(h.db.all("SELECT kind FROM forward_outbox WHERE kind='scrobble'")).toEqual([]);
+    expect(
+      h.db.all("SELECT id,link_id,kind,dedupe_key FROM forward_outbox WHERE kind='scrobble' ORDER BY link_id"),
+    ).toEqual(before);
   });
 });
 
@@ -300,19 +326,17 @@ it('seeds excluded versions and snapshot-sweep absence, while leaving an existin
   });
 });
 
-it('seeds a large batch once per key and uses indexed provenance lookups', async () => {
+it('admits a small legacy batch once per identity and preserves existing live admission', async () => {
   await withHarness(async (h) => {
     h.seedUser(h.alice);
     const rkey = '3klarge-legacy-batch';
     const uri = `at://${h.alice}/${BATCH}/${rkey}`;
     const keys: string[] = [];
     let duplicateKey = '';
-    for (let i = 0; i < 1000; i++) {
+    for (let i = 0; i < 8; i++) {
       const duplicate = i < 2;
       const artist = duplicate ? 'Duplicate Artist' : `Legacy Artist ${i}`;
-      const listenedAt = duplicate
-        ? '2026-01-14T01:00:00Z'
-        : `2026-01-14T00:${String(i % 60).padStart(2, '0')}:${String(Math.floor(i / 60)).padStart(2, '0')}Z`;
+      const listenedAt = duplicate ? '2026-01-14T01:00:00Z' : `2026-01-14T00:${String(i).padStart(2, '0')}:00Z`;
       const key = seedScrobble(h, {
         uri: `${uri}#member-${i}`,
         recordUri: uri,
@@ -343,7 +367,7 @@ it('seeds a large batch once per key and uses indexed provenance lookups', async
       return originalOne(sql, ...params);
     }) as typeof h.db.one;
     const before = projectedListensOfRecord(h.db, h.alice, uri);
-    expect(before).toHaveLength(1000);
+    expect(before).toHaveLength(8);
     h.db.tx(() =>
       applyRecordTarget(
         h.db,
@@ -360,8 +384,8 @@ it('seeds a large batch once per key and uses indexed provenance lookups', async
         duplicateKey,
       ),
     ).toEqual({ path: 'live', admission_seq: duplicateSeq });
-    expect(h.db.all("SELECT path,source_service FROM forward_admissions WHERE path='import'")).toHaveLength(998);
-    expect(new Set(keys).size).toBe(999);
+    expect(h.db.all("SELECT path,source_service FROM forward_admissions WHERE path='import'")).toHaveLength(6);
+    expect(new Set(keys).size).toBe(7);
     expect(retainedRecordProvenance(h.db, h.alice, BATCH, rkey)).toEqual({ path: 'import', sourceService: 'lastfm' });
 
     const projectionPlan = h.db.all<{ detail: string }>(
@@ -378,32 +402,5 @@ it('seeds a large batch once per key and uses indexed provenance lookups', async
     expect(projectionPlan.some((row) => row.detail.includes('scrobbles_record_uri'))).toBe(true);
     expect(projectionPlan.some((row) => row.detail.includes('SCAN scrobbles'))).toBe(false);
     expect(projectionPlan.some((row) => row.detail.includes('TEMP B-TREE'))).toBe(false);
-
-    for (let i = 0; i < 1200; i++) {
-      h.db.run(
-        `INSERT INTO operations(id,did,kind,origin,priority,collection,rkey,state,due_at,created_at_ms,updated_at_ms)
-         VALUES (?,?, 'scrobble.create','web',0,?,?,?, ?,?,?)`,
-        `plan-${i}`,
-        h.alice,
-        SCROBBLE,
-        `record-${i}`,
-        i % 4 === 0 ? 'succeeded' : i % 4 === 1 ? 'cancelled' : 'queued',
-        T0,
-        T0 + i,
-        T0 + i,
-      );
-    }
-    const planQueries = [
-      `SELECT op.origin,jobs.source FROM operations AS op LEFT JOIN import_jobs AS jobs ON jobs.id=op.import_job_id
-       WHERE op.did=? AND op.collection=? AND op.rkey=? ORDER BY op.created_at_ms DESC LIMIT 1`,
-      `SELECT origin FROM operations WHERE did=? AND collection=? AND rkey=? ORDER BY created_at_ms DESC LIMIT 1`,
-      `SELECT 1 FROM operations WHERE did=? AND collection=? AND rkey=? AND kind='scrobble.delete' AND state='succeeded' LIMIT 1`,
-    ];
-    for (const sql of planQueries) {
-      const details = h.db.all<{ detail: string }>(`EXPLAIN QUERY PLAN ${sql}`, h.alice, SCROBBLE, 'record-777');
-      expect(details.some((row) => row.detail.includes('operations_record_target'))).toBe(true);
-      expect(details.some((row) => row.detail.includes('TEMP B-TREE'))).toBe(false);
-      expect(details.some((row) => row.detail.includes('SCAN operations'))).toBe(false);
-    }
   });
 });

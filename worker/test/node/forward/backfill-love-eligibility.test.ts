@@ -7,12 +7,12 @@ import { seededRandom } from '@atmusic/core/test-support/random';
 import { fromMs } from '@atmusic/core/timestamp';
 import { describe, expect, it } from 'vitest';
 import { createBox } from '../../../src/crypto/box';
-import type { Db } from '../../../src/do/db';
-import { LOVE_IMPORT_SOURCE_CLASS_SQL } from '../../../src/do/schema';
+import type { Db, SqlParam } from '../../../src/do/db';
 import { applyRecordProof } from '../../../src/do/write/apply-record';
-import { runLinkBackfill } from '../../../src/forward/backfill';
+import { LOVE_BRIDGE_EXCLUSION_SQL, runLinkBackfill } from '../../../src/forward/backfill';
 import { saveLink } from '../../../src/forward/links';
 import { resolveLoveRecording } from '../../../src/forward/love-recording';
+import { RETAINED_RECORD_PROVENANCE_SQL, retainedRecordProvenance } from '../../../src/forward/projection';
 import { createJob, IMPORT_FETCH_CAPS, type ImportRuntime, intervalPacer, runImports } from '../../../src/imports/jobs';
 import { fsUploadStore } from '../../../src/imports/uploads';
 import { writeSlice } from '../../../src/imports/writer';
@@ -74,8 +74,32 @@ async function projectLove(
   return `at://${h.alice}/${LOVE}/${rkey}`;
 }
 
-async function backfill(h: Parameters<Parameters<typeof withHarness>[0]>[0]) {
-  return runLinkBackfill(h.db, seededRandom(934 + backfillRun++), T0);
+async function backfill(h: Parameters<Parameters<typeof withHarness>[0]>[0], observeBridge?: () => void) {
+  const all = h.db.all.bind(h.db);
+  const one = h.db.one.bind(h.db);
+  const materialized: string[] = [];
+  const scalarSql: string[] = [];
+  h.db.all = ((sql: string, ...params: SqlParam[]) => {
+    if (/FROM love_import_bridges\b/.test(sql)) materialized.push(sql);
+    return all(sql, ...params);
+  }) as typeof h.db.all;
+  h.db.one = ((sql: string, ...params: SqlParam[]) => {
+    if (/FROM love_import_bridges\b/.test(sql)) {
+      scalarSql.push(sql);
+      observeBridge?.();
+    }
+    return one(sql, ...params);
+  }) as typeof h.db.one;
+  let result: number;
+  try {
+    result = await runLinkBackfill(h.db, seededRandom(934 + backfillRun++), T0);
+  } finally {
+    h.db.all = all;
+    h.db.one = one;
+  }
+  expect(materialized).toEqual([]);
+  for (const sql of scalarSql) expect(sql).toBe(LOVE_BRIDGE_EXCLUSION_SQL);
+  return result;
 }
 
 function importRuntime(h: Parameters<Parameters<typeof withHarness>[0]>[0]): ImportRuntime {
@@ -506,7 +530,9 @@ describe('backfill love recording eligibility', () => {
       const before = h.db.all<{ link_id: string; payload_json: string }>(
         "SELECT link_id,payload_json FROM forward_outbox WHERE kind='love' AND json_extract(payload_json,'$.origin')='backfill'",
       );
-      for (let turn = 0; turn < 8; turn++) await backfill(h);
+      let bridgeReads = 0;
+      for (let turn = 0; turn < 8; turn++) await backfill(h, () => bridgeReads++);
+      expect(bridgeReads).toBeGreaterThanOrEqual(3);
       expect(
         h.db.one('SELECT backfill_state,backfill_done,backfill_total FROM linked_accounts WHERE id=?', listenbrainz),
       ).toEqual({
@@ -584,9 +610,7 @@ describe('backfill love recording eligibility', () => {
 
   it('uses bounded indexes for retained provenance and import bridge exclusions', async () => {
     await withHarness(async (h) => {
-      const provenanceSql = `SELECT op.origin,jobs.source FROM operations AS op
-        LEFT JOIN import_jobs AS jobs ON jobs.id=op.import_job_id
-        WHERE op.did=? AND op.collection=? AND op.rkey=? ORDER BY op.created_at_ms DESC LIMIT 1`;
+      const provenanceSql = RETAINED_RECORD_PROVENANCE_SQL;
       for (const [id, createdAt, origin] of [
         ['older-target', 1, 'lastfm'],
         ['newer-target', 2, 'lastfm'],
@@ -605,7 +629,7 @@ describe('backfill love recording eligibility', () => {
       }
       for (const rkey of ['missing-target', 'found-target']) {
         const plan = h.db
-          .all<{ detail: string }>(`EXPLAIN QUERY PLAN ${provenanceSql}`, h.alice, LOVE, rkey)
+          .all<{ detail: string }>(`EXPLAIN QUERY PLAN ${provenanceSql}`, 'did:plc:plan-test', LOVE, rkey)
           .map((row) => row.detail)
           .join(' | ');
         expect(plan).toContain('operations_record_target (did=? AND collection=? AND rkey=?)');
@@ -615,9 +639,22 @@ describe('backfill love recording eligibility', () => {
         h.db.one<{ origin: string; source: string | null }>(provenanceSql, 'did:plc:plan-test', LOVE, 'found-target'),
       ).toEqual({ origin: 'import', source: null });
 
-      const bridgeSql = `SELECT 1 AS x FROM love_import_bridges INDEXED BY love_import_bridges_source_class
-        WHERE did=? AND uri=? AND incarnation_key=? AND state='bound'
-          AND (${LOVE_IMPORT_SOURCE_CLASS_SQL}) IN (0,?) LIMIT 1`;
+      const one = h.db.one.bind(h.db);
+      let productionProbes = 0;
+      h.db.one = ((sql: string, ...params: SqlParam[]) => {
+        if (sql === RETAINED_RECORD_PROVENANCE_SQL) productionProbes++;
+        return one(sql, ...params);
+      }) as typeof h.db.one;
+      try {
+        expect(retainedRecordProvenance(h.db, 'did:plc:plan-test', LOVE, 'found-target')).toEqual({
+          path: 'import',
+          sourceService: null,
+        });
+      } finally {
+        h.db.one = one;
+      }
+      expect(productionProbes).toBe(1);
+      const bridgeSql = LOVE_BRIDGE_EXCLUSION_SQL;
       const bridgePlan = h.db
         .all<{ detail: string }>(
           `EXPLAIN QUERY PLAN ${bridgeSql}`,
@@ -668,15 +705,7 @@ describe('backfill love recording eligibility', () => {
           ['listenbrainz', 2],
         ] as const) {
           const actual =
-            h.db.one<{ x: number }>(
-              `SELECT 1 AS x FROM love_import_bridges INDEXED BY love_import_bridges_source_class
-             WHERE did=? AND uri=? AND incarnation_key=? AND state='bound'
-               AND (${LOVE_IMPORT_SOURCE_CLASS_SQL}) IN (0,?) LIMIT 1`,
-              h.alice,
-              uri,
-              `inc-${i}`,
-              destination,
-            ) !== null;
+            h.db.one<{ x: number }>(LOVE_BRIDGE_EXCLUSION_SQL, h.alice, uri, `inc-${i}`, destination) !== null;
           const classified =
             typeof source !== 'string'
               ? null
