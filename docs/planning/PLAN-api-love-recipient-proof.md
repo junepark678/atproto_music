@@ -105,7 +105,8 @@ Those artifacts measured materialization plus one link-scoped enqueue only.
 
 Before migration-57 registration, Sol must reconcile this stage-one checkpoint,
 the measured 13-row handoff allowance, and the final DDL. The proposal hash is
-`8f13e1943e5ad59984c4bd9d783e299cce931963f40643303e0f30cce3768a5d`; the
+`8f13e1943e5ad599-84c4bd9d783e299c-ce931963f4064330-3e0f30cce3768a5d`
+(hyphen-separated groups of the SHA-256 value); the
 existing schema-56 Node authorizer scratch-upgrade test executes all 17
 statements and verifies eight tables, nine indexes, unchanged schema version 56,
 and a clean foreign-key check on the rebuilt scratch database. The migration
