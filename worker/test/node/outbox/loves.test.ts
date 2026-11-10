@@ -21,6 +21,7 @@ import { materializeLoveApiRecipientDecisions } from '../../../src/forward/love-
 import { bumpLoveApiIntentEpoch, prepareLoveApiRecipientHandoff } from '../../../src/forward/love-api-recipients';
 import { enqueueForwards } from '../../../src/outbox/forward-enqueue';
 import { enqueueLove, enqueueUnlove } from '../../../src/outbox/love-ops';
+import { cancelUnsent } from '../../../src/outbox/operations';
 import { authorizedLiveOptions } from '../../write/support';
 import { CREATE, DELETE, GET, type Harness, LIST, LOVE, remoteRecords, withHarness } from './support';
 
@@ -825,12 +826,6 @@ it('reconstructs API source and trusted authority from retained L2 after operati
       h.db.one('SELECT 1 FROM love_api_comparison_facts WHERE authorization_rev=?', proof.commit.rev),
     ).not.toBeNull();
     expect(h.db.one('SELECT 1 FROM linked_accounts WHERE id=?', linkId)).not.toBeNull();
-    const alias = await enqueueLove(h.m, {
-      did: h.alice,
-      input: { artist: 'Alias artist', track: 'Alias track', recordingMbid: '12345678-1234-1234-1234-123456789abc' },
-      origin: 'web',
-    });
-    if (!alias.ok) throw new Error(JSON.stringify(alias.reason));
     const candidate = {
       did: h.alice,
       uri,
@@ -838,6 +833,65 @@ it('reconstructs API source and trusted authority from retained L2 after operati
       linkId,
       generation: effect!.generation,
     };
+    const cancelledAliasIds: string[] = [];
+    for (let index = 0; index < 16; index++) {
+      const cancelledAlias = await enqueueLove(h.m, {
+        did: h.alice,
+        input: {
+          artist: `Cancelled alias ${index}`,
+          track: `Cancelled alias ${index}`,
+          recordingMbid: '12345678-1234-1234-1234-123456789abc',
+        },
+        origin: 'web',
+      });
+      if (!cancelledAlias.ok) throw new Error(JSON.stringify(cancelledAlias.reason));
+      expect(cancelUnsent(h.db, cancelledAlias.operation.id, h.m.clock.nowMs())).toBe(true);
+      cancelledAliasIds.push(cancelledAlias.operation.id);
+    }
+    expect(
+      h.db.one<{ n: number }>(
+        "SELECT count(*) AS n FROM linked_love_intents WHERE did=? AND recording_mbid=? AND intent='love'",
+        h.alice,
+        '12345678-1234-1234-1234-123456789abc',
+      ),
+    ).toEqual({ n: 17 });
+    expect(prepareLoveApiRecipientHandoff(h.db, candidate, 'before-reopen', h.m.clock.nowMs())).toEqual({
+      status: 'awaiting',
+    });
+    const priorAliasScan = h.db.one<{ scan_session: string | null; alias_cursor: string | null }>(
+      'SELECT scan_session,alias_cursor FROM love_api_unlove_decisions WHERE uri=?',
+      uri,
+    );
+    expect(priorAliasScan?.scan_session).toBe('before-reopen');
+    expect(
+      priorAliasScan?.alias_cursor,
+      JSON.stringify(
+        h.db.all(
+          "SELECT love_key,operation_id FROM linked_love_intents WHERE did=? AND recording_mbid=? AND intent='love' ORDER BY love_key",
+          h.alice,
+          '12345678-1234-1234-1234-123456789abc',
+        ),
+      ),
+    ).not.toBe('');
+    h.restart();
+    expect(prepareLoveApiRecipientHandoff(h.db, candidate, 'fresh-after-reopen', h.m.clock.nowMs())).toEqual({
+      status: 'awaiting',
+    });
+    expect(
+      h.db.one<{ scan_session: string | null; alias_cursor: string | null }>(
+        'SELECT scan_session,alias_cursor FROM love_api_unlove_decisions WHERE uri=?',
+        uri,
+      ),
+    ).toMatchObject({ scan_session: 'fresh-after-reopen', alias_cursor: priorAliasScan?.alias_cursor });
+    for (const operationId of cancelledAliasIds)
+      h.db.run('DELETE FROM linked_love_intents WHERE did=? AND operation_id=?', h.alice, operationId);
+    bumpLoveApiIntentEpoch(h.db, h.alice);
+    const alias = await enqueueLove(h.m, {
+      did: h.alice,
+      input: { artist: 'Alias artist', track: 'Alias track', recordingMbid: '12345678-1234-1234-1234-123456789abc' },
+      origin: 'web',
+    });
+    if (!alias.ok) throw new Error(JSON.stringify(alias.reason));
     expect(prepareLoveApiRecipientHandoff(h.db, candidate, 'composition-after-proof', h.m.clock.nowMs())).toEqual({
       status: 'awaiting',
     });

@@ -526,9 +526,9 @@ session state and both fake transports. Direct SQL remains limited to
 legacy/rollback/corruption setup and growth fixtures. Populated schema-57
 producer-derived CLI restore, restored coverage/dispatch/resume, and fresh
 session invocation accounting now pass. Schema-56 producer-derived L2 restore,
-accept-loss behavior across all eight tables, alias-session rescan after
-reopen/rollback, the complete whole-decision scenario matrix, over-128 negative
-control, and fresh Astra review remain gates.
+accept-loss behavior across all eight tables, alias-session rescan after the
+injected restore rollback, the complete whole-decision scenario matrix,
+over-128 negative control, and fresh Astra review remain gates.
 
 The direct-SQL worker-bench retention proof runs the production reclaimer over
 100/1,000/10,000 same-DID API bindings with one selected SENT aggregate held at
@@ -559,7 +559,7 @@ coverage. A seeded real-CLI failure injection compares all eight L2 tables in
 both live and backup files at the post-merge/pre-swap rollback point.
 Whole-path128 scenario matrix and over-cap control, fresh Astra review of that
 gate, schema-56 producer-derived L2 restoration, accept-loss all-eight-table
-behavior, alias-session rescan after reopen/rollback, producer-batch pinning,
+behavior, alias-session rescan after restore rollback, producer-batch pinning,
 remaining maintenance scenarios, and scale gates remain pending. Small
 behavior fixtures belong in `worker-node`; growing fixtures belong in
 `worker-bench` with VM/statement/returned-row bounds, not elapsed-time claims.
@@ -612,8 +612,9 @@ also runs one actual scheduler invocation and checks per-phase reads, mutation
 statements, changed rows, returned rows, visits, total writes, and acknowledgements
 before the production timer/transport steps. A separate seeded CLI failure-stage
 regression covers eight-table atomicity. Schema-56 producer-generated L2 state,
-accept-loss of all eight tables, and fresh alias-session rescan after
-reopen/rollback remain uncovered.
+accept-loss of all eight tables, and alias-session rescan after injected restore
+rollback remain uncovered; fresh-session rescan after normal DB reopen is
+covered by the Node integration.
 
 The previous active-at-absence fixture emitted both broad live-delete and
 narrow API-recipient effects for each remote. That observed four-effect result
@@ -662,4 +663,9 @@ readable live DB and backup and compares their complete rows after an injected
 failure at the real CLI `merged` stage (after B2/L2 merge and before file swap).
 This is rollback/atomicity coverage using seeded rows; it does not replace the
 producer-derived restore and dispatch scenario. Accept-loss all-eight-table
-behavior and alias-session rescan after reopen/rollback remain pending.
+behavior remains pending. The retained-fact Node integration now creates a
+full 16-row alias page through real API admissions, cancels those unsent
+operations through the production cancellation path, closes/reopens the actual
+Node DB, and proves a new session rescans the full page rather than trusting
+the persisted old cursor. It then continues the active-alias veto and
+producer-backed handoff assertions.
