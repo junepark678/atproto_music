@@ -426,6 +426,19 @@ function loveJob(rt: ForwardRuntime, link: LinkRow, now: number, budget: { remai
           refreshLoveLane(rt.db, link.id, link.generation, lane.love_artist_key, lane.love_track_key);
           continue;
         }
+        const job: Job = {
+          link,
+          kind: head.kind as 'love' | 'unlove',
+          rows: [head],
+          track: entry[1],
+          lane: { artistKey: lane.love_artist_key, trackKey: lane.love_track_key },
+        };
+        // Local settlement must not wait for MBID resolution or hold this key's later love.
+        // execute repeats the check immediately before transport.
+        if (job.kind === 'unlove' && !allowAuthorizedUnlove(rt, job, now)) {
+          refreshLoveLane(rt.db, link.id, link.generation, lane.love_artist_key, lane.love_track_key);
+          continue;
+        }
         if (link.service === 'listenbrainz' && entry[1].recordingMbid === undefined) {
           // An unlove names only the track; the MBID its love was sent with is known locally.
           const known =
@@ -496,13 +509,7 @@ function loveJob(rt: ForwardRuntime, link: LinkRow, now: number, budget: { remai
           entry[1].recordingMbid = local;
           withRecordingMbid(rt.db, head, local);
         }
-        return {
-          link,
-          kind: head.kind as 'love' | 'unlove',
-          rows: [head],
-          track: entry[1],
-          lane: { artistKey: lane.love_artist_key, trackKey: lane.love_track_key },
-        };
+        return job;
       }
     }
   }

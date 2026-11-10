@@ -2582,64 +2582,85 @@ it('ignores event unlove for same-DID canonical survivors but does not let anoth
   ).toEqual({ n: 0 });
 });
 
-it('settles an already queued event unlove locally when a canonical survivor appears before dispatch', async () => {
-  const w = await world();
-  const linkId = w.link();
-  const { seedUser } = await import('../../write/support');
-  seedUser(w.app.db, ALICE);
-  const artist = 'Dispatch Survivor Artist';
-  const track = '  Normalized   Track ';
-  const keys = trackKey(artist, track);
-  const authorizationUri = `at://${ALICE}/com.example.atmusic.love/removed-late`;
-  const authorizationRev = '4444444444444';
-  w.app.db.run(
-    `INSERT INTO live_pending_removal_events(uri,rev,action,created_at_ms,expires_at_ms)
+it.each([
+  { withMbid: true, laterLove: false },
+  { withMbid: false, laterLove: false },
+  { withMbid: true, laterLove: true },
+  { withMbid: false, laterLove: true },
+])(
+  'settles a late survivor before MBID resolution (MBID=$withMbid, later love=$laterLove)',
+  async ({ withMbid, laterLove }) => {
+    const w = await world();
+    const linkId = w.link();
+    const { seedUser } = await import('../../write/support');
+    seedUser(w.app.db, ALICE);
+    const artist = 'Dispatch Survivor Artist';
+    const track = '  Normalized   Track ';
+    const keys = trackKey(artist, track);
+    const authorizationUri = `at://${ALICE}/com.example.atmusic.love/removed-late`;
+    const authorizationRev = '4444444444444';
+    w.app.db.run(
+      `INSERT INTO live_pending_removal_events(uri,rev,action,created_at_ms,expires_at_ms)
      VALUES(?,?,'delete',?,?)`,
-    authorizationUri,
-    authorizationRev,
-    w.clock.nowMs(),
-    w.clock.nowMs() + DAY,
-  );
-  expect(materializeLoveAuthority(w.app.db, { uri: authorizationUri, rev: authorizationRev }, w.clock.nowMs())).toBe(
-    'active',
-  );
-  expect(
-    enqueueLiveUnlove(w.app.db, {
-      did: ALICE,
-      operationId: 'late-survivor-event-unlove',
-      payload: { artist, track, recordingMbid: MBID },
-      authorization: { uri: authorizationUri, rev: authorizationRev },
-      now: w.clock.nowMs(),
-      random: w.rt.random,
-    }),
-  ).toBe(1);
-  const queued = w.rows().find((row) => row.kind === 'unlove')!;
-  w.app.db.run(
-    `INSERT INTO loves(uri,did,rkey,cid,artist,track,artist_key,track_key,recording_mbid,created_at,indexed_at)
+      authorizationUri,
+      authorizationRev,
+      w.clock.nowMs(),
+      w.clock.nowMs() + DAY,
+    );
+    expect(materializeLoveAuthority(w.app.db, { uri: authorizationUri, rev: authorizationRev }, w.clock.nowMs())).toBe(
+      'active',
+    );
+    expect(
+      enqueueLiveUnlove(w.app.db, {
+        did: ALICE,
+        operationId: 'late-survivor-event-unlove',
+        payload: { artist, track, ...(withMbid ? { recordingMbid: MBID } : {}) },
+        authorization: { uri: authorizationUri, rev: authorizationRev },
+        now: w.clock.nowMs(),
+        random: w.rt.random,
+      }),
+    ).toBe(1);
+    const queued = w.rows().find((row) => row.kind === 'unlove')!;
+    w.app.db.run(
+      `INSERT INTO loves(uri,did,rkey,cid,artist,track,artist_key,track_key,recording_mbid,created_at,indexed_at)
      VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
-    `at://${ALICE}/com.example.atmusic.love/late-survivor`,
-    ALICE,
-    'late-survivor',
-    'cid-late-survivor',
-    ' dispatch survivor artist ',
-    'normalized track',
-    ...trackKey(' dispatch survivor artist ', 'normalized track'),
-    MBID,
-    toStorage(fromMs(w.clock.nowMs())),
-    toStorage(fromMs(w.clock.nowMs())),
-  );
-  expect(
-    w.app.db.one('SELECT 1 FROM loves WHERE did=? AND artist_key=? AND track_key=? LIMIT 1', ALICE, ...keys),
-  ).not.toBeNull();
-  await w.run();
-  expect(w.lb.feedback).toEqual([]);
-  expect(w.rows().find((row) => row.id === queued.id)).toMatchObject({
-    state: 'ignored',
-    last_error: 'local_survivor',
-    attempts: 0,
-  });
-  expect(w.app.db.one('SELECT last_error FROM linked_accounts WHERE id=?', linkId)).toEqual({ last_error: null });
-});
+      `at://${ALICE}/com.example.atmusic.love/late-survivor`,
+      ALICE,
+      'late-survivor',
+      'cid-late-survivor',
+      ' dispatch survivor artist ',
+      'normalized track',
+      ...trackKey(' dispatch survivor artist ', 'normalized track'),
+      withMbid ? MBID : null,
+      toStorage(fromMs(w.clock.nowMs())),
+      toStorage(fromMs(w.clock.nowMs())),
+    );
+    expect(
+      w.app.db.one('SELECT 1 FROM loves WHERE did=? AND artist_key=? AND track_key=? LIMIT 1', ALICE, ...keys),
+    ).not.toBeNull();
+    if (laterLove) {
+      expect(
+        w.enqueue([
+          {
+            kind: 'love',
+            operationId: 'later-same-key-love',
+            payload: { artist, track, recordingMbid: MBID, origin: 'web' },
+          },
+        ]),
+      ).toBe(1);
+    }
+    await w.run();
+    expect(w.lb.feedback.map((entry) => entry.json)).toEqual(laterLove ? [{ recording_mbid: MBID, score: 1 }] : []);
+    expect(w.rows().find((row) => row.id === queued.id)).toMatchObject({
+      state: 'ignored',
+      last_error: 'local_survivor',
+      attempts: 0,
+    });
+    expect(w.app.db.all('SELECT status FROM mb_tracks')).toEqual([]);
+    if (laterLove) expect(w.rows().find((row) => row.kind === 'love')).toMatchObject({ state: 'sent' });
+    expect(w.app.db.one('SELECT last_error FROM linked_accounts WHERE id=?', linkId)).toEqual({ last_error: null });
+  },
+);
 
 it('copies the authorized generation into an MBID revival child and rechecks its survivor before dispatch', async () => {
   const w = await world();

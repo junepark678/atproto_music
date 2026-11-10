@@ -17,7 +17,10 @@ authorization tuple and continues to forward as user intent. Payload `origin` is
 not used to classify provenance.
 
 The shared dispatch guard repeats the lookup before credential opening, pacing,
-or transport. A late survivor settles the existing row `ignored` with
+or transport. The same guard also runs on the parsed FIFO head before MBID
+resolution, so a missing MBID cannot postpone local settlement or block a later
+same-key love. Settlement refreshes the lane before selecting its next head.
+A late survivor settles the existing row `ignored` with
 `local_survivor`, no attempt, no wire call, and no link-health error. MBID revival
 also checks before inserting an authorized event-unlove child; children retain
 the parent's generation, authorization, and witness ownership. No automatic
@@ -71,3 +74,15 @@ Passed locally:
 
 Sol owns the exact-tree full gate, independent Astra acceptance, and hosted
 checks. No whole-milestone or production-readiness claim is made here.
+
+The first independent review rejected `77a65c9`: a missing-MBID unlove could
+remain queued ahead of a later love after a survivor appeared. The four-case
+regression (MBID present/missing, with/without a subsequent same-key love)
+reproduced both missing-MBID failures before the repair; its present-MBID
+controls passed. The repair retains the final transport check and API exemption.
+All four cases now pass, as do the reviewer's six unchanged probes and 191
+focused Node tests across nine suites. Typecheck, scoped Biome, the secret scan
+and the sanitized added-line credential scan pass. Receipts are recorded under
+`/tmp/atproto-followup-sol/pr209-f1-*`.
+The stopped `77a65c9` full gate is incomplete evidence; current-head readiness
+requires a fresh full gate, independent review and green hosted checks.
