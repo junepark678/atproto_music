@@ -417,9 +417,10 @@ new-hash authorizer, real 56→57 CLI upgrade, and older-live restore passed on
 the amended migration slice. A populated schema-57 restore test now verifies
 all eight L2 tables survive live-DB restore after API operation and SENT-outbox
 cleanup, then invokes the production materializer and reclaimer in the fresh
-server composition and checks FK integrity. Its proof rows are direct-SQL
+server composition, runs the actual link-backfill timer to revisit restored
+awaiting decisions, and checks FK integrity. Its proof rows are direct-SQL
 fixtures; actual producer-to-restore reconstruction and restored
-timer/coverage/dispatch/resume remain pending. Whole-path128 scenario matrix and
+coverage/dispatch/resume remain pending. Whole-path128 scenario matrix and
 countercontrol, fresh Astra review of that gate, producer-batch pinning,
 complete scheduler/maintenance accounting, terminal cleanup, and scale gates
 remain pending. Small behavior fixtures belong in `worker-node`; growing

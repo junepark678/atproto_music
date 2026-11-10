@@ -1421,6 +1421,21 @@ describe('restore.ts', () => {
     expect(
       materializeLoveApiRecipientDecisions(db, world.clock.nowMs(), seededRandom(77), 'restore-fresh-session'),
     ).toMatchObject({ visited: 2, awaiting: 2, queued: 0, refused: 0 });
+    const l2Timer = systemd
+      .server!.server.features.features.flatMap((feature) => feature.extensions ?? [])
+      .find((extension) => extension.name === 'link-backfill')?.timers?.['link-backfill'];
+    expect(l2Timer).toBeTypeOf('function');
+    const scheduled: number[] = [];
+    const timerNow = world.clock.nowMs() + 2_000;
+    await l2Timer!(timerNow, {
+      schedule: (_name, at) => {
+        scheduled.push(at);
+        return at;
+      },
+      kick: () => null,
+    } as ExtensionContext);
+    expect(scheduled).toHaveLength(1);
+    expect(db.one('SELECT min(due_at_ms) AS due FROM love_api_unlove_decisions')).toEqual({ due: timerNow + 1_000 });
     expect(reclaimLoveApiProofRows(db, world.clock.nowMs())).toMatchObject({ visited: 2, bindingsDeleted: 0 });
     expect(db.one('SELECT api_origin FROM love_api_bindings WHERE operation_id=?', 'live-api-put')).toEqual({
       api_origin: 'lastfm',
