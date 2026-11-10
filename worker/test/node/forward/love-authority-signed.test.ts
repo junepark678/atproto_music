@@ -21,10 +21,10 @@ function addPausedLink(db: Parameters<typeof enqueueForwards>[0]): void {
   );
 }
 
-describe('signed A2 facts authorize deferred love removal', () => {
+describe('signed delete callers and manual signed-update authority enqueues', () => {
   for (const delayed of [false, true]) {
     for (const action of ['delete', 'update'] as const) {
-      it(`preserves ${delayed ? 'delayed' : 'direct'} signed ${action} authority`, async () => {
+      it(`${action === 'update' ? 'manually enqueues update authority after' : 'removes through the delete caller with'} ${delayed ? 'late' : 'early'} signed evidence`, async () => {
         const repo = await repoFor('alice');
         const collection = `${PREFIX}.love`;
         const rkey = '3lbqlove01ab';
@@ -94,6 +94,8 @@ describe('signed A2 facts authorize deferred love removal', () => {
             hint();
             if (action === 'delete') executeAuthorizedRemovals(db, { nowMs: NOW_MS + 1, random, limit: 16 });
           }
+          // The inherited love update projector does not emit this effect. This branch
+          // tests trusted materialization through an explicit enqueuer, not caller wiring.
           if (action === 'update')
             enqueueLiveUnlove(db, {
               did: DID,
