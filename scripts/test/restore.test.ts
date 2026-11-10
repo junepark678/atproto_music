@@ -86,6 +86,7 @@ import {
 import { ListenbrainzClient } from '../../worker/src/forward/listenbrainz-client.ts';
 import { reclaimLoveApiProofRows } from '../../worker/src/forward/love-api-maintenance.ts';
 import { materializeLoveApiRecipientDecisions } from '../../worker/src/forward/love-api-materializer.ts';
+import { prepareLoveApiRecipientHandoff } from '../../worker/src/forward/love-api-recipients.ts';
 import { runLoveApiMaintenance } from '../../worker/src/forward/love-api-scheduler.ts';
 import { runDeferredLoveMaintenance } from '../../worker/src/forward/love-deferral-maintenance.ts';
 import { admitForwardIdentity } from '../../worker/src/forward/projection.ts';
@@ -2229,7 +2230,22 @@ describe('restore.ts', () => {
       },
       afterBackup: ({ db, clock, linkId }) => {
         populateDeferredLoveState(db, clock, linkId, 'Live');
-        populateLoveApiProofState(db, clock, linkId, 'Live');
+        const uri = populateLoveApiProofState(db, clock, linkId, 'Live');
+        db.run('DELETE FROM love_api_recipient_members WHERE uri=?', uri);
+        db.run("DELETE FROM operations WHERE id='live-api-pending-put'");
+        db.run(
+          `UPDATE love_api_unlove_decisions SET recording_mbid=?,payload_json=?,
+             scan_session='old-restore-session',alias_epoch=5,alias_cursor='old-restore-cursor'
+           WHERE uri=?`,
+          '12345678-1234-1234-1234-123456789abc',
+          JSON.stringify({
+            artist: 'Restore Live artist',
+            track: 'Restore Live track',
+            recordingMbid: '12345678-1234-1234-1234-123456789abc',
+            origin: 'lastfm',
+          }),
+          uri,
+        );
       },
     });
     const backupBytes = readFileSync(world.backupPath);
@@ -2273,6 +2289,42 @@ describe('restore.ts', () => {
     expect(existsSync(`${world.dbPath}.restore.tmp-wal`)).toBe(false);
     expect(query(world.dbPath, 'PRAGMA foreign_key_check')).toEqual([]);
     expect(query(`${world.dbPath}.pre-restore`, 'PRAGMA foreign_key_check')).toEqual([]);
+    const reopenedAfterRollback = openSqliteDb(world.dbPath, { busyTimeoutMs: BUSY_MS });
+    try {
+      const candidate = reopenedAfterRollback.one<{
+        did: string;
+        uri: string;
+        incarnation_key: string;
+        link_id: string;
+        generation: number;
+      }>(
+        'SELECT did,uri,incarnation_key,link_id,generation FROM love_api_recipients WHERE uri LIKE ?',
+        '%live-api-origin',
+      );
+      expect(candidate).not.toBeNull();
+      expect(
+        prepareLoveApiRecipientHandoff(
+          reopenedAfterRollback,
+          {
+            did: candidate!.did,
+            uri: candidate!.uri,
+            incarnationKey: candidate!.incarnation_key,
+            linkId: candidate!.link_id,
+            generation: candidate!.generation,
+          },
+          'fresh-after-rollback',
+          world.clock.nowMs(),
+        ).status,
+      ).toBe('ready');
+      expect(
+        reopenedAfterRollback.one<{ scan_session: string; alias_cursor: string }>(
+          'SELECT scan_session,alias_cursor FROM love_api_unlove_decisions WHERE uri=?',
+          candidate!.uri,
+        ),
+      ).toEqual({ scan_session: 'fresh-after-rollback', alias_cursor: '' });
+    } finally {
+      reopenedAfterRollback.close();
+    }
   }, 30_000);
 
   it('keeps the newest live evidence, candidate, and pending removal when a readable restore merges an older backup', async () => {
