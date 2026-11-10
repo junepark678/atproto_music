@@ -585,3 +585,67 @@ it('expires rail entries at successive skew-corrected deadlines without renewing
   render(null, root);
   root.remove();
 });
+
+it('keeps expired rail entries discarded after a backward clock adjustment and failed refresh', async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2026-01-15T12:00:00Z'));
+  const nowPlayingFeed = vi
+    .fn()
+    .mockResolvedValueOnce({
+      items: [{ ...feedItem, nowPlaying: { ...item, expiresAt: '2026-01-15T12:00:01.001Z' } }],
+      serverTime: response.serverTime,
+    })
+    .mockRejectedValue(new Error('temporary read failure'));
+  const api = { nowPlayingFeed } as unknown as ApiClient;
+  const root = document.createElement('div');
+  document.body.append(root);
+  try {
+    await act(async () => {
+      render(<ListeningNow api={api} viewer={did} />, root);
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => expect(root.textContent).toContain('Jóga'));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1001);
+    });
+    expect(root.querySelector('.listening-now')).toBeNull();
+    vi.setSystemTime(new Date('2026-01-15T12:00:00Z'));
+    await act(async () => {
+      document.dispatchEvent(new Event('visibilitychange'));
+      await Promise.resolve();
+    });
+    expect(nowPlayingFeed).toHaveBeenCalledTimes(2);
+    expect(root.querySelector('.listening-now')).toBeNull();
+    expect(root.textContent).not.toContain('did:');
+  } finally {
+    await act(async () => render(null, root));
+    root.remove();
+  }
+});
+
+it('keeps an expired profile empty after a backward clock adjustment and failed refresh', async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2026-01-15T12:00:00Z'));
+  const app = await setup({
+    nowPlaying: { ...item, expiresAt: '2026-01-15T12:00:01.001Z' },
+    serverTime: response.serverTime,
+  });
+  try {
+    expect(app.root.querySelector('.now-playing-card')).not.toBeNull();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_000);
+    });
+    expect(app.root.querySelector('.now-playing-card')).toBeNull();
+    app.nowPlaying.mockRejectedValue(new Error('temporary read failure'));
+    vi.setSystemTime(new Date('2026-01-15T12:00:00Z'));
+    await act(async () => {
+      document.dispatchEvent(new Event('visibilitychange'));
+      await Promise.resolve();
+    });
+    expect(app.root.querySelector('.now-playing-card')).toBeNull();
+    expect(app.root.textContent).toContain('Nothing playing right now');
+    expect(app.root.textContent).not.toContain('did:');
+  } finally {
+    await act(async () => app.cleanup());
+  }
+});

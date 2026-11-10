@@ -1,5 +1,5 @@
 import type { Did, NowPlaying } from '@atmusic/core/api-types';
-import { useEffect, useState } from 'preact/hooks';
+import { useCallback, useEffect, useState } from 'preact/hooks';
 import type { ApiClient } from '../api/client';
 import { formatLocalClock } from './format';
 import { isMbid, MusicBrainzLink, unambiguousMbid } from './musicbrainz-links';
@@ -12,6 +12,20 @@ type Snapshot = {
   serverTime: string;
   skew: number;
 };
+type FeedSnapshot = {
+  api: ApiClient;
+  viewer: Did;
+  items: Array<{ did: Did; handle: string | null; nowPlaying: NowPlaying }>;
+  skew: number;
+};
+function isUnexpired(item: NowPlaying | null | undefined, clientNow: number, skew: number): boolean {
+  const expiry = item == null ? Number.NaN : Date.parse(item.expiresAt);
+  return Number.isFinite(skew) && Number.isFinite(expiry) && expiry > clientNow + skew;
+}
+function discardExpiredEntries(snapshot: FeedSnapshot, clientNow: number): FeedSnapshot {
+  const items = snapshot.items.filter(({ nowPlaying }) => isUnexpired(nowPlaying, clientNow, snapshot.skew));
+  return items.length === snapshot.items.length ? snapshot : { ...snapshot, items };
+}
 const durationLabel = (seconds: number) => {
   const hours = Math.floor(seconds / 3600);
   const minutes = Math.floor((seconds % 3600) / 60);
@@ -30,6 +44,19 @@ export function NowPlayingCard({ api, did, owner }: { api: ApiClient; did: Did; 
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [now, setNow] = useState(Date.now());
   const [error, setError] = useState(false);
+  const reevaluate = useCallback(() => {
+    const clientNow = Date.now();
+    setNow(clientNow);
+    setSnapshot((current) =>
+      current?.api === api &&
+      current.did === did &&
+      current.owner === owner &&
+      current.nowPlaying !== null &&
+      !isUnexpired(current.nowPlaying, clientNow, current.skew)
+        ? { ...current, nowPlaying: null }
+        : current,
+    );
+  }, [api, did, owner]);
   useEffect(() => {
     let active = true;
     let requestSequence = 0;
@@ -41,19 +68,28 @@ export function NowPlayingCard({ api, did, owner }: { api: ApiClient; did: Did; 
       try {
         const response = await api.nowPlaying(did);
         if (!active || sequence !== requestSequence) return;
-        setNow(Date.now());
-        setSnapshot({ api, did, owner, ...response, skew: Date.parse(response.serverTime) - Date.now() });
+        const clientNow = Date.now();
+        const skew = Date.parse(response.serverTime) - clientNow;
+        setNow(clientNow);
+        setSnapshot({
+          api,
+          did,
+          owner,
+          ...response,
+          skew,
+          nowPlaying: isUnexpired(response.nowPlaying, clientNow, skew) ? response.nowPlaying : null,
+        });
         setError(false);
       } catch {
         if (active && sequence === requestSequence) {
-          setNow(Date.now());
+          reevaluate();
           setError(true);
         }
       }
     };
     const syncTicker = () => {
       if (document.visibilityState === 'visible') {
-        if (ticker === undefined) ticker = window.setInterval(() => setNow(Date.now()), 15_000);
+        if (ticker === undefined) ticker = window.setInterval(reevaluate, 15_000);
       } else if (ticker !== undefined) {
         clearInterval(ticker);
         ticker = undefined;
@@ -63,7 +99,7 @@ export function NowPlayingCard({ api, did, owner }: { api: ApiClient; did: Did; 
     syncTicker();
     const onVisibility = () => {
       if (document.visibilityState === 'visible') {
-        setNow(Date.now());
+        reevaluate();
         void refresh();
       }
       syncTicker();
@@ -71,7 +107,7 @@ export function NowPlayingCard({ api, did, owner }: { api: ApiClient; did: Did; 
     document.addEventListener('visibilitychange', onVisibility);
     const interval = window.setInterval(() => {
       if (document.visibilityState === 'visible') {
-        setNow(Date.now());
+        reevaluate();
         void refresh();
       }
     }, 30_000);
@@ -81,13 +117,10 @@ export function NowPlayingCard({ api, did, owner }: { api: ApiClient; did: Did; 
       if (ticker !== undefined) clearInterval(ticker);
       active = false;
     };
-  }, [api, did, owner]);
+  }, [api, did, owner, reevaluate]);
   const currentSnapshot = snapshot?.api === api && snapshot.did === did && snapshot.owner === owner ? snapshot : null;
   const item = currentSnapshot?.nowPlaying;
-  const estimatedServerNow = now + (currentSnapshot?.skew ?? 0);
-  const expiresAt = item === null || item === undefined ? Number.NaN : Date.parse(item.expiresAt);
-  const expired =
-    !Number.isFinite(expiresAt) || !Number.isFinite(currentSnapshot?.skew) || expiresAt <= estimatedServerNow;
+  const expired = !isUnexpired(item, now, currentSnapshot?.skew ?? Number.NaN);
   if (currentSnapshot === null)
     return owner ? (
       <p class="now-playing-empty" aria-live="polite">
@@ -210,14 +243,16 @@ function CoverArt({ releaseMbid }: { releaseMbid: string }) {
 }
 
 export function ListeningNow({ api, viewer }: { api: ApiClient; viewer: Did }) {
-  const [feed, setFeed] = useState<{
-    api: ApiClient;
-    viewer: Did;
-    items: Array<{ did: Did; handle: string | null; nowPlaying: NowPlaying }>;
-    skew: number;
-  } | null>(null);
+  const [feed, setFeed] = useState<FeedSnapshot | null>(null);
   const [now, setNow] = useState(Date.now());
   const [pollVersion, setPollVersion] = useState(0);
+  const reevaluate = useCallback(() => {
+    const clientNow = Date.now();
+    setNow(clientNow);
+    setFeed((current) =>
+      current?.api === api && current.viewer === viewer ? discardExpiredEntries(current, clientNow) : current,
+    );
+  }, [api, viewer]);
   useEffect(() => {
     let active = true;
     let requestSequence = 0;
@@ -227,14 +262,20 @@ export function ListeningNow({ api, viewer }: { api: ApiClient; viewer: Did }) {
       void api.nowPlayingFeed().then(
         (result) => {
           if (active && sequence === requestSequence) {
-            setFeed({ api, viewer, items: result.items, skew: Date.parse(result.serverTime) - Date.now() });
-            setNow(Date.now());
+            const clientNow = Date.now();
+            setFeed(
+              discardExpiredEntries(
+                { api, viewer, items: result.items, skew: Date.parse(result.serverTime) - clientNow },
+                clientNow,
+              ),
+            );
+            setNow(clientNow);
             setPollVersion((version) => version + 1);
           }
         },
         () => {
           if (active && sequence === requestSequence) {
-            setNow(Date.now());
+            reevaluate();
             setPollVersion((version) => version + 1);
           }
         },
@@ -243,7 +284,7 @@ export function ListeningNow({ api, viewer }: { api: ApiClient; viewer: Did }) {
     refresh();
     const onVisibility = () => {
       if (document.visibilityState === 'visible') {
-        setNow(Date.now());
+        reevaluate();
         setPollVersion((version) => version + 1);
         refresh();
       }
@@ -256,13 +297,10 @@ export function ListeningNow({ api, viewer }: { api: ApiClient; viewer: Did }) {
       document.removeEventListener('visibilitychange', onVisibility);
       clearInterval(timer);
     };
-  }, [api, viewer]);
+  }, [api, viewer, reevaluate]);
   const items =
     feed?.api === api && feed.viewer === viewer
-      ? feed.items.filter(({ nowPlaying }) => {
-          const expiry = Date.parse(nowPlaying.expiresAt);
-          return Number.isFinite(expiry) && expiry > now + feed.skew;
-        })
+      ? feed.items.filter(({ nowPlaying }) => isUnexpired(nowPlaying, now, feed.skew))
       : [];
   useEffect(() => {
     if (feed?.api !== api || feed.viewer !== viewer || !Number.isFinite(feed.skew)) return;
@@ -273,9 +311,9 @@ export function ListeningNow({ api, viewer }: { api: ApiClient; viewer: Did }) {
     if (!Number.isFinite(nextExpiry)) return;
     const remaining = nextExpiry - (Date.now() + feed.skew);
     const delay = Math.min(2_147_483_647, Math.max(0, remaining));
-    const timer = window.setTimeout(() => setNow(Date.now()), delay);
+    const timer = window.setTimeout(reevaluate, delay);
     return () => clearTimeout(timer);
-  }, [api, viewer, feed, pollVersion, now]);
+  }, [api, viewer, feed, pollVersion, now, reevaluate]);
   if (items.length === 0) return null;
   return (
     <aside class="listening-now" aria-labelledby="listening-now-title">
