@@ -51,25 +51,29 @@ import { createWebSessions } from '../../worker/src/bff/sessions.ts';
 import { ensureAccount, renameAccount } from '../../worker/src/credentials/accounts.ts';
 import { createAppPassword, revokeAppPassword, verifyAppPassword } from '../../worker/src/credentials/app-passwords.ts';
 import { type Box, createBox } from '../../worker/src/crypto/box.ts';
+import type { ModuleDeps } from '../../worker/src/do/contracts.ts';
 import { executeAuthorizedRemovals, nextPendingRemovalDue } from '../../worker/src/do/ingest/live-pending-removals';
 import { migrate } from '../../worker/src/do/migrate.ts';
 import { MIGRATIONS, SCHEMA_VERSION, TABLE_CLASS } from '../../worker/src/do/schema.ts';
 import { applyRecordProof } from '../../worker/src/do/write/apply-record.ts';
 import { runLinkBackfill } from '../../worker/src/forward/backfill.ts';
 import { FORWARD_LOVE_RECORDING_LOOKUP_SQL } from '../../worker/src/forward/forwarder.ts';
-import { deleteLink, getLinkById, openLinkCredential, revokeLink, saveLink } from '../../worker/src/forward/links.ts';
 import {
-  admitForwardIdentity,
-  projectionListenKey,
-  releaseForwardAdmission,
-} from '../../worker/src/forward/projection.ts';
+  deleteLink,
+  getLinkById,
+  openLinkCredential,
+  patchLink,
+  revokeLink,
+  saveLink,
+} from '../../worker/src/forward/links.ts';
+import { admitForwardIdentity } from '../../worker/src/forward/projection.ts';
 import { enqueueCoverArt, putCoverArt } from '../../worker/src/musicbrainz/cover-art-store.ts';
 import { createBackups } from '../../worker/src/node/backup.ts';
 import { type ExitCode, type RunningServer, run } from '../../worker/src/node/run.ts';
 import { parseSecrets, type Secrets } from '../../worker/src/node/secrets.ts';
 import { openSqliteDb, type SqliteDb } from '../../worker/src/node/sqlite-db.ts';
-import { enqueueForwards } from '../../worker/src/outbox/forward-enqueue.ts';
-import { deleteQueuedForwardIdentity } from '../../worker/src/outbox/forward-key.ts';
+import { acceptListens } from '../../worker/src/outbox/ingress.ts';
+import { cancelUnsent } from '../../worker/src/outbox/operations.ts';
 import {
   captureLog,
   manualTimers,
@@ -626,51 +630,106 @@ describe('restore.ts', () => {
     const servicePort = await freePort();
     const systemd = new FakeSystemd(world, { servicePort });
     await systemd.boot();
+    let liveServer = systemd.server as Started;
+    const liveDb = liveServer.server.db;
+    const linkId = world.ids.link as string;
+    const now = world.clock.nowMs();
+    const m = {
+      db: liveDb,
+      clock: world.clock,
+      random: seededRandom(0x22),
+      config: liveServer.server.config.app,
+      log: captureLog().logger,
+    } as unknown as ModuleDeps;
+    const makeListen = async (track: string, listenedAt: string) => {
+      const result = await acceptListens(m, {
+        did: DID_A,
+        origin: 'web',
+        listens: [{ input: { artist: 'Restore Artist', track, listenedAt } }],
+        receiptMs: world.clock.nowMs(),
+      });
+      const item = result.results[0];
+      expect(item?.status).toBe('accepted');
+      if (item?.status !== 'accepted' || item.operationId === null) throw new Error('live listen was not accepted');
+      return { ...item, operationId: item.operationId };
+    };
+    const original = getLinkById(liveDb, linkId);
+    expect(original).not.toBeNull();
+    patchLink({ db: liveDb, clock: world.clock }, DID_A, linkId, { forwardScrobbles: false });
+    const cancelled = await makeListen('Cancel then retry', '2026-01-15T11:59:00Z');
+    expect(cancelUnsent(liveDb, cancelled.operationId, now + 1)).toBe(true);
+    expect(liveDb.one('SELECT state FROM operations WHERE id=?', cancelled.operationId)).toEqual({
+      state: 'cancelled',
+    });
+    patchLink({ db: liveDb, clock: world.clock }, DID_A, linkId, { forwardScrobbles: true });
+    const reaccepted = await makeListen('Cancel then retry', '2026-01-15T11:59:00Z');
+    expect(liveDb.one('SELECT state FROM operations WHERE id=?', reaccepted.operationId)).toEqual({ state: 'queued' });
+    expect(
+      liveDb.one('SELECT 1 FROM forward_receipts WHERE link_id=? AND dedupe_key=?', linkId, reaccepted.listenKey),
+    ).not.toBeNull();
+    patchLink({ db: liveDb, clock: world.clock }, DID_A, linkId, { forwardScrobbles: false });
+    const revokedListen = await makeListen('Restore revoked history', '2026-01-15T11:59:30Z');
+    expect(revokeLink(liveDb, original!, 'credential_revoked', now + 2)).toBe(true);
+    expect(liveDb.one('SELECT status FROM linked_accounts WHERE id=?', linkId)).toEqual({ status: 'revoked' });
+
+    const keys = await fixtureKeys();
+    const repo = new SignedRepo(DID_A, keys.alice, { clock: world.clock });
+    const proofs = [] as Array<{
+      proof: Awaited<ReturnType<typeof verifyRecordProof>>;
+      collection: string;
+      rkey: string;
+    }>;
+    for (const operationId of [reaccepted.operationId, revokedListen.operationId]) {
+      const operation = liveDb.one<{ collection: string; rkey: string; record_json: string }>(
+        'SELECT collection,rkey,record_json FROM operations WHERE id=?',
+        operationId,
+      )!;
+      const record = JSON.parse(operation.record_json) as Record<string, unknown>;
+      await repo.put(operation.collection, operation.rkey, record);
+      const proof = await verifyRecordProof(await repo.getRecordCar(operation.collection, operation.rkey), {
+        did: DID_A,
+        collection: operation.collection,
+        rkey: operation.rkey,
+        signingKey: repo.key.didKey,
+      });
+      expect(proof.state).toBe('present');
+      if (proof.state !== 'present') throw new Error('expected signed live record proof');
+      proofs.push({ proof, collection: operation.collection, rkey: operation.rkey });
+      const proofNow = fromMs(world.clock.nowMs());
+      liveDb.tx(() =>
+        applyRecordProof(liveDb, proof, {
+          prefix: PREFIX,
+          nowNs: proofNow,
+          receiptNs: proofNow,
+          live: authorizedLiveOptions(liveDb, proof, seededRandom(0x28)).live,
+        }),
+      );
+    }
+    expect(liveDb.all('SELECT from_seq,to_seq,reason FROM forward_link_gaps WHERE link_id=?', linkId)).toEqual([
+      { from_seq: 0, to_seq: 1, reason: 'disabled' },
+      { from_seq: 2, to_seq: null, reason: 'disabled' },
+    ]);
+
+    // Backup predates disable, cancel/reaccept, revocation and both verified proof applications.
     const result = await restoreCli(world, systemd, [...baseArgs(world), '--listen', `127.0.0.1:${servicePort}`]);
     expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
-
-    const server = systemd.server as Started;
-    const db = server.server.db;
-    const now = world.clock.nowMs();
-    const original = getLinkById(db, world.ids.link as string);
-    expect(original).not.toBeNull();
-    const cancelledKey = 'restore-cancel-then-reaccept';
-    expect(admitForwardIdentity(db, { did: DID_A, identityKey: cancelledKey, path: 'api', now })).toBe(true);
-    const apiItem = {
-      kind: 'scrobble' as const,
-      listenKey: cancelledKey,
-      payload: { listen: { artist: 'Artist', track: 'Retry' } },
-    };
-    expect(enqueueForwards(db, { did: DID_A, items: [apiItem], now, random: seededRandom(0x23) })).toBe(1);
-    deleteQueuedForwardIdentity(db, DID_A, ['scrobble'], cancelledKey);
-    expect(releaseForwardAdmission(db, DID_A, cancelledKey)).toBe(true);
-    expect(admitForwardIdentity(db, { did: DID_A, identityKey: cancelledKey, path: 'api', now: now + 1 })).toBe(true);
-    expect(enqueueForwards(db, { did: DID_A, items: [apiItem], now: now + 1, random: seededRandom(0x24) })).toBe(1);
-
-    expect(revokeLink(db, original!, 'credential_revoked', now + 2)).toBe(true);
-    const projected = db.one<{ listened_at: string; artist_key: string; track_key: string }>(
-      'SELECT listened_at,artist_key,track_key FROM scrobbles WHERE uri=?',
-      `at://${DID_A}/${PREFIX}.scrobble/s1`,
-    );
-    expect(projected).not.toBeNull();
-    const sourceKey = projectionListenKey(DID_A, projected!.listened_at, projected!.artist_key, projected!.track_key);
-    expect(admitForwardIdentity(db, { did: DID_A, identityKey: sourceKey, path: 'api', now: now + 3 })).toBe(true);
+    liveServer = systemd.server as Started;
+    const db = liveServer.server.db;
+    expect(db.one('SELECT state FROM operations WHERE id=?', cancelled.operationId)).toEqual({ state: 'cancelled' });
     expect(
-      enqueueForwards(db, {
-        did: DID_A,
-        items: [
-          { kind: 'scrobble', listenKey: sourceKey, payload: { listen: { artist: 'Artist', track: 'Track s1' } } },
-        ],
-        now: now + 3,
-        random: seededRandom(0x25),
-      }),
-    ).toBe(0);
-    expect(db.one('SELECT from_seq,to_seq,reason FROM forward_link_gaps WHERE link_id=?', world.ids.link!)).toEqual({
-      from_seq: 2,
-      to_seq: null,
-      reason: 'revoked',
-    });
-
+      db.one('SELECT 1 FROM forward_receipts WHERE link_id=? AND dedupe_key=?', linkId, reaccepted.listenKey),
+    ).not.toBeNull();
+    for (const { proof } of proofs) {
+      const proofNow = fromMs(world.clock.nowMs());
+      db.tx(() =>
+        applyRecordProof(db, proof, {
+          prefix: PREFIX,
+          nowNs: proofNow,
+          receiptNs: proofNow,
+          live: authorizedLiveOptions(db, proof, seededRandom(0x29)).live,
+        }),
+      );
+    }
     const secrets = parseSecrets(world.secretsDoc);
     const box = createBox(secrets.encryptionKeys, seededRandom(0x26));
     const relinked = saveLink(
@@ -678,25 +737,63 @@ describe('restore.ts', () => {
       { did: DID_A, service: 'lastfm', remoteUser: 'alice', credential: LASTFM_SK },
     );
     expect(relinked.link).toMatchObject({ id: world.ids.link, generation: 1, status: 'active' });
+    patchLink({ db, clock: world.clock }, DID_A, linkId, { forwardScrobbles: true });
     db.run("UPDATE users SET indexing_state='current' WHERE did=?", DID_A);
-    for (let index = 0; index < 4; index++) await runLinkBackfill(db, seededRandom(0x30 + index), world.clock.nowMs());
+    const revision = db.one<{ backfill_run_revision: number; backfill_state: string }>(
+      'SELECT backfill_run_revision,backfill_state FROM linked_accounts WHERE id=?',
+      linkId,
+    );
+    expect(revision?.backfill_state).toBe('pending');
+    await runLinkBackfill(db, seededRandom(0x30), world.clock.nowMs(), 1);
+    const running = db.one<{
+      backfill_run_revision: number;
+      backfill_state: string;
+      backfill_cursor: string | null;
+      backfill_discovery_cursor: string | null;
+    }>(
+      'SELECT backfill_run_revision,backfill_state,backfill_cursor,backfill_discovery_cursor FROM linked_accounts WHERE id=?',
+      linkId,
+    );
+    expect(running?.backfill_state).toBe('running');
+    const progressBeforeCompose = {
+      receiptCount: db.one<{ n: number }>('SELECT count(*) AS n FROM forward_receipts WHERE link_id=?', linkId)?.n,
+      gapRows: db.all('SELECT from_seq,to_seq,reason FROM forward_link_gaps WHERE link_id=? ORDER BY from_seq', linkId),
+    };
+    const oldComposition = liveServer.server;
+    await systemd.systemctl(['stop', 'atmusic.service']);
+    await systemd.systemctl(['start', 'atmusic.service']);
+    liveServer = systemd.server as Started;
+    expect(liveServer.server).not.toBe(oldComposition);
+    const resumedDb = liveServer.server.db;
+    expect(
+      resumedDb.one(
+        'SELECT backfill_state,backfill_run_revision,backfill_cursor,backfill_discovery_cursor FROM linked_accounts WHERE id=?',
+        linkId,
+      ),
+    ).toEqual(running);
+    expect(resumedDb.one<{ n: number }>('SELECT count(*) AS n FROM forward_receipts WHERE link_id=?', linkId)?.n).toBe(
+      progressBeforeCompose.receiptCount,
+    );
+    expect(
+      resumedDb.all('SELECT from_seq,to_seq,reason FROM forward_link_gaps WHERE link_id=? ORDER BY from_seq', linkId),
+    ).toEqual(progressBeforeCompose.gapRows);
+    for (let index = 0; index < 10; index++)
+      await runLinkBackfill(resumedDb, seededRandom(0x31 + index), world.clock.nowMs(), 1);
 
-    expect(
-      db.one('SELECT state FROM forward_outbox WHERE link_id=? AND dedupe_key=?', world.ids.link!, cancelledKey),
-    ).toEqual({
-      state: 'queued',
+    expect(resumedDb.one('SELECT state FROM operations WHERE id=?', cancelled.operationId)).toEqual({
+      state: 'cancelled',
     });
     expect(
-      db.one('SELECT count(*) AS n FROM forward_outbox WHERE link_id=? AND dedupe_key=?', world.ids.link!, sourceKey),
-    ).toEqual({
-      n: 1,
-    });
+      resumedDb.one("SELECT count(*) AS n FROM forward_outbox WHERE link_id=? AND kind='scrobble'", linkId),
+    ).toEqual({ n: 3 });
     expect(
-      db.one('SELECT retired_at_ms FROM forward_receipts WHERE link_id=? AND dedupe_key=?', world.ids.link!, sourceKey),
-    ).toEqual({
-      retired_at_ms: null,
+      resumedDb.one("SELECT count(*) AS n FROM forward_receipts WHERE link_id=? AND kind='scrobble'", linkId),
+    ).toEqual({ n: 3 });
+    expect(resumedDb.one('SELECT backfill_state FROM linked_accounts WHERE id=?', linkId)).toEqual({
+      backfill_state: 'done',
     });
-    expect(db.one('SELECT to_seq FROM forward_link_gaps WHERE link_id=?', world.ids.link!)).toEqual({ to_seq: 3 });
+    await systemd.systemctl(['stop', 'atmusic.service']);
+    expect(query(world.dbPath, 'PRAGMA foreign_key_check')).toEqual([]);
   }, 30_000);
 
   it('clears migration-55 state when readable live schema 54 has no receipt or gap tables', async () => {

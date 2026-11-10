@@ -17,6 +17,7 @@ import { MAX_CREATE_BODY_BYTES, MAX_WRITE_BODY_BYTES } from '@atmusic/core/scrob
 import { NS_PER_SECOND, toStorage } from '@atmusic/core/timestamp';
 import { describe, expect, it } from 'vitest';
 import type { ImportItemRow, ImportJobRow, OperationRow } from '../../../src/app/rows';
+import type { SqlParam } from '../../../src/do/db';
 import { admitForwardIdentity } from '../../../src/forward/projection';
 import {
   cancelJob,
@@ -37,6 +38,7 @@ import {
   prepareUnsentBatchListenRemoval,
 } from '../../../src/outbox/batch-delete-ops';
 import { enqueueForwards } from '../../../src/outbox/forward-enqueue';
+import { FORWARD_RECEIPT_LOOKUP_SQL } from '../../../src/outbox/forward-receipts';
 import { newOperationId, unblockOperations } from '../../../src/outbox/operations';
 import { insertScrobbleCreate, prepareScrobble } from '../../../src/outbox/scrobble-ops';
 import { stagePullPage } from '../../../src/sync/pull-staging';
@@ -1625,9 +1627,21 @@ describe('import writer', () => {
           forwarded!.link_id,
           forwarded!.dedupe_key,
         );
-        expect(await writeSlice(h.m, { id: 'job-source-listen', did: h.alice }, h.kit.clock.nowMs())).toMatchObject({
-          created: 0,
-        });
+        const originalOne = h.m.db.one.bind(h.m.db);
+        let receiptLookups = 0;
+        h.m.db.one = <T>(sql: string, ...params: SqlParam[]): T | null => {
+          if (sql === FORWARD_RECEIPT_LOOKUP_SQL) receiptLookups++;
+          return originalOne<T>(sql, ...params);
+        };
+        try {
+          expect(await writeSlice(h.m, { id: 'job-source-listen', did: h.alice }, h.kit.clock.nowMs())).toMatchObject({
+            created: 0,
+          });
+          // The already-consumed import job is stopped upstream; this does not exercise receipt coverage.
+          expect(receiptLookups).toBe(0);
+        } finally {
+          h.m.db.one = originalOne;
+        }
         expect(
           h.db.one(
             'SELECT 1 FROM forward_outbox WHERE link_id=? AND dedupe_key=?',

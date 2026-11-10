@@ -4,10 +4,12 @@ import { trackKey } from '@atmusic/core/music-key';
 import { fromMs, NS_PER_SECOND } from '@atmusic/core/timestamp';
 import { describe, expect, it } from 'vitest';
 import type { LinkedAccountRow } from '../../../src/app/rows';
+import type { SqlParam } from '../../../src/do/db';
 import { applyRecordProof } from '../../../src/do/write/apply-record';
 import { linkDto } from '../../../src/forward/links';
 import { cleanupForwardAdmissionsForSuppression, retainedForwardProvenance } from '../../../src/forward/projection';
 import { removeScrobbleCreate } from '../../../src/outbox/delete-ops';
+import { FORWARD_RECEIPT_LOOKUP_SQL } from '../../../src/outbox/forward-receipts';
 import { seedLegacyListenSecondSlice } from '../../../src/outbox/listen-second-receipts';
 import { enqueueLove, enqueueUnlove } from '../../../src/outbox/love-ops';
 import { insertOperation, newOperationId, outboxCollections, prepare } from '../../../src/outbox/operations';
@@ -167,9 +169,21 @@ describe('linked pull staged writer', () => {
           ],
         });
         expect(echo).toEqual(['duplicate', 'duplicate']);
-        expect(
-          await writePullSlice(h.m, { linkId, generation: 1, available: async () => ({ available: true }) }),
-        ).toMatchObject({ accepted: 0 });
+        const originalOne = h.db.one.bind(h.db);
+        let receiptLookups = 0;
+        h.db.one = <T>(sql: string, ...params: SqlParam[]): T | null => {
+          if (sql === FORWARD_RECEIPT_LOOKUP_SQL) receiptLookups++;
+          return originalOne<T>(sql, ...params);
+        };
+        try {
+          expect(
+            await writePullSlice(h.m, { linkId, generation: 1, available: async () => ({ available: true }) }),
+          ).toMatchObject({ accepted: 0 });
+          // Source staging rejects the duplicate page before the writer consults receipts.
+          expect(receiptLookups).toBe(0);
+        } finally {
+          h.db.one = originalOne;
+        }
 
         const remoteLove = (await remoteRecords(h.kit, 'Alice', LOVE))[0]!;
         const proof = await verifyRecordProof(await h.kit.repos.Alice.getRecordCar(LOVE, remoteLove.rkey), {

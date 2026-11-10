@@ -35,7 +35,7 @@ import {
   recordBackfillFailure,
   runLinkBackfill,
 } from '../../../src/forward/backfill';
-import { dueRows } from '../../../src/forward/forward-outbox';
+import { dueRows, settleRows } from '../../../src/forward/forward-outbox';
 import { LINK_STATE_TTL_MS, patchLink, saveLink, sweepExpiredLinkStates } from '../../../src/forward/links';
 import { admitForwardIdentity, projectionListenKey } from '../../../src/forward/projection';
 import { linksFeature } from '../../../src/http/links';
@@ -43,6 +43,7 @@ import { parseSecrets } from '../../../src/node/secrets';
 import { openSqliteDb } from '../../../src/node/sqlite-db';
 import { enqueueForwards } from '../../../src/outbox/forward-enqueue';
 import { storedForwardDedupeKey } from '../../../src/outbox/forward-key';
+import { FORWARD_OUTBOX_COVERAGE_SQL, FORWARD_RECEIPT_LOOKUP_SQL } from '../../../src/outbox/forward-receipts';
 import { checkResponse } from '../../acceptance/support/openapi';
 import { closeApps, startApp, TEST_PUBLIC_ORIGIN, type TestApp, testSecretsDocument } from '../support/app';
 import { FakeLastfm, md5Hex } from '../support/fake-lastfm';
@@ -351,7 +352,16 @@ describe('link routes', () => {
         random: seededRandom(711),
       }),
     ).toBe(1);
-    w.app.db.run("UPDATE forward_outbox SET state='sent' WHERE link_id=? AND dedupe_key=?", link.id, key);
+    const terminal = w.app.db.one<{ id: string }>(
+      'SELECT id FROM forward_outbox WHERE link_id=? AND dedupe_key=?',
+      link.id,
+      key,
+    )!;
+    settleRows(w.app.db, [terminal.id], 'sent', w.clock.nowMs(), null, true, link.generation);
+    expect(w.app.db.one('SELECT state,attempts FROM forward_outbox WHERE id=?', terminal.id)).toEqual({
+      state: 'sent',
+      attempts: 1,
+    });
     for (let i = 0; i < 5; i++) await runLinkBackfill(w.app.db, seededRandom(712 + i), w.clock.nowMs());
 
     // Model cleanup after a terminal delivery. The identity receipt survives row deletion.
@@ -364,14 +374,64 @@ describe('link routes', () => {
     w.app.db.run('DELETE FROM forward_outbox WHERE link_id=? AND dedupe_key=?', link.id, key);
     patchLink({ db: w.app.db, clock: w.clock }, ALICE, link.id, { forwardScrobbles: false });
     patchLink({ db: w.app.db, clock: w.clock }, ALICE, link.id, { forwardScrobbles: true });
-    expect(
-      enqueueForwards(w.app.db, {
-        did: ALICE,
-        items: [{ kind: 'scrobble', listenKey: key, payload: { listen: { artist: 'A', track: 'T31' } } }],
-        now: w.clock.nowMs(),
-        random: seededRandom(720),
-      }),
-    ).toBe(0);
+    const originalOne = w.app.db.one.bind(w.app.db);
+    const receiptQueries: string[] = [];
+    w.app.db.one = <T>(sql: string, ...params: SqlParam[]): T | null => {
+      if (sql === FORWARD_RECEIPT_LOOKUP_SQL || sql === FORWARD_OUTBOX_COVERAGE_SQL) receiptQueries.push(sql);
+      return originalOne<T>(sql, ...params);
+    };
+    try {
+      expect(
+        enqueueForwards(w.app.db, {
+          did: ALICE,
+          items: [{ kind: 'scrobble', listenKey: key, payload: { listen: { artist: 'A', track: 'T31' } } }],
+          now: w.clock.nowMs(),
+          random: seededRandom(720),
+        }),
+      ).toBe(0);
+      expect(receiptQueries).toContain(FORWARD_RECEIPT_LOOKUP_SQL);
+      expect(receiptQueries).toContain(FORWARD_OUTBOX_COVERAGE_SQL);
+      expect(receiptQueries.length).toBeGreaterThan(0);
+      expect(w.app.db.one('SELECT 1 FROM forward_outbox WHERE link_id=? AND dedupe_key=?', link.id, key)).toBeNull();
+
+      // Behavioral negative control: without the retired receipt, the same real enqueue path recreates a row.
+      w.app.db.run(
+        'DELETE FROM forward_receipts WHERE link_id=? AND generation=? AND dedupe_key=?',
+        link.id,
+        link.generation,
+        key,
+      );
+      receiptQueries.length = 0;
+      expect(
+        enqueueForwards(w.app.db, {
+          did: ALICE,
+          items: [{ kind: 'scrobble', listenKey: key, payload: { listen: { artist: 'A', track: 'T31' } } }],
+          now: w.clock.nowMs(),
+          random: seededRandom(721),
+        }),
+      ).toBe(1);
+      expect(receiptQueries).toContain(FORWARD_RECEIPT_LOOKUP_SQL);
+      expect(
+        w.app.db.one('SELECT count(*) AS n FROM forward_outbox WHERE link_id=? AND dedupe_key=?', link.id, key),
+      ).toEqual({ n: 1 });
+    } finally {
+      w.app.db.one = originalOne;
+    }
+    w.app.db.run('DELETE FROM forward_outbox WHERE link_id=? AND dedupe_key=?', link.id, key);
+    w.app.db.run(
+      'DELETE FROM forward_receipts WHERE link_id=? AND generation=? AND dedupe_key=?',
+      link.id,
+      link.generation,
+      key,
+    );
+    w.app.db.run(
+      "INSERT INTO forward_receipts(link_id,generation,kind,dedupe_key,created_at_ms,retired_at_ms) VALUES(?,?,'scrobble',?,?,?)",
+      link.id,
+      link.generation,
+      key,
+      w.clock.nowMs(),
+      w.clock.nowMs(),
+    );
     for (let i = 0; i < 5; i++) await runLinkBackfill(w.app.db, seededRandom(721 + i), w.clock.nowMs());
 
     expect(w.app.db.one('SELECT 1 FROM forward_outbox WHERE link_id=? AND dedupe_key=?', link.id, key)).toBeNull();
