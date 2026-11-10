@@ -23,6 +23,52 @@ function link(db: Parameters<typeof runDeferredLoveMaintenance>[0], generation =
   );
 }
 
+function seedFairnessRows(db: Db, start: number, count: number): void {
+  db.tx(() => {
+    for (let seq = start; seq < start + count; seq++) {
+      const suffix = String(seq).padStart(6, '0');
+      const uri = `at://${DID}/com.example.atmusic.love/${suffix}`;
+      db.run(
+        `INSERT INTO forward_deferred_love_heads(link_id,generation,love_artist_key,love_track_key,head_seq,created_at_ms)
+         VALUES('maintenance-link',1,?,?,?,1)`,
+        `artist-${suffix}`,
+        `track-${suffix}`,
+        seq,
+      );
+      db.run(
+        `INSERT INTO forward_deferred_love_witnesses(link_id,generation,operation_id,group_seq,kind,love_artist_key,
+           love_track_key,created_at_ms) VALUES('maintenance-link',1,?,?,'love',?,?,1)`,
+        `witness-${suffix}`,
+        seq,
+        `artist-${suffix}`,
+        `track-${suffix}`,
+      );
+      db.run(
+        `INSERT INTO forward_deferred_love_authorities(authorization_uri,authorization_rev,authority_seq,action,cid,
+           state,due_seq,created_at_ms) VALUES(?,'rev',?,'delete','','active',NULL,1)`,
+        uri,
+        seq,
+      );
+      db.run(
+        `INSERT INTO forward_outbox(id,link_id,generation,did,kind,dedupe_key,payload_json,state,attempts,due_at,
+           created_at_ms,updated_at_ms,authorization_uri,authorization_rev)
+         VALUES(?,?,1,?,'unlove',?,'{}','queued',0,0,1,1,?,'rev')`,
+        `effect-${suffix}`,
+        'maintenance-link',
+        DID,
+        `effect-${suffix}`,
+        uri,
+      );
+    }
+    db.run(
+      'UPDATE forward_deferred_love_maintenance SET next_head_seq=?,next_group_seq=?,next_authority_seq=? WHERE singleton=1',
+      start + count,
+      start + count,
+      start + count,
+    );
+  });
+}
+
 describe('deferred love maintenance', () => {
   it('starts frozen integer passes, removes cancellations, and stays within whole-call budgets', async () => {
     await withMigratedDb((db) => {
@@ -205,6 +251,105 @@ describe('deferred love maintenance', () => {
       });
     });
   });
+
+  it('reaches 600-item WIT and AUTH orphans behind frozen frontiers under continuous arrivals; extending-frontier control starves', async () => {
+    await withMigratedDb((db) => {
+      link(db);
+      db.run(
+        'INSERT INTO forward_deferred_love_maintenance(singleton,next_head_seq,next_group_seq,next_authority_seq) VALUES(1,601,601,601)',
+      );
+      seedFairnessRows(db, 1, 600);
+      runDeferredLoveMaintenance(db, 9);
+      const first = runDeferredLoveMaintenance(db, 10);
+      expect(first.writes).toBeLessThanOrEqual(LOVE_MAINTENANCE_WRITES);
+      expect(first.visits).toBeLessThanOrEqual(LOVE_MAINTENANCE_VISITS);
+      expect(first.witSteps).toBeLessThanOrEqual(LOVE_MAINTENANCE_WIT_STEPS);
+      const firstCursor = db.one<{
+        rr_cursor: number;
+        rr_frontier: number;
+        wit_cursor: number;
+        wit_frontier: number;
+        auth_cursor: number;
+        auth_frontier: number;
+      }>(
+        'SELECT rr_cursor,rr_frontier,wit_cursor,wit_frontier,auth_cursor,auth_frontier FROM forward_deferred_love_maintenance',
+      );
+      expect(firstCursor).toEqual({
+        rr_cursor: 1,
+        rr_frontier: 600,
+        wit_cursor: 1,
+        wit_frontier: 600,
+        auth_cursor: 8,
+        auth_frontier: 600,
+      });
+
+      db.run("UPDATE forward_deferred_love_witnesses SET generation=0 WHERE operation_id='witness-000001'");
+      db.run("DELETE FROM forward_outbox WHERE id='effect-000001'");
+      let tick = 0;
+      for (; tick < 650; tick++) {
+        seedFairnessRows(db, 601 + tick * 120, 120);
+        const result = runDeferredLoveMaintenance(db, 11 + tick);
+        expect(result.writes).toBeLessThanOrEqual(LOVE_MAINTENANCE_WRITES);
+        expect(result.visits).toBeLessThanOrEqual(LOVE_MAINTENANCE_VISITS);
+        expect(result.witSteps).toBeLessThanOrEqual(LOVE_MAINTENANCE_WIT_STEPS);
+        const witness = db.one(
+          "SELECT 1 AS present FROM forward_deferred_love_witnesses WHERE operation_id='witness-000001'",
+        );
+        const authority = db.one(
+          "SELECT 1 AS present FROM forward_deferred_love_authorities WHERE authorization_uri=? AND authorization_rev='rev'",
+          `at://${DID}/com.example.atmusic.love/000001`,
+        );
+        if (witness === null && authority === null) break;
+      }
+      expect(tick).toBeLessThan(650);
+      expect(
+        db.one(
+          "SELECT 1 AS present FROM forward_deferred_love_authorities WHERE authorization_uri=? AND authorization_rev='rev'",
+          `at://${DID}/com.example.atmusic.love/000001`,
+        ),
+      ).toBeNull();
+      expect(
+        db.one("SELECT 1 AS present FROM forward_deferred_love_witnesses WHERE operation_id='witness-000001'"),
+      ).toBeNull();
+    });
+
+    await withMigratedDb((db) => {
+      link(db);
+      db.run(
+        'INSERT INTO forward_deferred_love_maintenance(singleton,next_head_seq,next_group_seq,next_authority_seq) VALUES(1,601,601,601)',
+      );
+      seedFairnessRows(db, 1, 600);
+      runDeferredLoveMaintenance(db, 10);
+      runDeferredLoveMaintenance(db, 11);
+      expect(db.one('SELECT wit_cursor,auth_cursor FROM forward_deferred_love_maintenance')).toEqual({
+        wit_cursor: 1,
+        auth_cursor: 8,
+      });
+      db.run("UPDATE forward_deferred_love_witnesses SET generation=0 WHERE operation_id='witness-000001'");
+      db.run("DELETE FROM forward_outbox WHERE id='effect-000001'");
+      for (let tick = 0; tick < 80; tick++) {
+        const start = 601 + tick * 120;
+        seedFairnessRows(db, start, 120);
+        db.run(
+          `UPDATE forward_deferred_love_maintenance
+           SET wit_frontier=next_group_seq-1,auth_frontier=next_authority_seq-1 WHERE singleton=1`,
+        );
+        const result = runDeferredLoveMaintenance(db, 12 + tick);
+        expect(result.writes).toBeLessThanOrEqual(LOVE_MAINTENANCE_WRITES);
+        expect(result.visits).toBeLessThanOrEqual(LOVE_MAINTENANCE_VISITS);
+        expect(result.witSteps).toBeLessThanOrEqual(LOVE_MAINTENANCE_WIT_STEPS);
+      }
+      expect(
+        db.one("SELECT 1 AS present FROM forward_deferred_love_witnesses WHERE operation_id='witness-000001'"),
+      ).not.toBeNull();
+      expect(
+        db.one(
+          "SELECT 1 AS present FROM forward_deferred_love_authorities WHERE authorization_uri=? AND authorization_rev='rev'",
+          `at://${DID}/com.example.atmusic.love/000001`,
+        ),
+      ).not.toBeNull();
+    });
+  }, 120_000);
 
   it('preserves a nearer retry, does nothing without a runtime, and swallows maintenance-log failure', async () => {
     await withMigratedDb(async (db) => {

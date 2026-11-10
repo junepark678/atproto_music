@@ -453,7 +453,7 @@ function runRr(db: Db, now: number): LaneResult {
     Pick<Head, 'link_id' | 'generation' | 'love_artist_key' | 'love_track_key'> & { head_seq: string }
   >(
     `SELECT link_id,generation,love_artist_key,love_track_key,CAST(head_seq AS TEXT) AS head_seq
-     FROM forward_deferred_love_heads WHERE head_seq>? AND head_seq<=? ORDER BY head_seq LIMIT 1`,
+     FROM forward_deferred_love_heads WHERE head_seq>? AND head_seq<=? ORDER BY forward_deferred_love_heads.head_seq LIMIT 1`,
     cursor,
     frontier,
   );
@@ -565,7 +565,7 @@ function runWit(db: Db, now: number): LaneResult {
   }
   const group = db.one<{ group_seq: string; link_id: string; generation: number }>(
     `SELECT CAST(group_seq AS TEXT) AS group_seq,link_id,generation FROM forward_deferred_love_witnesses INDEXED BY forward_deferred_love_witnesses_group
-     WHERE group_seq>? AND group_seq<=? ORDER BY group_seq,link_id,generation LIMIT 1`,
+     WHERE group_seq>? AND group_seq<=? ORDER BY forward_deferred_love_witnesses.group_seq,forward_deferred_love_witnesses.link_id,forward_deferred_love_witnesses.generation LIMIT 1`,
     cursor,
     frontier,
   );
@@ -601,7 +601,7 @@ function runAuth(db: Db, now: number): LaneResult {
   const next = asSafeInt(state.next_authority_seq, 'next authority sequence', 1);
   const rows = db.all<{ authorization_uri: string; authorization_rev: string; authority_seq: string; state: string }>(
     `SELECT authorization_uri,authorization_rev,CAST(authority_seq AS TEXT) AS authority_seq,state FROM forward_deferred_love_authorities
-     WHERE authority_seq>? AND authority_seq<=? ORDER BY authority_seq LIMIT 8`,
+     WHERE authority_seq>? AND authority_seq<=? ORDER BY forward_deferred_love_authorities.authority_seq LIMIT 8`,
     cursor,
     frontier,
   );
