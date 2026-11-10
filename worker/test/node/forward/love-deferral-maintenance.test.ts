@@ -5,6 +5,7 @@ import type { Db, SqlParam } from '../../../src/do/db';
 import { linkBackfillExtension } from '../../../src/forward/backfill';
 import type { ForwardRuntime } from '../../../src/forward/forwarder';
 import {
+  LOVE_MAINTENANCE_UNIT_COSTS,
   LOVE_MAINTENANCE_VISITS,
   LOVE_MAINTENANCE_WIT_STEPS,
   LOVE_MAINTENANCE_WRITES,
@@ -26,6 +27,49 @@ function link(db: Parameters<typeof runDeferredLoveMaintenance>[0], generation =
 }
 
 describe('deferred love maintenance', () => {
+  it('keeps the audited conservative per-unit mutation and scan-work reservations', () => {
+    expect(LOVE_MAINTENANCE_UNIT_COSTS).toEqual({ inv: 10, due: 19, rr: 21, wit: 16, auth: 8 });
+  });
+
+  it('uses the one-time singleton write, then stays completely quiet on an empty initialized store', async () => {
+    await withMigratedDb((db) => {
+      const initialized = runDeferredLoveMaintenance(db, 10);
+      expect([initialized.writes, initialized.visits, initialized.witSteps]).toEqual([1, 0, 0]);
+      const quiet = runDeferredLoveMaintenance(db, 11);
+      expect([quiet.writes, quiet.visits, quiet.witSteps, quiet.unitCosts]).toEqual([0, 0, 0, []]);
+      expect(db.one("SELECT count(*) AS n FROM counters WHERE label LIKE 'deferred_maintenance_%'")).toEqual({ n: 0 });
+    });
+  });
+
+  it('rolls back a deliberately over-cost due unit before its lane transaction commits', async () => {
+    await withMigratedDb((raw) => {
+      link(raw, 2);
+      raw.run('INSERT INTO forward_deferred_love_maintenance(singleton,next_head_seq) VALUES(1,2)');
+      raw.run(
+        `INSERT INTO forward_deferred_love_heads(link_id,generation,love_artist_key,love_track_key,head_seq,maintenance_seq,created_at_ms)
+         VALUES('maintenance-link',1,'old-artist','old-track',1,1,1)`,
+      );
+      const db: Db = {
+        all: raw.all.bind(raw),
+        one: raw.one.bind(raw),
+        run(sql, ...params) {
+          const result = raw.run(sql, ...params);
+          if (sql.startsWith('DELETE FROM forward_deferred_love_heads'))
+            for (let index = 0; index < 24; index++)
+              raw.run("UPDATE linked_accounts SET updated_at_ms=updated_at_ms+1 WHERE id='maintenance-link'");
+          return result;
+        },
+        tx: (fn) => raw.tx(fn),
+      };
+      expect(() => runDeferredLoveMaintenance(db, 10)).toThrow(/unit exceeded reserved cost 19/);
+      expect(db.one('SELECT count(*) AS n FROM forward_deferred_love_heads')).toEqual({ n: 1 });
+      expect(db.one("SELECT updated_at_ms FROM linked_accounts WHERE id='maintenance-link'")).toEqual({
+        updated_at_ms: 1,
+      });
+      expect(db.one("SELECT count(*) AS n FROM counters WHERE label='deferred_maintenance_due'")).toEqual({ n: 0 });
+    });
+  });
+
   it('keeps a completed run settled when interior validation leaves its newest decision unchanged', async () => {
     await withMigratedDb((db) => {
       link(db);
@@ -247,9 +291,7 @@ describe('deferred love maintenance', () => {
           return at;
         },
       } as ExtensionContext).then(() => {
-        expect(db.one('SELECT operation_id FROM forward_deferred_love_intents ORDER BY intent_seq LIMIT 1')).toEqual({
-          operation_id: 'maintenance-b',
-        });
+        expect(db.one('SELECT count(*) AS n FROM forward_deferred_love_intents')).toEqual({ n: 0 });
         expect(
           db.one("SELECT value FROM counters WHERE name='link_coverage' AND label='deferred_maintenance_inv'"),
         ).toEqual({
@@ -305,7 +347,7 @@ describe('deferred love maintenance', () => {
       runDeferredLoveMaintenance(db, 11);
       expect(db.one('SELECT rr_cursor,wit_cursor FROM forward_deferred_love_maintenance')).toEqual({
         rr_cursor: 1,
-        wit_cursor: 1,
+        wit_cursor: 3,
       });
       db.run("UPDATE operations SET state='cancelled' WHERE id='rr-cancel'");
       db.run("UPDATE linked_accounts SET generation=2 WHERE id='maintenance-link'");

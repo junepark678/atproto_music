@@ -4,6 +4,7 @@
 import { expect, it } from 'vitest';
 import type { Db, SqlParam } from '../../src/do/db';
 import {
+  INV_AUTHORITY_SEEK_SQL,
   LOVE_MAINTENANCE_VISITS,
   LOVE_MAINTENANCE_WIT_STEPS,
   LOVE_MAINTENANCE_WRITES,
@@ -147,8 +148,100 @@ it('keeps RR, WIT, AUTH plans and maintenance result work bounded at 1k and 100k
     expect(result.writes).toBeLessThanOrEqual(128);
     expect(result.visits).toBeLessThanOrEqual(16);
     expect(result.witSteps).toBeLessThanOrEqual(4);
-    expect(observed.counts().returnedRows).toBeLessThanOrEqual(20);
-    expect(observed.counts().statements).toBeLessThanOrEqual(80);
+    expect(result.unitCosts.every((unit) => unit.actual <= unit.reserved && unit.work <= unit.reserved)).toBe(true);
+    expect(observed.counts().returnedRows).toBeLessThanOrEqual(300);
+    expect(observed.counts().statements).toBeLessThanOrEqual(400);
+  });
+}, 120_000);
+
+it('uses the production full-tuple INV seek with bounded VM shape at 100, 1k, and 10k rows', async () => {
+  await withMigratedDb((db) => {
+    link(db);
+    const sizes = [100, 1_000, 10_000];
+    const vmLengths: number[] = [];
+    for (const size of sizes) {
+      const uri = `at://${DID}/com.example.atmusic.love/seek-${size}`;
+      db.run(
+        `INSERT INTO forward_deferred_love_heads(link_id,generation,love_artist_key,love_track_key,head_seq,created_at_ms)
+         VALUES('maintenance-link',1,?,?,?,1)`,
+        `seek-artist-${size}`,
+        `seek-track-${size}`,
+        size,
+      );
+      db.tx(() => {
+        for (let seq = 1; seq <= size; seq++)
+          db.run(
+            `INSERT INTO forward_deferred_love_intents(link_id,generation,love_artist_key,love_track_key,intent_seq,kind,
+               operation_id,origin_class,payload_json,authorization_uri,authorization_rev,intent_at_ms)
+             VALUES('maintenance-link',1,?,?,?,'unlove',?,'authorized','{}',?,'rev',1)`,
+            `seek-artist-${size}`,
+            `seek-track-${size}`,
+            seq,
+            `seek-op-${size}-${String(seq).padStart(5, '0')}`,
+            uri,
+          );
+      });
+      const cursor = `seek-op-${size}-${String(Math.floor(size / 2)).padStart(5, '0')}`;
+      const params = [uri, 'rev', 'maintenance-link', 1, cursor] as const;
+      const plan = db.all<{ detail: string }>(`EXPLAIN QUERY PLAN ${INV_AUTHORITY_SEEK_SQL}`, ...params);
+      expect(plan.map((row) => row.detail).join(' | ')).toMatch(/forward_deferred_love_intents_authorization/);
+      expect(plan.map((row) => row.detail).join(' | ')).toMatch(/\(link_id,generation,operation_id\)/);
+      const vm = db.all<{ opcode: string }>(`EXPLAIN ${INV_AUTHORITY_SEEK_SQL}`, ...params);
+      vmLengths.push(vm.length);
+      expect(vm.length).toBeLessThanOrEqual(55);
+      expect(vm.some((row) => row.opcode === 'SeekGT' || row.opcode === 'SeekGE')).toBe(true);
+      expect(
+        db.all<{ operation_id: string }>(INV_AUTHORITY_SEEK_SQL, ...params).map((row) => row.operation_id),
+      ).toEqual([`seek-op-${size}-${String(Math.floor(size / 2) + 1).padStart(5, '0')}`]);
+      expect(db.all(INV_AUTHORITY_SEEK_SQL, uri, 'rev', 'maintenance-link', 1, 'zzzz')).toEqual([]);
+    }
+    expect(new Set(vmLengths)).toEqual(new Set([51]));
+
+    // Negative control: the old expanded-OR seek cannot use the full tuple range.
+    const oldOr = `SELECT operation_id FROM forward_deferred_love_intents INDEXED BY forward_deferred_love_intents_authorization
+      WHERE authorization_uri=? AND authorization_rev=?
+       AND (link_id>? OR (link_id=? AND generation>?) OR (link_id=? AND generation=? AND operation_id>?))
+      ORDER BY link_id,generation,operation_id LIMIT 1`;
+    const uri = `at://${DID}/com.example.atmusic.love/seek-10000`;
+    const oldPlan = db.all<{ detail: string }>(
+      `EXPLAIN QUERY PLAN ${oldOr}`,
+      uri,
+      'rev',
+      'maintenance-link',
+      'maintenance-link',
+      1,
+      'maintenance-link',
+      1,
+      'seek-op-10000-05000',
+    );
+    const oldPlanText = oldPlan.map((row) => row.detail).join(' | ');
+    expect(oldPlanText).not.toMatch(/\(link_id,generation,operation_id\)/);
+    expect(oldPlanText).toMatch(/forward_deferred_love_intents_authorization/);
+    const oldVm = db.all<{ opcode: string }>(
+      `EXPLAIN ${oldOr}`,
+      uri,
+      'rev',
+      'maintenance-link',
+      'maintenance-link',
+      1,
+      'maintenance-link',
+      1,
+      'seek-op-10000-05000',
+    );
+    expect(oldVm.length).toBeGreaterThan(0);
+    expect(
+      db.all<{ operation_id: string }>(
+        oldOr,
+        uri,
+        'rev',
+        'maintenance-link',
+        'maintenance-link',
+        1,
+        'maintenance-link',
+        1,
+        'seek-op-10000-05000',
+      ),
+    ).toEqual([{ operation_id: 'seek-op-10000-05001' }]);
   });
 }, 120_000);
 
@@ -159,6 +252,29 @@ function link(db: Parameters<typeof runDeferredLoveMaintenance>[0], generation =
     DID,
     generation,
   );
+}
+
+function firstStepTrace(db: Db): { db: Db; trace: { rr: string[]; wit: string[]; auth: string[] } } {
+  const trace = { rr: [] as string[], wit: [] as string[], auth: [] as string[] };
+  const observed: Db = {
+    all<T>(sql: string, ...params: SqlParam[]): T[] {
+      const rows = db.all<T>(sql, ...params);
+      if (sql.includes('FROM forward_deferred_love_authorities') && sql.includes('LIMIT 8'))
+        trace.auth.push(...(rows as Array<{ authority_seq: string }>).map((row) => String(row.authority_seq)));
+      return rows;
+    },
+    one<T>(sql: string, ...params: SqlParam[]): T | null {
+      const row = db.one<T>(sql, ...params);
+      if (sql.includes('FROM forward_deferred_love_heads WHERE head_seq>?'))
+        trace.rr.push(String((row as { head_seq?: string } | null)?.head_seq ?? 'empty'));
+      if (sql.includes('forward_deferred_love_witnesses_group'))
+        trace.wit.push(String((row as { group_seq?: string } | null)?.group_seq ?? 'empty'));
+      return row;
+    },
+    run: db.run.bind(db),
+    tx: (fn) => db.tx(fn),
+  };
+  return { db: observed, trace };
 }
 
 function seedFairnessRows(db: Db, start: number, count: number): void {
@@ -214,8 +330,12 @@ it('reaches 600-item WIT and AUTH orphans behind frozen frontiers under continuo
       'INSERT INTO forward_deferred_love_maintenance(singleton,next_head_seq,next_group_seq,next_authority_seq) VALUES(1,601,601,601)',
     );
     seedFairnessRows(db, 1, 600);
-    runDeferredLoveMaintenance(db, 9);
-    const first = runDeferredLoveMaintenance(db, 10);
+    const traced = firstStepTrace(db);
+    runDeferredLoveMaintenance(traced.db, 9);
+    expect(traced.trace.rr.filter((seq) => seq !== 'empty')[0]).toBe('1');
+    expect(traced.trace.wit.filter((seq) => seq !== 'empty')[0]).toBe('1');
+    expect(traced.trace.auth.slice(0, 8)).toEqual(['1', '2', '3', '4', '5', '6', '7', '8']);
+    const first = runDeferredLoveMaintenance(traced.db, 10);
     expect(first.writes).toBeLessThanOrEqual(LOVE_MAINTENANCE_WRITES);
     expect(first.visits).toBeLessThanOrEqual(LOVE_MAINTENANCE_VISITS);
     expect(first.witSteps).toBeLessThanOrEqual(LOVE_MAINTENANCE_WIT_STEPS);
@@ -230,11 +350,11 @@ it('reaches 600-item WIT and AUTH orphans behind frozen frontiers under continuo
       'SELECT rr_cursor,rr_frontier,wit_cursor,wit_frontier,auth_cursor,auth_frontier FROM forward_deferred_love_maintenance',
     );
     expect(firstCursor).toEqual({
-      rr_cursor: 1,
+      rr_cursor: 9,
       rr_frontier: 600,
-      wit_cursor: 1,
+      wit_cursor: 7,
       wit_frontier: 600,
-      auth_cursor: 8,
+      auth_cursor: 192,
       auth_frontier: 600,
     });
 
@@ -277,8 +397,8 @@ it('reaches 600-item WIT and AUTH orphans behind frozen frontiers under continuo
     runDeferredLoveMaintenance(db, 10);
     runDeferredLoveMaintenance(db, 11);
     expect(db.one('SELECT wit_cursor,auth_cursor FROM forward_deferred_love_maintenance')).toEqual({
-      wit_cursor: 1,
-      auth_cursor: 8,
+      wit_cursor: 7,
+      auth_cursor: 192,
     });
     db.run("UPDATE forward_deferred_love_witnesses SET generation=0 WHERE operation_id='witness-000001'");
     db.run("DELETE FROM forward_outbox WHERE id='effect-000001'");

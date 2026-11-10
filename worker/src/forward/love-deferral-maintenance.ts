@@ -14,12 +14,14 @@ export const LOVE_MAINTENANCE_WIT_STEPS = 4;
 export const LOVE_MAINTENANCE_ACTIVE_MS = 1_000;
 export const LOVE_MAINTENANCE_QUIET_MS = 30_000;
 
-type Lane = 'inv' | 'due' | 'rr' | 'wit' | 'auth';
+export type LoveMaintenanceLane = 'inv' | 'due' | 'rr' | 'wit' | 'auth';
+type Lane = LoveMaintenanceLane;
 interface LaneResult {
   useful: boolean;
   visited: number;
   writes?: number;
   steps?: number;
+  work?: number;
 }
 interface Singleton {
   lane_turn: number;
@@ -59,6 +61,14 @@ interface Intent {
   authorization_uri: string | null;
   authorization_rev: string | null;
 }
+
+export const INV_AUTHORITY_SEEK_SQL = `SELECT link_id,generation,love_artist_key,love_track_key,intent_seq,operation_id,
+       origin_class,authorization_uri,authorization_rev
+     FROM forward_deferred_love_intents INDEXED BY forward_deferred_love_intents_authorization
+     WHERE authorization_uri=? AND authorization_rev=? AND (link_id,generation,operation_id)>(?,?,?)
+     ORDER BY link_id,generation,operation_id LIMIT 1`;
+export const INV_AUTHORITY_MORE_SQL = `SELECT 1 FROM forward_deferred_love_intents INDEXED BY forward_deferred_love_intents_authorization
+       WHERE authorization_uri=? AND authorization_rev=? AND (link_id,generation,operation_id)>(?,?,?) LIMIT 1`;
 
 function asSafeInt(value: string | number, label: string, min = 0): number {
   let parsed: bigint;
@@ -240,16 +250,9 @@ function runInv(db: Db): LaneResult {
   const rows = db.all<
     Intent & { link_id: string; generation: number; love_artist_key: string; love_track_key: string }
   >(
-    `SELECT link_id,generation,love_artist_key,love_track_key,intent_seq,operation_id,origin_class,authorization_uri,authorization_rev
-     FROM forward_deferred_love_intents INDEXED BY forward_deferred_love_intents_authorization
-     WHERE authorization_uri=? AND authorization_rev=?
-       AND (link_id>? OR (link_id=? AND generation>?) OR (link_id=? AND generation=? AND operation_id>?))
-     ORDER BY link_id,generation,operation_id LIMIT 1`,
+    INV_AUTHORITY_SEEK_SQL,
     authority.authorization_uri,
     authority.authorization_rev,
-    authority.cursor_link_id,
-    authority.cursor_link_id,
-    authority.cursor_generation,
     authority.cursor_link_id,
     authority.cursor_generation,
     authority.cursor_operation_id,
@@ -291,14 +294,9 @@ function runInv(db: Db): LaneResult {
   const more =
     last !== undefined &&
     db.one(
-      `SELECT 1 FROM forward_deferred_love_intents INDEXED BY forward_deferred_love_intents_authorization
-       WHERE authorization_uri=? AND authorization_rev=?
-         AND (link_id>? OR (link_id=? AND generation>?) OR (link_id=? AND generation=? AND operation_id>?)) LIMIT 1`,
+      INV_AUTHORITY_MORE_SQL,
       authority.authorization_uri,
       authority.authorization_rev,
-      last.link_id,
-      last.link_id,
-      last.generation,
       last.link_id,
       last.generation,
       last.operation_id,
@@ -436,8 +434,7 @@ function runDue(db: Db): LaneResult {
 
 const TOP_LIMIT = 17;
 
-function runRr(db: Db, now: number): LaneResult {
-  const state = readSingleton(db);
+function runRr(db: Db, state = readSingleton(db)): LaneResult {
   const cursor = asSafeInt(state.rr_cursor, 'RR cursor');
   const frontier = asSafeInt(state.rr_frontier, 'RR frontier');
   const next = asSafeInt(state.next_head_seq, 'next head sequence', 1);
@@ -451,12 +448,9 @@ function runRr(db: Db, now: number): LaneResult {
   );
   if (row === null) {
     if (cursor === 0 && frontier === next - 1) return { useful: false, visited: 0 };
-    db.run(
-      'UPDATE forward_deferred_love_maintenance SET rr_cursor=0,rr_frontier=?,rr_passes=?,updated_at_ms=? WHERE singleton=1',
-      next - 1,
-      safeSuccessor(state.rr_passes, 'RR passes'),
-      now,
-    );
+    state.rr_cursor = '0';
+    state.rr_frontier = String(next - 1);
+    state.rr_passes = String(safeSuccessor(state.rr_passes, 'RR passes'));
     return { useful: false, visited: 0 };
   }
   const head = readHead(db, row.link_id, row.generation, row.love_artist_key, row.love_track_key);
@@ -523,16 +517,11 @@ function runRr(db: Db, now: number): LaneResult {
     if (floor > head.live_from_seq) useful = true;
     void first;
   }
-  db.run(
-    'UPDATE forward_deferred_love_maintenance SET rr_cursor=?,updated_at_ms=? WHERE singleton=1',
-    asSafeInt(row.head_seq, 'RR head sequence', 1),
-    now,
-  );
+  state.rr_cursor = String(asSafeInt(row.head_seq, 'RR head sequence', 1));
   return { useful, visited: 1 };
 }
 
-function runWit(db: Db, now: number): LaneResult {
-  const state = readSingleton(db);
+function runWit(db: Db, state = readSingleton(db)): LaneResult {
   const cursor = asSafeInt(state.wit_cursor, 'WIT cursor');
   const frontier = asSafeInt(state.wit_frontier, 'WIT frontier');
   const next = asSafeInt(state.next_group_seq, 'next group sequence', 1);
@@ -546,15 +535,10 @@ function runWit(db: Db, now: number): LaneResult {
       LOVE_MAINTENANCE_K,
     ).rowsWritten;
     const finished = removed < LOVE_MAINTENANCE_K;
-    db.run(
-      `UPDATE forward_deferred_love_maintenance SET wit_state=?,wit_cursor=?,wit_link_id=?,wit_generation=?,updated_at_ms=? WHERE singleton=1`,
-      finished ? 'scan' : 'pruning',
-      finished ? cursor : cursor,
-      finished ? '' : state.wit_link_id,
-      finished ? 0 : state.wit_generation,
-      now,
-    );
-    return { useful: removed > 0, visited: 0, steps: 1 };
+    state.wit_state = finished ? 'scan' : 'pruning';
+    state.wit_link_id = finished ? '' : state.wit_link_id;
+    state.wit_generation = finished ? 0 : state.wit_generation;
+    return { useful: removed > 0, visited: 0, steps: 1, work: removed };
   }
   const group = db.one<{ group_seq: string; link_id: string; generation: number }>(
     `SELECT CAST(group_seq AS TEXT) AS group_seq,link_id,generation FROM forward_deferred_love_witnesses INDEXED BY forward_deferred_love_witnesses_group
@@ -564,32 +548,25 @@ function runWit(db: Db, now: number): LaneResult {
   );
   if (group === null) {
     if (cursor === 0 && frontier === next - 1) return { useful: false, visited: 0 };
-    db.run(
-      `UPDATE forward_deferred_love_maintenance SET wit_cursor=0,wit_frontier=?,wit_passes=?,updated_at_ms=? WHERE singleton=1`,
-      next - 1,
-      safeSuccessor(state.wit_passes, 'WIT passes'),
-      now,
-    );
-    return { useful: false, visited: 0, steps: 1 };
+    state.wit_cursor = '0';
+    state.wit_frontier = String(next - 1);
+    state.wit_passes = String(safeSuccessor(state.wit_passes, 'WIT passes'));
+    return { useful: false, visited: 0, steps: 1, work: 1 };
   }
   const groupSeq = asSafeInt(group.group_seq, 'WIT group sequence', 1);
   const current = currentGeneration(db, group.link_id);
   if (current === null || group.generation < current) {
-    db.run(
-      `UPDATE forward_deferred_love_maintenance SET wit_state='pruning',wit_cursor=?,wit_link_id=?,wit_generation=?,updated_at_ms=? WHERE singleton=1`,
-      groupSeq,
-      group.link_id,
-      group.generation,
-      now,
-    );
-    return { useful: false, visited: 0, steps: 1 };
+    state.wit_state = 'pruning';
+    state.wit_cursor = String(groupSeq);
+    state.wit_link_id = group.link_id;
+    state.wit_generation = group.generation;
+    return { useful: false, visited: 0, steps: 1, work: 1 };
   }
-  db.run('UPDATE forward_deferred_love_maintenance SET wit_cursor=?,updated_at_ms=? WHERE singleton=1', groupSeq, now);
-  return { useful: false, visited: 0, steps: 1 };
+  state.wit_cursor = String(groupSeq);
+  return { useful: false, visited: 0, steps: 1, work: 1 };
 }
 
-function runAuth(db: Db, now: number): LaneResult {
-  const state = readSingleton(db);
+function runAuth(db: Db, state = readSingleton(db)): LaneResult {
   const cursor = asSafeInt(state.auth_cursor, 'AUTH cursor');
   const frontier = asSafeInt(state.auth_frontier, 'AUTH frontier');
   const next = asSafeInt(state.next_authority_seq, 'next authority sequence', 1);
@@ -601,12 +578,9 @@ function runAuth(db: Db, now: number): LaneResult {
   );
   if (rows.length === 0) {
     if (cursor === 0 && frontier === next - 1) return { useful: false, visited: 0 };
-    db.run(
-      `UPDATE forward_deferred_love_maintenance SET auth_cursor=0,auth_frontier=?,auth_passes=?,updated_at_ms=? WHERE singleton=1`,
-      next - 1,
-      safeSuccessor(state.auth_passes, 'AUTH passes'),
-      now,
-    );
+    state.auth_cursor = '0';
+    state.auth_frontier = String(next - 1);
+    state.auth_passes = String(safeSuccessor(state.auth_passes, 'AUTH passes'));
     return { useful: false, visited: 0 };
   }
   let useful = false;
@@ -619,37 +593,149 @@ function runAuth(db: Db, now: number): LaneResult {
     );
     useful = true;
   }
-  db.run(
-    'UPDATE forward_deferred_love_maintenance SET auth_cursor=?,updated_at_ms=? WHERE singleton=1',
-    asSafeInt(rows.at(-1)!.authority_seq, 'AUTH sequence', 1),
-    now,
-  );
-  return { useful, visited: 0 };
+  state.auth_cursor = String(asSafeInt(rows.at(-1)!.authority_seq, 'AUTH sequence', 1));
+  return { useful, visited: 0, work: rows.length };
 }
 
-function runLane(db: Db, lane: Lane, now: number): LaneResult {
-  const before = db.one<{ changes: number | bigint }>('SELECT total_changes() AS changes')?.changes;
-  if (before === undefined) throw new Error('SQLite change counter unavailable');
-  const result = db.tx(() => {
-    const laneResult =
-      lane === 'inv'
-        ? runInv(db)
-        : lane === 'due'
-          ? runDue(db)
-          : lane === 'rr'
-            ? runRr(db, now)
-            : lane === 'wit'
-              ? runWit(db, now)
-              : runAuth(db, now);
-    countLinkCoverage(db, `deferred_maintenance_${lane}`);
-    return laneResult;
+export const LOVE_MAINTENANCE_UNIT_COSTS: Readonly<Record<LoveMaintenanceLane, number>> = {
+  inv: 10,
+  due: 19,
+  rr: 21,
+  wit: 16,
+  auth: 8,
+};
+const UNIT_COST: Record<Lane, number> = { ...LOVE_MAINTENANCE_UNIT_COSTS };
+const LANE_UNITS: Record<Lane, number> = { inv: 16, due: 5, rr: 5, wit: 4, auth: 13 };
+const LANES: readonly Lane[] = ['inv', 'due', 'rr', 'wit', 'auth'];
+const CURSOR_COLUMNS = [
+  'rr_cursor',
+  'rr_frontier',
+  'rr_passes',
+  'wit_cursor',
+  'wit_frontier',
+  'wit_state',
+  'wit_link_id',
+  'wit_generation',
+  'wit_passes',
+  'auth_cursor',
+  'auth_frontier',
+  'auth_passes',
+] as const;
+
+function cursorSignature(state: Singleton): string {
+  return CURSOR_COLUMNS.map((column) => state[column]).join('\0');
+}
+
+function totalChanges(db: Db): bigint {
+  const value = db.one<{ changes: number | bigint }>('SELECT total_changes() AS changes')?.changes;
+  if (value === undefined) throw new Error('SQLite change counter unavailable');
+  return BigInt(value);
+}
+
+function laneStep(db: Db, lane: Lane, state: Singleton): LaneResult {
+  return lane === 'inv'
+    ? runInv(db)
+    : lane === 'due'
+      ? runDue(db)
+      : lane === 'rr'
+        ? runRr(db, state)
+        : lane === 'wit'
+          ? runWit(db, state)
+          : runAuth(db, state);
+}
+
+interface SchedulerBudget {
+  unitWrites: number;
+  visits: number;
+  witSteps: number;
+  laneUnits: Record<Lane, number>;
+  metadataWrites: number;
+}
+
+function executeLanePhase(
+  db: Db,
+  lane: Lane,
+  now: number,
+  allowance: number,
+  budget: SchedulerBudget,
+  perVisitWrites: number[],
+  unitCosts: { lane: Lane; reserved: number; work: number; actual: number }[],
+  stoppedLanes: Set<Lane>,
+): { useful: boolean; actualWrites: number } {
+  let useful = false;
+  let phaseCost = 0;
+  const metadataBefore = budget.metadataWrites;
+  const beforePhase = totalChanges(db);
+  db.tx(() => {
+    const cursor = readSingleton(db);
+    while (
+      budget.laneUnits[lane] < LANE_UNITS[lane] &&
+      budget.unitWrites + UNIT_COST[lane] <= LOVE_MAINTENANCE_UNIT_BUDGET &&
+      phaseCost + UNIT_COST[lane] <= allowance &&
+      (lane === 'wit'
+        ? budget.witSteps < LOVE_MAINTENANCE_WIT_STEPS
+        : lane === 'auth'
+          ? true
+          : budget.visits < LOVE_MAINTENANCE_VISITS)
+    ) {
+      const reservation = UNIT_COST[lane];
+      // Reserve the conservative unit charge before running SQL that can mutate.
+      phaseCost += reservation;
+      budget.unitWrites += reservation;
+      const beforeCursor = cursorSignature(cursor);
+      const beforeUnit = totalChanges(db);
+      const result = laneStep(db, lane, cursor);
+      const delta = totalChanges(db) - beforeUnit;
+      if (delta < 0n || delta > BigInt(reservation))
+        throw new Error(`deferred love ${lane} unit exceeded reserved cost ${reservation}: ${delta}`);
+      const actual = Number(delta);
+      const work = Math.max(actual, result.work ?? 0);
+      if (work > reservation)
+        throw new Error(`deferred love ${lane} unit exceeded reserved work ${reservation}: ${work}`);
+      const cursorProgress = cursorSignature(cursor) !== beforeCursor;
+      phaseCost -= reservation - work;
+      budget.unitWrites -= reservation - work;
+      if (result.visited === 0 && (result.steps ?? 0) === 0 && actual === 0 && !cursorProgress) {
+        stoppedLanes.add(lane);
+        break;
+      }
+      unitCosts.push({ lane, reserved: reservation, work, actual });
+      budget.laneUnits[lane]++;
+      budget.visits += result.visited;
+      budget.witSteps += result.steps ?? 0;
+      if (result.visited > 0) perVisitWrites.push(actual);
+      useful ||= result.useful;
+      if (budget.visits > LOVE_MAINTENANCE_VISITS || budget.witSteps > LOVE_MAINTENANCE_WIT_STEPS)
+        throw new Error(
+          `deferred love maintenance visit budget exceeded (${budget.visits}/${budget.witSteps}, ${lane}, ${result.visited}/${result.steps ?? 0})`,
+        );
+    }
+    if (cursorSignature(cursor) !== cursorSignature(readSingleton(db))) {
+      const assignments = CURSOR_COLUMNS.map((column) => `${column}=?`).join(',');
+      const params = CURSOR_COLUMNS.map((column) => cursor[column]);
+      const changed = db.run(
+        `UPDATE forward_deferred_love_maintenance SET ${assignments},updated_at_ms=? WHERE singleton=1`,
+        ...params,
+        now,
+      ).rowsWritten;
+      budget.metadataWrites += changed;
+    }
+    // One lane counter per lane transaction. No-op phases do not create rows.
+    if (useful) {
+      countLinkCoverage(db, `deferred_maintenance_${lane}`);
+      budget.metadataWrites++;
+    }
+    if (budget.metadataWrites > LOVE_MAINTENANCE_METADATA_RESERVE)
+      throw new Error('deferred love metadata reserve exceeded');
+    const totalDelta = totalChanges(db) - beforePhase;
+    const metadataAdded = budget.metadataWrites - metadataBefore;
+    if (totalDelta < 0n || totalDelta > BigInt(allowance + metadataAdded))
+      throw new Error(`deferred love ${lane} phase exceeded allowance ${allowance}: ${totalDelta}`);
   });
-  const after = db.one<{ changes: number | bigint }>('SELECT total_changes() AS changes')?.changes;
-  if (after === undefined) throw new Error('SQLite change counter unavailable');
-  const writeDelta = BigInt(after) - BigInt(before);
-  if (writeDelta < 0n || writeDelta > BigInt(Number.MAX_SAFE_INTEGER))
+  const actualWrites = Number(totalChanges(db) - beforePhase);
+  if (actualWrites < 0 || !Number.isSafeInteger(actualWrites))
     throw new RangeError('deferred love lane write count is unsafe');
-  return { ...result, writes: Number(writeDelta) };
+  return { useful, actualWrites };
 }
 
 export interface LoveMaintenanceResult {
@@ -657,63 +743,74 @@ export interface LoveMaintenanceResult {
   wakeMs: number;
   writes: number;
   perVisitWrites: number[];
+  unitCosts: { lane: LoveMaintenanceLane; reserved: number; work: number; actual: number }[];
   visits: number;
   witSteps: number;
 }
 
-/** Runs five independently committed lanes with bounded per-lane work. */
+/** Runs a rotated guaranteed phase, then shares its unused allowance in a second rotated phase. */
 export function runDeferredLoveMaintenance(db: Db, now: number): LoveMaintenanceResult {
   if (!Number.isSafeInteger(now) || now < 0) throw new RangeError('maintenance time must be safe epoch milliseconds');
-  const beforeChanges = db.one<{ changes: number | bigint }>('SELECT total_changes() AS changes')?.changes;
-  if (beforeChanges === undefined) throw new Error('SQLite change counter unavailable');
-  const inserted = db.run('INSERT OR IGNORE INTO forward_deferred_love_maintenance(singleton) VALUES(1)').rowsWritten;
+  const beforeChanges = totalChanges(db);
+  const inserted = db.tx(
+    () => db.run('INSERT OR IGNORE INTO forward_deferred_love_maintenance(singleton) VALUES(1)').rowsWritten,
+  );
   if (inserted > 0)
     return {
       useful: false,
       wakeMs: LOVE_MAINTENANCE_QUIET_MS,
-      writes: Number(
-        BigInt(db.one<{ changes: number | bigint }>('SELECT total_changes() AS changes')!.changes) -
-          BigInt(beforeChanges),
-      ),
+      writes: Number(totalChanges(db) - beforeChanges),
       perVisitWrites: [],
+      unitCosts: [],
       visits: 0,
       witSteps: 0,
     };
   const before = readSingleton(db);
-  const lanes: Lane[] = ['inv', 'due', 'rr', 'wit', 'auth'];
+  const budget: SchedulerBudget = {
+    unitWrites: 0,
+    visits: 0,
+    witSteps: 0,
+    laneUnits: { inv: 0, due: 0, rr: 0, wit: 0, auth: 0 },
+    metadataWrites: 0,
+  };
   let useful = false;
-  let visits = 0;
-  let witSteps = 0;
   const perVisitWrites: number[] = [];
-  for (let index = 0; index < lanes.length; index++) {
-    const lane = lanes[(before.lane_turn + index) % lanes.length]!;
-    const result = runLane(db, lane, now);
-    useful ||= result.useful;
-    visits += result.visited;
-    if (result.visited > 0) perVisitWrites.push(Math.ceil((result.writes ?? 0) / result.visited));
-    if (lane === 'wit') witSteps += result.steps ?? 0;
+  const unitCosts: { lane: Lane; reserved: number; work: number; actual: number }[] = [];
+  const stoppedLanes = new Set<Lane>();
+  for (const allowance of [LOVE_MAINTENANCE_LANE_ALLOWANCE, LOVE_MAINTENANCE_UNIT_BUDGET]) {
+    for (let index = 0; index < LANES.length; index++) {
+      const lane = LANES[(before.lane_turn + index) % LANES.length]!;
+      if (stoppedLanes.has(lane)) continue;
+      const phaseAllowance =
+        allowance === LOVE_MAINTENANCE_LANE_ALLOWANCE
+          ? LOVE_MAINTENANCE_LANE_ALLOWANCE
+          : LOVE_MAINTENANCE_UNIT_BUDGET - budget.unitWrites;
+      if (phaseAllowance <= 0) break;
+      const result = executeLanePhase(db, lane, now, phaseAllowance, budget, perVisitWrites, unitCosts, stoppedLanes);
+      useful ||= result.useful;
+    }
   }
-  if (visits > LOVE_MAINTENANCE_VISITS || witSteps > LOVE_MAINTENANCE_WIT_STEPS)
-    throw new Error('deferred love maintenance unit budget exceeded');
   if (useful)
-    db.run(
-      'UPDATE forward_deferred_love_maintenance SET lane_turn=?,updated_at_ms=? WHERE singleton=1',
-      (before.lane_turn + 1) % lanes.length,
-      now,
-    );
-  const afterChanges = db.one<{ changes: number | bigint }>('SELECT total_changes() AS changes')?.changes;
-  if (afterChanges === undefined) throw new Error('SQLite change counter unavailable');
-  const writeDelta = BigInt(afterChanges) - BigInt(beforeChanges);
+    db.tx(() => {
+      const writes = db.run(
+        'UPDATE forward_deferred_love_maintenance SET lane_turn=?,updated_at_ms=? WHERE singleton=1',
+        (before.lane_turn + 1) % LANES.length,
+        now,
+      ).rowsWritten;
+      budget.metadataWrites += writes;
+      if (budget.metadataWrites > 18) throw new Error('deferred love metadata reserve exceeded');
+    });
+  const writeDelta = totalChanges(db) - beforeChanges;
   if (writeDelta < 0n || writeDelta > BigInt(Number.MAX_SAFE_INTEGER))
     throw new RangeError('deferred love write count is unsafe');
   const writes = Number(writeDelta);
-  if (writes > LOVE_MAINTENANCE_WRITES) throw new Error(`deferred love maintenance write budget exceeded: ${writes}`);
   return {
     useful,
     wakeMs: useful ? LOVE_MAINTENANCE_ACTIVE_MS : LOVE_MAINTENANCE_QUIET_MS,
     writes,
     perVisitWrites,
-    visits,
-    witSteps,
+    unitCosts,
+    visits: budget.visits,
+    witSteps: budget.witSteps,
   };
 }
