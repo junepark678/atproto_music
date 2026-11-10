@@ -1,11 +1,8 @@
 import { seededRandom } from '@atmusic/core/test-support/random';
 import { describe, expect, it } from 'vitest';
 import type { Db, SqlParam } from '../../../src/do/db';
-import {
-  ADMISSION_HIGH_WATER_SQL,
-  GAP_ADMISSION_OWNER_SQL,
-  NEWEST_OPEN_LINK_GAP_SQL,
-} from '../../../src/forward/coverage';
+import { ADMISSION_HIGH_WATER_SQL, GAP_ADMISSION_OWNER_SQL, NEWEST_LINK_GAP_SQL } from '../../../src/forward/coverage';
+import { expireRows, holdLinkRows, resumeHeldRows, settleRows } from '../../../src/forward/forward-outbox';
 import { enqueueForwards } from '../../../src/outbox/forward-enqueue';
 import { deleteQueuedForwardIdentity } from '../../../src/outbox/forward-key';
 import {
@@ -112,6 +109,71 @@ describe('forward enqueue coverage receipts', () => {
     });
   });
 
+  it('keeps receipt parity through production settlement, hold, resume, expiry, and generation fencing', async () => {
+    await withLink((db) => {
+      const add = (key: string, now: number) => {
+        expect(
+          enqueueForwards(db, { did: DID, items: [{ ...ITEM, listenKey: key }], now, random: seededRandom(now) }),
+        ).toBe(1);
+        return db.one<{ id: string }>('SELECT id FROM forward_outbox WHERE link_id=? AND dedupe_key=?', LINK.id, key)!
+          .id;
+      };
+
+      const sent = add('machine-sent', 100);
+      settleRows(db, [sent], 'sent', 101, null, true, LINK.generation);
+      expect(forwardCoverage(db, LINK, 'scrobble', 'machine-sent')).toBe('row');
+
+      const ignored = add('machine-ignored', 102);
+      settleRows(db, [ignored], 'ignored', 103, 'ignored', true, LINK.generation);
+      expect(forwardCoverage(db, LINK, 'scrobble', 'machine-ignored')).toBe('row');
+
+      const failed = add('machine-failed', 104);
+      settleRows(db, [failed], 'failed', 105, 'retry_exhausted', true, LINK.generation);
+      expect(forwardCoverage(db, LINK, 'scrobble', 'machine-failed')).toBe('row');
+
+      const held = add('machine-held', 106);
+      expect(holdLinkRows(db, LINK.id, 107, LINK.generation)).toBe(1);
+      expect(db.one('SELECT state FROM forward_outbox WHERE id=?', held)).toEqual({ state: 'held' });
+      expect(forwardCoverage(db, LINK, 'scrobble', 'machine-held')).toBe('row');
+      expect(resumeHeldRows(db, LINK.id, 108, LINK.generation)).toBe(1);
+      expect(db.one('SELECT state FROM forward_outbox WHERE id=?', held)).toEqual({ state: 'queued' });
+
+      const expired = add('machine-expired', 109);
+      db.run(
+        'UPDATE forward_outbox SET created_at_ms=?,due_at=? WHERE link_id=?',
+        2 * 24 * 60 * 60 * 1000,
+        2 * 24 * 60 * 60 * 1000,
+        LINK.id,
+      );
+      db.run('UPDATE forward_outbox SET created_at_ms=0,due_at=0 WHERE id=?', expired);
+      expect(expireRows(db, 14 * 24 * 60 * 60 * 1000).aged).toBe(1);
+      expect(forwardCoverage(db, LINK, 'scrobble', 'machine-expired')).toBe('row');
+
+      db.run(
+        "INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,generation,created_at_ms,updated_at_ms) VALUES('next-gen',?,'listenbrainz','remote-2',X'00','key',2,1,1)",
+        DID,
+      );
+      expect(
+        enqueueForwards(db, {
+          did: DID,
+          items: [{ ...ITEM, listenKey: 'same-logical-key' }],
+          now: 110,
+          random: seededRandom(110),
+        }),
+      ).toBe(2);
+      expect(
+        db.all(
+          'SELECT link_id,generation FROM forward_receipts WHERE dedupe_key=? ORDER BY link_id',
+          'same-logical-key',
+        ),
+      ).toEqual([
+        { link_id: LINK.id, generation: 1 },
+        { link_id: 'next-gen', generation: 2 },
+      ]);
+      expect(forwardCoverage(db, { id: 'next-gen', generation: 2 }, 'scrobble', 'same-logical-key')).toBe('row');
+    });
+  });
+
   it('cascades receipts and gaps when a link is removed', async () => {
     await withLink((db) => {
       db.run(
@@ -180,47 +242,60 @@ describe('forward enqueue coverage receipts', () => {
           sql: releaseUnsentReceiptsSql(2),
           args: [LINK.id, LINK.generation, 'scrobble', 'love', 'missing', 'missing'],
         },
-        { sql: GAP_ADMISSION_OWNER_SQL, args: [LINK.id, LINK.generation, 10, 10] },
-        { sql: NEWEST_OPEN_LINK_GAP_SQL, args: [LINK.id, LINK.generation] },
+        { sql: GAP_ADMISSION_OWNER_SQL, args: [LINK.id, LINK.generation, 10] },
+        { sql: NEWEST_LINK_GAP_SQL, args: [LINK.id, LINK.generation] },
         { sql: ADMISSION_HIGH_WATER_SQL, args: [] },
       ];
       for (const { sql, args } of statements) {
         const plan = db
           .all<{ detail: string }>(`EXPLAIN QUERY PLAN ${sql}`, ...(args as SqlParam[]))
           .map((row) => row.detail);
-        expect(plan.join(' '), sql).not.toMatch(/\bSCAN\b|TEMP B-TREE/i);
+        expect(plan.join(' '), sql).not.toMatch(/\bSCAN (?!CONSTANT ROW)|TEMP B-TREE/i);
       }
       const negative = db.all<{ detail: string }>(
         "EXPLAIN QUERY PLAN SELECT dedupe_key FROM forward_receipts NOT INDEXED WHERE dedupe_key LIKE '%missing%'",
       );
       expect(negative.map((row) => row.detail).join(' ')).toMatch(/SCAN forward_receipts/i);
 
-      const countReceiptStatements = (key: string, randomSeed: number) => {
-        let count = 0;
+      const countReceiptStatements = (key: string, randomSeed: number, linkId = LINK.id) => {
+        let receiptStatements = 0;
+        let outboxCoverageLookups = 0;
+        let receiptMutationRows = 0;
+        let outboxMutationRows = 0;
+        const countSql = (sql: string) => {
+          if (sql.includes('forward_receipts') || sql.includes('link_coverage') || sql === FORWARD_OUTBOX_COVERAGE_SQL)
+            receiptStatements++;
+          if (sql === FORWARD_OUTBOX_COVERAGE_SQL) outboxCoverageLookups++;
+        };
         const traced: Db = {
           all<T>(sql: string, ...params: SqlParam[]): T[] {
-            if (sql.includes('forward_receipts')) count++;
+            countSql(sql);
             return db.all<T>(sql, ...params);
           },
           one<T>(sql: string, ...params: SqlParam[]): T | null {
-            if (sql.includes('forward_receipts')) count++;
+            countSql(sql);
             return db.one<T>(sql, ...params);
           },
           run(sql: string, ...params: SqlParam[]) {
-            if (sql.includes('forward_receipts')) count++;
-            return db.run(sql, ...params);
+            countSql(sql);
+            const result = db.run(sql, ...params);
+            if (sql.includes('forward_receipts') || sql.includes('link_coverage'))
+              receiptMutationRows += result.rowsWritten;
+            if (sql.startsWith('INSERT INTO forward_outbox')) outboxMutationRows += result.rowsWritten;
+            return result;
           },
           tx<T>(fn: () => T extends Promise<unknown> ? never : T): T {
             return db.tx(fn);
           },
         };
-        enqueueForwards(traced, {
+        const created = enqueueForwards(traced, {
           did: DID,
           items: [{ ...ITEM, listenKey: key }],
           now: 900,
           random: seededRandom(randomSeed),
+          linkId,
         });
-        return count;
+        return { receiptStatements, outboxCoverageLookups, receiptMutationRows, outboxMutationRows, created };
       };
       const smallCount = countReceiptStatements('small-prior-count', 900);
       for (let i = 0; i < 20; i++)
@@ -231,8 +306,59 @@ describe('forward enqueue coverage receipts', () => {
           i,
         );
       const grownCount = countReceiptStatements('grown-prior-count', 901);
-      expect(smallCount).toBe(2);
-      expect(grownCount).toBe(smallCount);
+      expect(smallCount).toEqual({
+        receiptStatements: 3,
+        outboxCoverageLookups: 1,
+        receiptMutationRows: 1,
+        outboxMutationRows: 1,
+        created: 1,
+      });
+      expect(grownCount).toEqual(smallCount);
+      expect(countReceiptStatements('small-prior-count', 904)).toEqual({
+        receiptStatements: 3,
+        outboxCoverageLookups: 1,
+        receiptMutationRows: 0,
+        outboxMutationRows: 0,
+        created: 0,
+      });
+
+      db.run(
+        "INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,generation,created_at_ms,updated_at_ms) VALUES('next-gen',?,'listenbrainz','remote-2',X'00','key',2,1,1)",
+        DID,
+      );
+      expect(countReceiptStatements('new-generation-key', 905, 'next-gen')).toEqual({
+        receiptStatements: 3,
+        outboxCoverageLookups: 1,
+        receiptMutationRows: 1,
+        outboxMutationRows: 1,
+        created: 1,
+      });
+
+      db.run(
+        "INSERT INTO forward_receipts(link_id,generation,kind,dedupe_key,created_at_ms) VALUES(?,1,'scrobble','stale-count',1)",
+        LINK.id,
+      );
+      const stale = countReceiptStatements('stale-count', 902);
+      expect(stale).toEqual({
+        receiptStatements: 5,
+        outboxCoverageLookups: 1,
+        receiptMutationRows: 3,
+        outboxMutationRows: 1,
+        created: 1,
+      });
+
+      db.run(
+        "INSERT INTO forward_receipts(link_id,generation,kind,dedupe_key,created_at_ms,retired_at_ms) VALUES(?,1,'scrobble','retired-count',1,2)",
+        LINK.id,
+      );
+      const retired = countReceiptStatements('retired-count', 903);
+      expect(retired).toEqual({
+        receiptStatements: 2,
+        outboxCoverageLookups: 1,
+        receiptMutationRows: 0,
+        outboxMutationRows: 0,
+        created: 0,
+      });
     });
   });
 });

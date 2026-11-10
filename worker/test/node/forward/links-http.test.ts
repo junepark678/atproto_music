@@ -382,6 +382,54 @@ describe('link routes', () => {
     });
   });
 
+  it('reconstructs an old-code disable interval after an earlier closed interval', async () => {
+    const w = await world();
+    const link = saveLink(
+      { db: w.app.db, clock: w.clock, random: seededRandom(730), box: w.box },
+      { did: ALICE, service: 'listenbrainz', remoteUser: 'rollback-gap', credential: 'lb-token' },
+    ).link;
+    w.app.db.run("UPDATE users SET indexing_state='current' WHERE did=?", ALICE);
+    const admitScrobble = (index: number) => {
+      seedBackfillScrobble(w, index);
+      const row = w.app.db.one<{ listened_at: string; artist_key: string; track_key: string }>(
+        'SELECT listened_at,artist_key,track_key FROM scrobbles WHERE uri=?',
+        `at://${ALICE}/com.example.atmusic.scrobble/r${index}`,
+      )!;
+      const key = projectionListenKey(ALICE, row.listened_at, row.artist_key, row.track_key);
+      admitForwardIdentity(w.app.db, { did: ALICE, identityKey: key, path: 'live', now: w.clock.nowMs() });
+      w.app.db.run("UPDATE users SET indexing_state='current' WHERE did=?", ALICE);
+      return key;
+    };
+
+    patchLink({ db: w.app.db, clock: w.clock }, ALICE, link.id, { forwardScrobbles: false });
+    const first = admitScrobble(41);
+    patchLink({ db: w.app.db, clock: w.clock }, ALICE, link.id, { forwardScrobbles: true });
+    for (let i = 0; i < 5; i++) await runLinkBackfill(w.app.db, seededRandom(731 + i), w.clock.nowMs());
+    expect(
+      w.app.db.one('SELECT count(*) AS n FROM forward_outbox WHERE link_id=? AND dedupe_key=?', link.id, first),
+    ).toEqual({
+      n: 1,
+    });
+
+    // Schema-54 flag update bypasses the new disable hook.
+    w.app.db.run('UPDATE linked_accounts SET forward_scrobbles=0 WHERE id=?', link.id);
+    const second = admitScrobble(42);
+    patchLink({ db: w.app.db, clock: w.clock }, ALICE, link.id, { forwardScrobbles: true });
+    for (let i = 0; i < 5; i++) await runLinkBackfill(w.app.db, seededRandom(741 + i), w.clock.nowMs());
+
+    expect(
+      w.app.db.one('SELECT count(*) AS n FROM forward_outbox WHERE link_id=? AND dedupe_key=?', link.id, second),
+    ).toEqual({
+      n: 1,
+    });
+    expect(
+      w.app.db.all('SELECT from_seq,to_seq FROM forward_link_gaps WHERE link_id=? ORDER BY from_seq', link.id),
+    ).toEqual([
+      { from_seq: 0, to_seq: 1 },
+      { from_seq: 1, to_seq: 2 },
+    ]);
+  });
+
   it('preserves a submitted scrobble recording MBID during history backfill without an enrichment match', async () => {
     const w = await world();
     seedBackfillScrobble(w, 1);

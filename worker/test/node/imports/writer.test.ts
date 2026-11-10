@@ -1609,6 +1609,39 @@ describe('import writer', () => {
           origin: 'import',
           listen: { recordingMbid: '3c4f9c1e-5a2b-4d8e-9f10-2a7c3b9d0e45' },
         });
+        const forwarded = h.db.one<{ link_id: string; dedupe_key: string }>(
+          'SELECT link_id,dedupe_key FROM forward_outbox WHERE dedupe_key=?',
+          staged.dedupe_key,
+        );
+        expect(forwarded).not.toBeNull();
+        h.db.run(
+          'UPDATE forward_receipts SET retired_at_ms=? WHERE link_id=? AND dedupe_key=?',
+          h.kit.clock.nowMs(),
+          forwarded!.link_id,
+          forwarded!.dedupe_key,
+        );
+        h.db.run(
+          'DELETE FROM forward_outbox WHERE link_id=? AND dedupe_key=?',
+          forwarded!.link_id,
+          forwarded!.dedupe_key,
+        );
+        expect(await writeSlice(h.m, { id: 'job-source-listen', did: h.alice }, h.kit.clock.nowMs())).toMatchObject({
+          created: 0,
+        });
+        expect(
+          h.db.one(
+            'SELECT 1 FROM forward_outbox WHERE link_id=? AND dedupe_key=?',
+            forwarded!.link_id,
+            forwarded!.dedupe_key,
+          ),
+        ).toBeNull();
+        expect(
+          h.db.one(
+            'SELECT retired_at_ms FROM forward_receipts WHERE link_id=? AND dedupe_key=?',
+            forwarded!.link_id,
+            forwarded!.dedupe_key,
+          ),
+        ).toEqual({ retired_at_ms: h.kit.clock.nowMs() });
       }
       expect([lastfm, listenbrainz]).toHaveLength(2);
     });

@@ -200,6 +200,62 @@ describe('linked pull staged writer', () => {
         expect(h.db.all("SELECT link_id FROM forward_outbox WHERE did=? AND kind='love'", did)).toEqual([
           { link_id: targetLink },
         ]);
+
+        const retiredReplay = h.db.one<{ link_id: string; dedupe_key: string }>(
+          "SELECT link_id,dedupe_key FROM forward_outbox WHERE did=? AND kind='love' AND link_id=?",
+          did,
+          targetLink,
+        );
+        expect(retiredReplay).not.toBeNull();
+        h.db.run(
+          'UPDATE forward_receipts SET retired_at_ms=? WHERE link_id=? AND dedupe_key=?',
+          h.kit.clock.nowMs(),
+          retiredReplay!.link_id,
+          retiredReplay!.dedupe_key,
+        );
+        h.db.run(
+          'DELETE FROM forward_outbox WHERE link_id=? AND dedupe_key=?',
+          retiredReplay!.link_id,
+          retiredReplay!.dedupe_key,
+        );
+        expect(
+          stageLovePage(h.db, {
+            linkId,
+            generation: 1,
+            sourceService: 'listenbrainz',
+            sourceAccount: 'remote',
+            did,
+            proposedCursor: null,
+            proposedBoundaryMs: 100,
+            proposedBoundaryKey: null,
+            nowMs: 7,
+            items: [
+              {
+                itemKey: 'normalized-key-echo',
+                artist: ' artist ',
+                track: 'ORIGINAL TITLE ',
+                payload: { artist: ' artist ', track: 'ORIGINAL TITLE ' },
+              },
+            ],
+          }),
+        ).toEqual(['duplicate']);
+        expect(
+          await writePullSlice(h.m, { linkId, generation: 1, available: async () => ({ available: true }) }),
+        ).toMatchObject({ accepted: 0 });
+        expect(
+          h.db.one(
+            'SELECT 1 FROM forward_outbox WHERE link_id=? AND dedupe_key=?',
+            retiredReplay!.link_id,
+            retiredReplay!.dedupe_key,
+          ),
+        ).toBeNull();
+        expect(
+          h.db.one(
+            'SELECT retired_at_ms FROM forward_receipts WHERE link_id=? AND dedupe_key=?',
+            retiredReplay!.link_id,
+            retiredReplay!.dedupe_key,
+          ),
+        ).toEqual({ retired_at_ms: h.kit.clock.nowMs() });
       });
     },
   );

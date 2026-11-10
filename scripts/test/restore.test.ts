@@ -55,14 +55,21 @@ import { executeAuthorizedRemovals, nextPendingRemovalDue } from '../../worker/s
 import { migrate } from '../../worker/src/do/migrate.ts';
 import { MIGRATIONS, SCHEMA_VERSION, TABLE_CLASS } from '../../worker/src/do/schema.ts';
 import { applyRecordProof } from '../../worker/src/do/write/apply-record.ts';
+import { runLinkBackfill } from '../../worker/src/forward/backfill.ts';
 import { FORWARD_LOVE_RECORDING_LOOKUP_SQL } from '../../worker/src/forward/forwarder.ts';
-import { deleteLink, getLinkById, openLinkCredential, saveLink } from '../../worker/src/forward/links.ts';
-import { admitForwardIdentity } from '../../worker/src/forward/projection.ts';
+import { deleteLink, getLinkById, openLinkCredential, revokeLink, saveLink } from '../../worker/src/forward/links.ts';
+import {
+  admitForwardIdentity,
+  projectionListenKey,
+  releaseForwardAdmission,
+} from '../../worker/src/forward/projection.ts';
 import { enqueueCoverArt, putCoverArt } from '../../worker/src/musicbrainz/cover-art-store.ts';
 import { createBackups } from '../../worker/src/node/backup.ts';
 import { type ExitCode, type RunningServer, run } from '../../worker/src/node/run.ts';
 import { parseSecrets, type Secrets } from '../../worker/src/node/secrets.ts';
 import { openSqliteDb, type SqliteDb } from '../../worker/src/node/sqlite-db.ts';
+import { enqueueForwards } from '../../worker/src/outbox/forward-enqueue.ts';
+import { deleteQueuedForwardIdentity } from '../../worker/src/outbox/forward-key.ts';
 import {
   captureLog,
   manualTimers,
@@ -613,6 +620,84 @@ describe('restore.ts', () => {
     ]);
     expect(query(world.dbPath, 'PRAGMA foreign_key_check')).toEqual([]);
   });
+
+  it('restores real acceptance, cancellation, revocation, relink, and backfill across a fresh server composition', async () => {
+    const world = await buildWorld();
+    const servicePort = await freePort();
+    const systemd = new FakeSystemd(world, { servicePort });
+    await systemd.boot();
+    const result = await restoreCli(world, systemd, [...baseArgs(world), '--listen', `127.0.0.1:${servicePort}`]);
+    expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
+
+    const server = systemd.server as Started;
+    const db = server.server.db;
+    const now = world.clock.nowMs();
+    const original = getLinkById(db, world.ids.link as string);
+    expect(original).not.toBeNull();
+    const cancelledKey = 'restore-cancel-then-reaccept';
+    expect(admitForwardIdentity(db, { did: DID_A, identityKey: cancelledKey, path: 'api', now })).toBe(true);
+    const apiItem = {
+      kind: 'scrobble' as const,
+      listenKey: cancelledKey,
+      payload: { listen: { artist: 'Artist', track: 'Retry' } },
+    };
+    expect(enqueueForwards(db, { did: DID_A, items: [apiItem], now, random: seededRandom(0x23) })).toBe(1);
+    deleteQueuedForwardIdentity(db, DID_A, ['scrobble'], cancelledKey);
+    expect(releaseForwardAdmission(db, DID_A, cancelledKey)).toBe(true);
+    expect(admitForwardIdentity(db, { did: DID_A, identityKey: cancelledKey, path: 'api', now: now + 1 })).toBe(true);
+    expect(enqueueForwards(db, { did: DID_A, items: [apiItem], now: now + 1, random: seededRandom(0x24) })).toBe(1);
+
+    expect(revokeLink(db, original!, 'credential_revoked', now + 2)).toBe(true);
+    const projected = db.one<{ listened_at: string; artist_key: string; track_key: string }>(
+      'SELECT listened_at,artist_key,track_key FROM scrobbles WHERE uri=?',
+      `at://${DID_A}/${PREFIX}.scrobble/s1`,
+    );
+    expect(projected).not.toBeNull();
+    const sourceKey = projectionListenKey(DID_A, projected!.listened_at, projected!.artist_key, projected!.track_key);
+    expect(admitForwardIdentity(db, { did: DID_A, identityKey: sourceKey, path: 'api', now: now + 3 })).toBe(true);
+    expect(
+      enqueueForwards(db, {
+        did: DID_A,
+        items: [
+          { kind: 'scrobble', listenKey: sourceKey, payload: { listen: { artist: 'Artist', track: 'Track s1' } } },
+        ],
+        now: now + 3,
+        random: seededRandom(0x25),
+      }),
+    ).toBe(0);
+    expect(db.one('SELECT from_seq,to_seq,reason FROM forward_link_gaps WHERE link_id=?', world.ids.link!)).toEqual({
+      from_seq: 2,
+      to_seq: null,
+      reason: 'revoked',
+    });
+
+    const secrets = parseSecrets(world.secretsDoc);
+    const box = createBox(secrets.encryptionKeys, seededRandom(0x26));
+    const relinked = saveLink(
+      { db, clock: world.clock, random: seededRandom(0x27), box },
+      { did: DID_A, service: 'lastfm', remoteUser: 'alice', credential: LASTFM_SK },
+    );
+    expect(relinked.link).toMatchObject({ id: world.ids.link, generation: 1, status: 'active' });
+    db.run("UPDATE users SET indexing_state='current' WHERE did=?", DID_A);
+    for (let index = 0; index < 4; index++) await runLinkBackfill(db, seededRandom(0x30 + index), world.clock.nowMs());
+
+    expect(
+      db.one('SELECT state FROM forward_outbox WHERE link_id=? AND dedupe_key=?', world.ids.link!, cancelledKey),
+    ).toEqual({
+      state: 'queued',
+    });
+    expect(
+      db.one('SELECT count(*) AS n FROM forward_outbox WHERE link_id=? AND dedupe_key=?', world.ids.link!, sourceKey),
+    ).toEqual({
+      n: 1,
+    });
+    expect(
+      db.one('SELECT retired_at_ms FROM forward_receipts WHERE link_id=? AND dedupe_key=?', world.ids.link!, sourceKey),
+    ).toEqual({
+      retired_at_ms: null,
+    });
+    expect(db.one('SELECT to_seq FROM forward_link_gaps WHERE link_id=?', world.ids.link!)).toEqual({ to_seq: 3 });
+  }, 30_000);
 
   it('clears migration-55 state when readable live schema 54 has no receipt or gap tables', async () => {
     const world = await buildWorld({
