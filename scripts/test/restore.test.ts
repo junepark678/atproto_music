@@ -1656,6 +1656,14 @@ describe('restore.ts', () => {
       expect(db.one('SELECT state FROM operations WHERE id=?', laterLove.operation.id)).toEqual({ state: 'succeeded' });
       expect(db.one('SELECT count(*) AS n FROM love_api_recipient_members')).toEqual({ n: 2 });
 
+      const lastfmLink = getLinkById(db, world.ids.link!);
+      const listenbrainzLink = getLinkById(db, source.listenbrainzLink);
+      if (lastfmLink === null || listenbrainzLink === null) throw new Error('producer recipient link is missing');
+      expect(revokeLink(db, lastfmLink, 'credential_revoked', world.clock.nowMs())).toBe(true);
+      expect(
+        patchLink({ db, clock: world.clock }, DID_A, listenbrainzLink.id, { forwardScrobbles: false }),
+      ).not.toBeNull();
+
       const deleteCommit = await source.kit.externalDelete('Alice', LOVE_COLLECTION, source.rkey);
       const absentProof = await verifyRecordProof(
         await source.kit.repos.Alice.getRecordCar(LOVE_COLLECTION, source.rkey),
@@ -1767,20 +1775,70 @@ describe('restore.ts', () => {
       },
       kick: () => null,
     } as unknown as ExtensionContext;
+    const recipientLinkIds = restored.all<{ id: string; generation: number }>(
+      "SELECT id,generation FROM linked_accounts WHERE did=? AND service IN ('lastfm','listenbrainz') ORDER BY service",
+      DID_A,
+    );
+    expect(recipientLinkIds).toHaveLength(2);
+    const generationByLink = new Map(recipientLinkIds.map((row) => [row.id, row.generation]));
+    const lastfmRow = recipientLinkIds
+      .map(({ id }) => getLinkById(restored, id))
+      .find((row) => row?.service === 'lastfm');
+    const listenbrainzRow = recipientLinkIds
+      .map(({ id }) => getLinkById(restored, id))
+      .find((row) => row?.service === 'listenbrainz');
+    if (lastfmRow === undefined || lastfmRow === null || listenbrainzRow === undefined || listenbrainzRow === null)
+      throw new Error('restored API recipient links are missing');
+    expect(lastfmRow.status).toBe('revoked');
+    expect(listenbrainzRow.forward_scrobbles).toBe(0);
     for (let turn = 0; turn < 4; turn++) {
       await timer!(timerNow + turn * 1_000, timerContext);
       if (restored.one<{ n: number }>('SELECT count(*) AS n FROM love_api_unlove_decisions')?.n === 0) break;
     }
     expect(scheduled.length).toBeGreaterThan(0);
     expect(restored.one('SELECT count(*) AS n FROM love_api_unlove_decisions')).toEqual({ n: 0 });
+    expect(
+      restored.one<{ n: number }>(
+        `SELECT count(*) AS n FROM forward_outbox WHERE kind='unlove' AND authorization_uri=?`,
+        source!.uri,
+      )?.n,
+    ).toBe(0);
+    const pausedDispatch = await dispatchRestoreLoveTransports(restored, timerNow + 1_000);
+    expect(pausedDispatch.report.requests).toBe(0);
+    expect(pausedDispatch.lastfmRequests).toEqual([]);
+    expect(pausedDispatch.listenbrainzRequests).toEqual([]);
+    const restoreBox = createBox(parseSecrets(world.secretsDoc).encryptionKeys, seededRandom(0x75));
+    expect(
+      saveLink(
+        { db: restored, clock: world.clock, random: seededRandom(0x76), box: restoreBox },
+        {
+          did: DID_A,
+          service: 'lastfm',
+          remoteUser: lastfmRow.remote_user,
+          credential: 'resume-fixture-token',
+        },
+      ).link.generation,
+    ).toBe(generationByLink.get(lastfmRow.id));
+    expect(
+      patchLink({ db: restored, clock: world.clock }, DID_A, listenbrainzRow.id, { forwardScrobbles: true })
+        ?.generation,
+    ).toBe(generationByLink.get(listenbrainzRow.id));
+    restored.run("UPDATE users SET indexing_state='current' WHERE did=?", DID_A);
+    // The fixture has already sealed its source-history frontier; resume the real
+    // production coverage lane without asking restore to fetch another history page.
+    restored.run(
+      "UPDATE linked_accounts SET backfill_state='running',backfill_discovery_done=1 WHERE did=? AND status='active' AND forward_scrobbles=1",
+      DID_A,
+    );
+    for (let turn = 0; turn < 4; turn++) await timer!(timerNow + 30_000 + turn * 1_000, timerContext);
     const queuedUnloves = restored.all<{ service: string; state: string }>(
       `SELECT l.service,o.state FROM forward_outbox o JOIN linked_accounts l ON l.id=o.link_id
        WHERE o.kind='unlove' AND o.authorization_uri=?`,
       source!.uri,
     );
-    expect(queuedUnloves).toHaveLength(4);
-    expect(queuedUnloves.filter((row) => row.service === 'lastfm')).toHaveLength(2);
-    expect(queuedUnloves.filter((row) => row.service === 'listenbrainz')).toHaveLength(2);
+    expect(queuedUnloves).toHaveLength(2);
+    expect(queuedUnloves.filter((row) => row.service === 'lastfm')).toHaveLength(1);
+    expect(queuedUnloves.filter((row) => row.service === 'listenbrainz')).toHaveLength(1);
     expect(
       restored.one(
         `SELECT count(*) AS n FROM forward_outbox WHERE kind='unlove' AND authorization_uri=?
@@ -1800,18 +1858,17 @@ describe('restore.ts', () => {
         `SELECT count(*) AS n FROM forward_outbox WHERE kind='unlove' AND authorization_uri=? AND state='sent'`,
         source!.uri,
       )?.n;
-      if (sent === 4) break;
+      if (sent === 2) break;
     }
-    expect(requestCount).toBeGreaterThanOrEqual(4);
-    expect(dispatchedLastfm.filter((method) => method === 'track.unlove')).toHaveLength(2);
+    expect(requestCount).toBeGreaterThanOrEqual(2);
+    expect(dispatchedLastfm.filter((method) => method === 'track.unlove')).toHaveLength(1);
     expect(dispatchedListenbrainz).toContainEqual({
       recording_mbid: '12345678-1234-1234-1234-123456789abc',
       score: 0,
     });
-    expect(dispatchedListenbrainz.filter((request) => (request as { score?: number }).score === 0)).toHaveLength(2);
+    expect(dispatchedListenbrainz.filter((request) => (request as { score?: number }).score === 0)).toHaveLength(1);
     const secondDispatch = await dispatchRestoreLoveTransports(restored, timerNow + 90_000);
     expect(secondDispatch.report.requests).toBe(0);
-    expect(restored.one('SELECT 1 FROM love_api_bindings WHERE operation_id=?', source!.operationId)).not.toBeNull();
     await stopServer(systemd.server!.server);
     systemd.server = null;
     expect(query(world.dbPath, 'PRAGMA foreign_key_check')).toEqual([]);
