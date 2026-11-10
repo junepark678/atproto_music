@@ -544,6 +544,16 @@ controls trip their own guards.
 
 ## Remaining gates
 
+For Sol's fresh reconciliation against the cdb78de audit pin, the exact
+post-cdb production-source diff SHA-256 is
+`4fec39a75cb84187beb34f3613c7c38d554f2ba024ec1f418cc22782e1bd1b55`.
+That source diff is 7 files, 880 insertions and 125 deletions: pending-removal
+producer, apply-record, backfill timer composition, L2 maintenance,
+materializer, recipient leaf, and scheduler. The audit repair code is included
+in that diff; subsequent commits in this continuation add only tests/docs.
+Sol's pinned review must be refreshed against the final head before any
+readiness conclusion.
+
 Migration57 is registered at the planner-authorized revised hash above. The
 old-hash authorizer/CLI receipts are preserved and explicitly superseded; the
 new-hash authorizer, real 56→57 CLI upgrade, and older-live restore passed on
