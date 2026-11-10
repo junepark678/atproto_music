@@ -248,9 +248,124 @@ The current materializer branch trace from the actual Node DB facade measured
 8 changed rows, 53 read statements, eight mutation statements, and 21 returned
 rows for one created decision. This is a warm created-decision branch only,
 not the hard whole-path proof.
-No whole-path128 or full-L2 budget proof is claimed. The next stages must
-measure actual helper, handoff and whole decision costs, retaining the hard
-96-write/16-visit/DECISION28 limits and provisional whole-read128 gate.
+
+The first composed API-create→PDS SENT→present proof→partial-delete→
+materializer run was measured from before API admission through handoff. The
+old receipt reported 229 reads, 105 mutation statements, 87 changed rows, 110
+returned rows, and one deferred handoff. That meter crossed multiple API,
+PDS/SENT, proof-ingest, and L2 handoff transactions. It is an informational
+lifecycle total and is **not comparable** to the per-decision 128-read cap.
+Its original trace and failing-test log remain preserved, unchanged, at
+`/tmp/atproto-followup-sol/pr210-whole-decision-overcap-trace.json` and
+`/tmp/atproto-followup-sol/pr210-whole-decision-overcap-test.log`; classify
+these as wrong-unit evidence, not a cap breach. A corrected Node facade meter
+records inclusive actual transaction rows and their nested savepoints in
+`/tmp/atproto-followup-sol/pr210-cold-phase-table-v2.json`.
+
+| Actual phase / transaction | Reads | Mutation statements | Changed rows | Returned rows | Visits / outcome |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Cold scenario: `enqueueLove` API acceptance | 13 | 14 | 13 | 9 | — |
+| Cold scenario: `insertOperation` nested in `enqueueLove` | 4 | 2 | 2 | 4 | nested inclusive |
+| Cold scenario: `admitForwardIdentity` nested in `enqueueLove` | 1 | 3 | 3 | 1 | nested inclusive |
+| Cold scenario: `enqueueForwards` nested in `enqueueLove` | 6 | 5 | 5 | 3 | nested inclusive |
+| Outbox `beginAttempts` transaction | 0 | 1 | 1 | 1 | — |
+| Preflight `Object.execute` transaction | 2 | 0 | 0 | 0 | — |
+| `chargePoints` transaction | 2 | 2 | 2 | 0 | — |
+| Cold scenario: API `Object.execute` enclosing transaction | 11 | 10 | 9 | 6 | — |
+| Nested `bindApiLoveCreatedOperation` savepoint (included in its parent) | 11 | 10 | 9 | 6 | — |
+| Nested `bindApiLoveOperation` savepoint (included in both parents) | 9 | 8 | 7 | 6 | — |
+| Proof settlement `admit` nested transaction | 4 | 6 | 5 | 2 | nested inclusive |
+| Outbox `Run.settle` transaction | 5 | 7 | 6 | 2 | — |
+| `expireRows` transaction | 13 | 0 | 0 | 1 | — |
+| `advanceLoveRecordingHistory` transaction | 5 | 8 | 5 | 5 | — |
+| `frameLoveRows` transaction | 8 | 0 | 0 | 0 | — |
+| `pickJob` transaction | 6 | 0 | 0 | 2 | — |
+| `inSlices` nested in ListenBrainz send | 4 | 5 | 4 | 4 | nested inclusive |
+| `sendListenbrainz` transaction | 4 | 6 | 5 | 4 | — |
+| Forwarder final `runForward` transaction | 1 | 1 | 1 | 0 | — |
+| `patchLink` transaction | 5 | 2 | 2 | 3 | — |
+| Partial-delete proof-ingest host transaction (includes L2 fact hook) | 47 | 33 | 23 | 25 | — |
+| Nested `recordLoveApiComparisonFact` savepoint (included in host transaction) | 2 | 3 | 2 | 1 | — |
+| Partial-delete `admitForwardIdentity` savepoint | 1 | 3 | 2 | 1 | nested inclusive |
+| Partial-delete `enqueueForwards` savepoint | 27 | 14 | 11 | 12 | nested inclusive |
+| Recipient `enqueueForwards` nested in adapter | 21 | 4 | 4 | 11 | nested inclusive |
+| `enqueueApiRecipientUnlove` nested in decision | 44 | 4 | 4 | 18 | nested inclusive |
+| L2 `materializeLoveApiRecipientDecisions` transaction, including nested enqueue and acknowledgement | 55 | 7 | 7 | 26 | visited 1, deferred 1 |
+
+Nested rows are inclusive at their own boundary and are already included in
+their parent totals; never sum them again into the lifecycle. This cold
+materializer transaction is within 128 reads, 96 changed rows, DECISION28,
+and visits16. It is one recipient/one outcome branch and does not prove the
+whole DECISION matrix. Partial-delete is its own proof-ingest transaction,
+not an L2 decision unit; its exact parent and hook attribution are measured below.
+
+The planner withdrew its unmeasured `+4/+4` API guess and replaced it with
+matched-source, measured N0/N1/N2 limits. The former failed receipt stays
+preserved as **superseded**, not a current cap violation. The exact #209 source
+archive (`5d573706bf07bb50e0c8b79cf1d34a3f6c56a975`) and current production
+path use the same reused-snapshot fixture.
+
+| API acceptance transaction | Recipient count | #209 reads / mutations / changed / returned | Current reads / mutations / changed / returned | L2 delta reads / mutations / changed / returned |
+| --- | ---: | ---: | ---: | ---: |
+| No active recipient links (N0) | 0 | 22 / 11 / 9 / 16 | 24 / 13 / 11 / 17 | +2 / +2 / +2 / +1 |
+| Reused snapshot (N1) | 1 | 26 / 15 / 13 / 19 | 36 / 25 / 22 / 26 | +10 / +10 / +9 / +7 |
+| Reused snapshot (N2) | 2 | 30 / 19 / 17 / 22 | 43 / 34 / 30 / 31 | +13 / +15 / +13 / +9 |
+
+N0 remains bounded by +3 reads/+2 changed rows and passes at +2/+2. N1 is
+hard-bounded by +12 reads/+11 changed rows and passes at +10/+9. Its 10/9
+measurement is also the frozen marginal reference for N2. N2's second-recipient
+marginal is +3 reads/+4 changed rows, no greater than that reference; its total
+is bounded by `12 + 3 + 1 = 16` reads and `11 + 4 + 1 = 16` changed rows. The
+actual N2 total +13/+13 passes. The API per-recipient count is not normalized
+for zero recipients; N0 is measured directly. Node negative controls separately
+trip each N0/N1/N2 read and changed-row limit.
+
+N2 per-transaction rows (reads / mutation statements / changed rows / returned rows): `enqueueLove` enclosing transaction 17/16/14/12, with nested `insertOperation` 4/1/1/4, `admitForwardIdentity` 1/3/2/1, and `enqueueForwards` 10/8/8/6; `Object.execute` 16/14/12/11, including nested `bindApiLoveOperation` 11/13/11/6; `beginAttempts` 0/1/1/1; `Run.settle` 1/3/3/2, including `enqueueHints` 0/2/2/1. Nested rows are inclusive and must not be summed again. These rows account for the actual two-recipient API path, not a synthetic adapter-only model.
+
+The direct-SQL `worker-bench` growth fixture seeds 100/1,000/10,000 prior loves
+and bindings for the same DID, then measures the production `enqueueLove` path
+against the exact #209 archive. At every size, N1 is +10 reads/+8 changed rows
+(36/25 mutation statements/21 total changed rows/26 returned rows versus
+26/15/13/19); N2 is +13 reads/+12 changed rows (43/34/29/31 versus
+30/19/17/22). The N2 marginal is +3/+4. N1 and N2 read, mutation, and changed
+row counts are identical across all three history sizes. This seeded-history
+fixture has an existing proof-state singleton, so its N1 changed-row delta is
+8; the fresh-singleton N1 acceptance measurement remains 10/9 and is the frozen
+marginal reference above. All 20 N1 and 28 N2 SQL statements captured from
+`love-api-recipients.ts` were checked with actual `EXPLAIN QUERY PLAN`; none
+scans an L2 table or uses a temp B-tree. Load-bearing controls trip N1 delta,
+per-history growth, scan, and sort oracles. The exact parent comparison uses the
+archived source at each history size, not current code with hooks disabled.
+
+The synchronous pending-removal producer now has a sibling-recipient rollback
+regression. Two exact current recipient owners share the same verified event
+fact; a deliberate failure on the second recipient fact read rolls back the
+first insertion and event cursor, while retaining the pre-existing owner rows.
+A successful retry persists the single sticky fact with the minimum horizon
+across both eligible windows and authorizes both. The fixture exercises the
+actual `recordPendingRemovals` and `authorizePendingRemovals` producer functions;
+API executor/SENT provenance remains separately covered by the real PDS/fake
+transport case above.
+
+The independently measured partial-delete proof-ingest transaction also has an
+exact parent comparison: #209 is 15 reads/15 mutation statements/8 changed
+rows/10 returned rows; current is 17/18/10/12. Its L2 comparison-fact hook
+accounts for exactly +2 reads/+3 mutation statements/+2 changed rows. Both the
+whole transaction delta and the hook-owned statements are asserted, with the
+parent fixture on the archived #209 source. PDS execution, proof ingest, and B2
+delivery continue to be checked for only their declared L2 hooks.
+
+The actual cold L2 decision remains 55 reads/7 mutation statements/7 changed
+rows/26 returned rows, visited 1/deferred 1. Its transaction begins at L2 entry
+and ends at commit, includes nested decision/enqueue work, and stays within
+128 reads/96 changed rows/DECISION28/visits16. Independent negative controls
+trip each read, changed-row, decision, and visit bound. These path-local rows
+are distinct from the 229-read cross-transaction lifecycle total above.
+
+The 229-read lifecycle receipt remains informational and is not an over-cap
+negative control. No whole-path128 or full-L2 budget proof is claimed. The
+independent 96-write/16-visit/DECISION28 limits and provisional whole-read128
+gate remain unchanged.
 
 ## Read-cap relaxation and evidence gate
 
@@ -282,6 +397,16 @@ DECISION 28, and mandatory populated real schema-56-to-57 CLI upgrade/restore ac
 Probe artifacts: `/tmp/atproto-followup-sol/finding32-sol-actual209-cost-probe.ts.txt`,
 `finding32-sol-actual209-cost-results.json`, and `finding32-sol-actual209-cost-probe.log`.
 Those artifacts measured materialization plus one link-scoped enqueue only.
+
+The direct-SQL worker-bench retention proof runs the production reclaimer over
+100/1,000/10,000 same-DID API bindings with one selected SENT aggregate held at
+the final sequence. Each page is fixed at 10 reads, 17 mutation statements, 16
+changed rows, 9 returned rows, and at most 8 visits at all three sizes. Cleanup
+finishes in 13/125/1,250 fair finite passes respectively; the selected
+`listenbrainz` origin survives the pass and is removed in two additional lane
+passes after its aggregate is released. Actual query plans for the production
+page have no L2 table scan or temp sort. Per-page read/mutation/changed-row/visit
+and scan/sort negative controls trip their own guards.
 
 ## Remaining gates
 

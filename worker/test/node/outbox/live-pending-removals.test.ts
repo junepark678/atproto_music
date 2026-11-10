@@ -10,6 +10,7 @@ import {
   executeAuthorizedRemovals,
   type PendingRemovalInput,
   recordPendingRemoval,
+  recordPendingRemovals,
 } from '../../../src/do/ingest/live-pending-removals';
 import { applyRecordProof } from '../../../src/do/write/apply-record';
 import { enqueueListenDelete, hasCanonicalListenSurvivor } from '../../../src/forward/delete-enqueue';
@@ -824,6 +825,130 @@ function setup(db: Db): void {
   });
   db.run("UPDATE forward_outbox SET state='sent' WHERE link_id='pending-link' AND kind='scrobble'");
 }
+
+it('pins one comparison fact across recipient siblings and rolls back the first pin if a later sibling write throws', async () => {
+  await withMigratedDb((db) => {
+    seedUser(db, DID);
+    const loveUri = `at://${DID}/com.example.atmusic.love/3mrecipientbatch`;
+    const incarnationKey = `love:${loveUri}:api:accepted-op`;
+    for (const [linkId, service, operationId, seq] of [
+      ['recipient-lb', 'listenbrainz', 'api-op-lb', 1],
+      ['recipient-lfm', 'lastfm', 'api-op-lfm', 2],
+    ] as const) {
+      db.run(
+        `INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,generation,created_at_ms,updated_at_ms)
+         VALUES(?,?,?,? ,X'00','fixture',1,?,?)`,
+        linkId,
+        DID,
+        service,
+        'remote',
+        NOW,
+        NOW,
+      );
+      db.run(
+        `INSERT INTO love_api_bindings(did,operation_id,api_origin,uri,incarnation_key,binding_seq,created_at_ms)
+         VALUES(?,?,'web',?,?,?,?)`,
+        DID,
+        operationId,
+        loveUri,
+        incarnationKey,
+        seq,
+        NOW,
+      );
+      db.run(
+        `INSERT INTO love_api_recipients(did,uri,incarnation_key,link_id,generation,aggregate_seq,state,
+           sent_operation_id,created_at_ms,updated_at_ms)
+         VALUES(?,?,?,?,1,?,'present',?,?,?)`,
+        DID,
+        loveUri,
+        incarnationKey,
+        linkId,
+        seq,
+        operationId,
+        NOW,
+        NOW,
+      );
+    }
+    const row = {
+      uri: loveUri,
+      record_uri: null,
+      listen_id: null,
+      cid: 'removed-love-cid',
+      listened_at: LISTENED_AT,
+      artist_key: 'artist-key',
+      track_key: 'track-key',
+      artist: 'Artist',
+      track: 'Track',
+      recording_mbid: null,
+    };
+    const windows = [
+      { windowLo: '1111111111111', windowHi: '2222222222222', expiresAt: NOW + 5_000 },
+      { windowLo: '1111111111111', windowHi: '3333333333333', expiresAt: NOW + 1_000 },
+    ] as const;
+    recordPendingRemovals(
+      db,
+      windows.map(({ windowLo, windowHi }) => ({
+        did: DID,
+        uri: loveUri,
+        kind: 'love' as const,
+        row,
+        identityKey: incarnationKey,
+        windowLo,
+        windowHi,
+        replacedByCid: null,
+        nowMs: NOW,
+      })),
+    );
+    for (const { windowLo, windowHi, expiresAt } of windows)
+      db.run(
+        'UPDATE live_pending_removals SET expires_at_ms=? WHERE uri=? AND window_lo=? AND window_hi=?',
+        expiresAt,
+        loveUri,
+        windowLo,
+        windowHi,
+      );
+    expect(db.one('SELECT count(*) AS count FROM love_api_window_owners')).toEqual({ count: 4 });
+
+    let factReads = 0;
+    const faulted: Db = {
+      all: db.all.bind(db),
+      one<T>(sql: string, ...params: SqlParam[]): T | null {
+        if (sql.startsWith('SELECT action,cid,conflicted,horizon_ms FROM love_api_comparison_facts')) {
+          factReads++;
+          if (factReads === 2) throw new Error('injected second-recipient fact pin failure');
+        }
+        return db.one<T>(sql, ...params);
+      },
+      tx: (fn) => db.tx(fn),
+      run: db.run.bind(db),
+    };
+    expect(() =>
+      faulted.tx(() =>
+        authorizePendingRemovals(faulted, { uri: loveUri, rev: '2222222222222', action: 'delete' }, NOW),
+      ),
+    ).toThrow('injected second-recipient fact pin failure');
+    expect(factReads).toBe(2);
+    expect(db.one('SELECT 1 FROM live_pending_removal_events WHERE uri=?', loveUri)).toBeNull();
+    expect(db.one('SELECT 1 FROM love_api_comparison_facts WHERE authorization_uri=?', loveUri)).toBeNull();
+    expect(db.one('SELECT count(*) AS count FROM love_api_window_owners')).toEqual({ count: 4 });
+
+    db.tx(() => authorizePendingRemovals(db, { uri: loveUri, rev: '2222222222222', action: 'delete' }, NOW));
+    expect(
+      db.one<{ horizon_ms: number }>(
+        'SELECT horizon_ms FROM love_api_comparison_facts WHERE authorization_uri=? AND authorization_rev=?',
+        loveUri,
+        '2222222222222',
+      ),
+    ).toEqual({ horizon_ms: NOW + 1_000 });
+    expect(
+      db.one(
+        'SELECT count(*) AS count FROM live_pending_removals WHERE uri=? AND authorized_rev=?',
+        loveUri,
+        '2222222222222',
+      ),
+    ).toEqual({ count: 2 });
+  });
+});
 
 it('atomically couples a new pending window and its retention epoch', async () => {
   await withMigratedDb((db) => {

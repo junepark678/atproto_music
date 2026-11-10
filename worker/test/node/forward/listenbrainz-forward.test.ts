@@ -9,7 +9,7 @@
 // ListenBrainz is the fake at listenbrainz.test behind the fixture router; it
 // accepts a submission only with a registered `Token`.
 
-import { copyFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as sqlite from 'node:sqlite';
@@ -26,7 +26,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { MemoryRevocations } from '../../../src/app/revocations';
 import type { ForwardOutboxRow } from '../../../src/app/rows';
 import { ensureAccount } from '../../../src/credentials/accounts';
-import type { SqlParam } from '../../../src/do/db';
+import type { Db, SqlParam } from '../../../src/do/db';
 import { cachedIdentityResolver } from '../../../src/do/ingest/identity-cache';
 import { recordLiveEvidence } from '../../../src/do/ingest/live-evidence';
 import { migrate } from '../../../src/do/migrate';
@@ -107,6 +107,146 @@ interface World {
   enqueue(items: ForwardItem[]): number;
   rows(): ForwardOutboxRow[];
   run(): ReturnType<typeof runForward>;
+}
+
+function traceDb(raw: Db): {
+  db: Db;
+  result: () => {
+    reads: number;
+    mutationStatements: number;
+    returnedRows: number;
+    changedRows: number;
+    transactions: Array<{
+      name: string;
+      parentName: string | null;
+      depth: number;
+      inclusive: true;
+      reads: number;
+      mutationStatements: number;
+      changedRows: number;
+      returnedRows: number;
+      nestedTransactions: number;
+      nestedOwners: string[];
+    }>;
+  };
+} {
+  let reads = 0;
+  let mutationStatements = 0;
+  let returnedRows = 0;
+  const activeTransactions: Array<{
+    name: string;
+    parentName: string | null;
+    depth: number;
+    before: number;
+    reads: number;
+    mutationStatements: number;
+    returnedRows: number;
+    nestedTransactions: number;
+    nestedOwners: string[];
+  }> = [];
+  const transactions: Array<{
+    name: string;
+    parentName: string | null;
+    depth: number;
+    inclusive: true;
+    reads: number;
+    mutationStatements: number;
+    changedRows: number;
+    returnedRows: number;
+    nestedTransactions: number;
+    nestedOwners: string[];
+  }> = [];
+  const mutation = /^\s*(?:INSERT|UPDATE|DELETE|REPLACE)\b/i;
+  const callsite = () =>
+    new Error().stack
+      ?.split('\n')
+      .slice(2)
+      .find((line) => line.includes('/worker/src/'))
+      ?.trim() ?? 'test-owned transaction';
+  const account = (sql: string, rowCount: number) => {
+    if (mutation.test(sql)) {
+      mutationStatements++;
+      for (const frame of activeTransactions) frame.mutationStatements++;
+    } else {
+      reads++;
+      for (const frame of activeTransactions) frame.reads++;
+    }
+    returnedRows += rowCount;
+    for (const frame of activeTransactions) frame.returnedRows += rowCount;
+  };
+  const before = raw.one<{ n: number }>('SELECT total_changes() AS n')!.n;
+  const db: Db = {
+    all<T>(sql: string, ...params: SqlParam[]): T[] {
+      const rows = raw.all<T>(sql, ...params);
+      account(sql, rows.length);
+      return rows;
+    },
+    one<T>(sql: string, ...params: SqlParam[]): T | null {
+      const row = raw.one<T>(sql, ...params);
+      account(sql, row === null ? 0 : 1);
+      return row;
+    },
+    run(sql: string, ...params: SqlParam[]) {
+      account(sql, 0);
+      return raw.run(sql, ...params);
+    },
+    tx<T>(fn: () => T extends Promise<unknown> ? never : T): T {
+      const transaction = {
+        name: callsite(),
+        parentName: activeTransactions.at(-1)?.name ?? null,
+        depth: activeTransactions.length,
+        before: raw.one<{ n: number }>('SELECT total_changes() AS n')!.n,
+        reads: 0,
+        mutationStatements: 0,
+        returnedRows: 0,
+        nestedTransactions: 0,
+        nestedOwners: [] as string[],
+      };
+      for (const frame of activeTransactions) {
+        frame.nestedTransactions++;
+        frame.nestedOwners.push(transaction.name);
+      }
+      activeTransactions.push(transaction);
+      try {
+        return raw.tx(fn);
+      } finally {
+        const after = raw.one<{ n: number }>('SELECT total_changes() AS n')!.n;
+        transactions.push({
+          name: transaction.name,
+          parentName: transaction.parentName,
+          depth: transaction.depth,
+          inclusive: true,
+          reads: transaction.reads,
+          mutationStatements: transaction.mutationStatements,
+          changedRows: after - transaction.before,
+          returnedRows: transaction.returnedRows,
+          nestedTransactions: transaction.nestedTransactions,
+          nestedOwners: transaction.nestedOwners,
+        });
+        activeTransactions.pop();
+      }
+    },
+  };
+  return {
+    db,
+    result: () => ({
+      reads,
+      mutationStatements,
+      returnedRows,
+      changedRows: raw.one<{ n: number }>('SELECT total_changes() AS n')!.n - before,
+      transactions,
+    }),
+  };
+}
+
+function assertL2DecisionBudget(
+  transaction: { reads: number; mutationStatements: number; changedRows: number },
+  visits: number,
+): void {
+  if (transaction.reads > 128) throw new Error('L2 decision read budget exceeded');
+  if (transaction.changedRows > 96) throw new Error('L2 decision changed-row budget exceeded');
+  if (transaction.mutationStatements > 28) throw new Error('L2 decision DECISION budget exceeded');
+  if (visits > 16) throw new Error('L2 decision visit budget exceeded');
 }
 
 async function world(migrations?: readonly (typeof MIGRATIONS)[number][]): Promise<World> {
@@ -699,6 +839,8 @@ describe('ListenBrainz forwarding', () => {
     const w = await world();
     const linkId = w.link();
     const deps = w.app.composed.core.deps;
+    const wholeDecisionTrace = traceDb(w.app.db);
+    const tracedDeps = { ...deps, db: wholeDecisionTrace.db };
     const artist = 'L2 Paused API Artist';
     const track = 'L2 Paused API Track';
     const keys = await fixtureKeys();
@@ -723,12 +865,13 @@ describe('ListenBrainz forwarding', () => {
     w.app.db.run('UPDATE users SET pds=? WHERE did=?', pds.origin, ALICE);
     const outboxDeps = {
       ...deps,
+      db: wholeDecisionTrace.db,
       config: { ...deps.config, publication: true },
       transport: pdsTransport,
-      identity: cachedIdentityResolver(w.app.db, { transport: pdsTransport, clock: w.clock }),
+      identity: cachedIdentityResolver(wholeDecisionTrace.db, { transport: pdsTransport, clock: w.clock }),
       writers,
     };
-    const created = await enqueueLove(deps, {
+    const created = await enqueueLove(tracedDeps, {
       did: ALICE,
       input: { artist, track, recordingMbid: MBID },
       origin: 'web',
@@ -736,7 +879,7 @@ describe('ListenBrainz forwarding', () => {
     expect(created.ok).toBe(true);
     if (!created.ok) return;
     await runOutbox(outboxDeps, w.clock.nowMs());
-    await w.run();
+    await runForward({ ...w.rt, db: wholeDecisionTrace.db }, w.clock.nowMs());
     expect(w.lb.feedback.map((entry) => entry.json)).toEqual([{ recording_mbid: MBID, score: 1 }]);
     const binding = w.app.db.one<{ uri: string; incarnation_key: string }>(
       'SELECT uri,incarnation_key FROM love_api_bindings WHERE did=? AND operation_id=?',
@@ -757,8 +900,8 @@ describe('ListenBrainz forwarding', () => {
     });
     const presentNs = fromMs(w.clock.nowMs());
     const presentResult = w.app.db.tx(() =>
-      applyRecordProof(w.app.db, presentProof, {
-        ...authorizedLiveOptions(w.app.db, presentProof, w.rt.random),
+      applyRecordProof(wholeDecisionTrace.db, presentProof, {
+        ...authorizedLiveOptions(wholeDecisionTrace.db, presentProof, w.rt.random),
         nowNs: presentNs,
         receiptNs: presentNs,
       }),
@@ -766,7 +909,9 @@ describe('ListenBrainz forwarding', () => {
     if (presentResult.outcome !== 'applied' || w.app.db.one('SELECT 1 FROM loves WHERE uri=?', binding!.uri) === null)
       throw new Error(`API love projection missing: ${JSON.stringify(presentResult)}`);
 
-    expect(patchLink({ db: w.app.db, clock: w.clock }, ALICE, linkId, { forwardScrobbles: false })).not.toBeNull();
+    expect(
+      patchLink({ db: wholeDecisionTrace.db, clock: w.clock }, ALICE, linkId, { forwardScrobbles: false }),
+    ).not.toBeNull();
     await repo.delete('com.example.atmusic.love', rkey);
     const absentCar = await repo.getRecordCar('com.example.atmusic.love', rkey);
     const absentProof = await verifyRecordProof(absentCar, {
@@ -776,7 +921,7 @@ describe('ListenBrainz forwarding', () => {
       signingKey: keys.alice.didKey,
     });
     recordLiveEvidence(
-      w.app.db,
+      wholeDecisionTrace.db,
       {
         uri: binding!.uri,
         did: ALICE,
@@ -788,9 +933,10 @@ describe('ListenBrainz forwarding', () => {
       w.clock.nowMs(),
     );
     const absentNs = fromMs(w.clock.nowMs());
-    const absentResult = w.app.db.tx(() =>
-      applyRecordProof(w.app.db, absentProof, {
-        ...authorizedLiveOptions(w.app.db, absentProof, w.rt.random),
+    const applyOptions = authorizedLiveOptions(wholeDecisionTrace.db, absentProof, w.rt.random);
+    const absentResult = wholeDecisionTrace.db.tx(() =>
+      applyRecordProof(wholeDecisionTrace.db, absentProof, {
+        ...applyOptions,
         nowNs: absentNs,
         receiptNs: absentNs,
       }),
@@ -806,28 +952,61 @@ describe('ListenBrainz forwarding', () => {
         recordState: w.app.db.one('SELECT * FROM record_state WHERE uri=?', binding!.uri),
       }),
     ).toEqual({ authorization_rev: absentProof.commit.rev });
-    const materialized = materializeLoveApiRecipientDecisions(w.app.db, w.clock.nowMs(), w.rt.random, 'paused-world');
+    const materialized = materializeLoveApiRecipientDecisions(
+      wholeDecisionTrace.db,
+      w.clock.nowMs(),
+      w.rt.random,
+      'paused-world',
+    );
+    const wholeDecisionCost = wholeDecisionTrace.result();
+    if (process.env.FINDING32_L2_PHASE_TRACE_FILE !== undefined)
+      writeFileSync(
+        process.env.FINDING32_L2_PHASE_TRACE_FILE,
+        JSON.stringify({ lifecycleInformational: wholeDecisionCost, ...materialized }, null, 2),
+        'utf8',
+      );
+    const decisionTransaction = wholeDecisionCost.transactions.find(
+      (transaction) => transaction.depth === 0 && transaction.name.includes('materializeLoveApiRecipientDecisions'),
+    );
+    expect(decisionTransaction, JSON.stringify(wholeDecisionCost)).toBeDefined();
+    expect(decisionTransaction!.reads, JSON.stringify(decisionTransaction)).toBeLessThanOrEqual(128);
+    expect(decisionTransaction!.changedRows, JSON.stringify(decisionTransaction)).toBeLessThanOrEqual(96);
+    expect(decisionTransaction!.mutationStatements, JSON.stringify(decisionTransaction)).toBeLessThanOrEqual(28);
+    expect(materialized.visited).toBeLessThanOrEqual(16);
+    assertL2DecisionBudget(decisionTransaction!, materialized.visited);
+    expect(() => assertL2DecisionBudget({ ...decisionTransaction!, reads: 129 }, materialized.visited)).toThrow(
+      'read budget exceeded',
+    );
+    expect(() => assertL2DecisionBudget({ ...decisionTransaction!, changedRows: 97 }, materialized.visited)).toThrow(
+      'changed-row budget exceeded',
+    );
+    expect(() =>
+      assertL2DecisionBudget({ ...decisionTransaction!, mutationStatements: 29 }, materialized.visited),
+    ).toThrow('DECISION budget exceeded');
+    expect(() => assertL2DecisionBudget(decisionTransaction!, 17)).toThrow('visit budget exceeded');
     expect(materialized).toMatchObject({ visited: 1, deferred: 1, queued: 0, replay: 0, refused: 0 });
     expect(w.app.db.one("SELECT count(*) AS n FROM forward_outbox WHERE kind='unlove'")).toEqual({ n: 0 });
 
     const pausedRequestCount = w.seen.length;
-    await w.run();
+    await runForward({ ...w.rt, db: wholeDecisionTrace.db }, w.clock.nowMs());
     expect(w.seen).toHaveLength(pausedRequestCount);
     expect(w.lb.feedback).toHaveLength(1);
 
-    expect(patchLink({ db: w.app.db, clock: w.clock }, ALICE, linkId, { forwardScrobbles: true })).not.toBeNull();
-    w.app.db.run("UPDATE users SET indexing_state='current' WHERE did=?", ALICE);
-    await runLinkBackfill(w.app.db, w.rt.random, w.clock.nowMs());
-    await runLinkBackfill(w.app.db, w.rt.random, w.clock.nowMs());
+    expect(
+      patchLink({ db: wholeDecisionTrace.db, clock: w.clock }, ALICE, linkId, { forwardScrobbles: true }),
+    ).not.toBeNull();
+    wholeDecisionTrace.db.run("UPDATE users SET indexing_state='current' WHERE did=?", ALICE);
+    await runLinkBackfill(wholeDecisionTrace.db, w.rt.random, w.clock.nowMs());
+    await runLinkBackfill(wholeDecisionTrace.db, w.rt.random, w.clock.nowMs());
     w.clock.advance(SECOND);
-    await w.run();
+    await runForward({ ...w.rt, db: wholeDecisionTrace.db }, w.clock.nowMs());
     expect(w.lb.feedback.map((entry) => entry.json)).toEqual([
       { recording_mbid: MBID, score: 1 },
       { recording_mbid: MBID, score: 0 },
     ]);
     const completedAt = w.seen.length;
     w.clock.advance(SECOND);
-    await w.run();
+    await runForward({ ...w.rt, db: wholeDecisionTrace.db }, w.clock.nowMs());
     expect(w.seen).toHaveLength(completedAt);
     expect(w.lb.feedback).toHaveLength(2);
   });

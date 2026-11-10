@@ -28,6 +28,12 @@ export interface LoveApiBindingArgs {
   nowMs: number;
 }
 
+export interface LoveApiRecipientMember {
+  link_id: string;
+  generation: number;
+  state: string;
+}
+
 export interface LoveApiProjectedLove {
   artist: string;
   track: string;
@@ -129,6 +135,22 @@ function allocate(db: Db, column: 'next_binding_seq' | 'next_aggregate_seq' | 'n
   return value;
 }
 
+function allocateFact(db: Db): number {
+  ensureProofState(db);
+  const text = db.one<{ value: string }>(
+    `UPDATE love_api_proof_state
+     SET next_fact_seq=next_fact_seq+1
+     WHERE singleton=1 AND typeof(next_fact_seq)='integer' AND next_fact_seq>=1
+       AND next_fact_seq<9007199254740991
+     RETURNING CAST(next_fact_seq-1 AS TEXT) AS value`,
+  )?.value;
+  if (text === undefined || !/^[1-9][0-9]*$/.test(text)) throw new RangeError('L2 allocator next_fact_seq exhausted');
+  const value = Number(text);
+  if (!Number.isSafeInteger(value) || value < 1 || !Number.isSafeInteger(value + 1))
+    throw new RangeError('L2 allocator next_fact_seq exhausted');
+  return value;
+}
+
 /** Fence an in-flight MBID alias scan whenever API love intent membership changes. */
 export function bumpLoveApiIntentEpoch(db: Db, did: string): number {
   if (!isDid(did)) throw new TypeError('invalid L2 intent DID');
@@ -158,7 +180,7 @@ export function recordLoveApiComparisonFact(db: Db, fact: LoveApiAuthorizationFa
       fact.rev,
     );
     if (existing === null) {
-      const seq = allocate(db, 'next_fact_seq');
+      const seq = allocateFact(db);
       db.run(
         `INSERT INTO love_api_comparison_facts(authorization_uri,authorization_rev,fact_seq,action,cid,horizon_ms,conflicted,created_at_ms)
          VALUES(?,?,?,?,?,?,?,?)`,
@@ -263,30 +285,41 @@ export function prepareLoveApiDirectAbsence(
     generation: number;
     sent_operation_id: string | null;
     state: string;
+    evidence_did: string;
+    evidence_collection: string;
+    evidence_rkey: string;
+    evidence_del_rev: string | null;
+    evidence_conflict_rev: string | null;
+    evidence_expires_at_ms: number;
+    has_pending_members: number;
+    binding_uri: string | null;
+    binding_incarnation_key: string | null;
+    binding_origin: string | null;
   }>(
-    `SELECT r.link_id,r.generation,r.sent_operation_id,r.state
+    `SELECT r.link_id,r.generation,r.sent_operation_id,r.state,
+            e.did AS evidence_did,e.collection AS evidence_collection,e.rkey AS evidence_rkey,
+            e.del_rev AS evidence_del_rev,e.conflict_rev AS evidence_conflict_rev,
+            e.expires_at_ms AS evidence_expires_at_ms,
+            EXISTS(SELECT 1 FROM love_api_recipient_members m
+                   WHERE m.link_id=r.link_id AND m.generation=r.generation AND m.did=r.did
+                     AND m.uri=r.uri AND m.incarnation_key=r.incarnation_key) AS has_pending_members,
+            b.uri AS binding_uri,b.incarnation_key AS binding_incarnation_key,b.api_origin AS binding_origin
      FROM love_api_recipients r JOIN linked_accounts l ON l.id=r.link_id AND l.generation=r.generation
+     JOIN live_record_evidence e ON e.uri=r.uri
+     LEFT JOIN love_api_bindings b ON b.did=r.did AND b.operation_id=r.sent_operation_id
      WHERE r.did=? AND r.uri=? AND r.incarnation_key=? AND r.state IN ('present','sealed')`,
     args.did,
     args.uri,
     args.incarnationKey,
   );
   if (rows.length === 0) return null;
-  const evidence = db.one<{
-    did: string;
-    collection: string;
-    rkey: string;
-    del_rev: string | null;
-    conflict_rev: string | null;
-    expires_at_ms: number;
-  }>('SELECT did,collection,rkey,del_rev,conflict_rev,expires_at_ms FROM live_record_evidence WHERE uri=?', args.uri);
+  const first = rows[0]!;
   if (
-    evidence === null ||
-    evidence.did !== args.did ||
-    evidence.collection !== parsed.collection ||
-    evidence.rkey !== parsed.rkey ||
-    evidence.del_rev !== args.rev ||
-    evidence.expires_at_ms <= args.nowMs
+    first.evidence_did !== args.did ||
+    first.evidence_collection !== parsed.collection ||
+    first.evidence_rkey !== parsed.rkey ||
+    first.evidence_del_rev !== args.rev ||
+    first.evidence_expires_at_ms <= args.nowMs
   )
     return null;
   const active = recordLoveApiComparisonFact(
@@ -296,8 +329,8 @@ export function prepareLoveApiDirectAbsence(
       rev: args.rev,
       action: 'delete',
       cid: '',
-      horizonMs: evidence.expires_at_ms,
-      conflicted: evidence.conflict_rev === args.rev,
+      horizonMs: first.evidence_expires_at_ms,
+      conflicted: first.evidence_conflict_rev === args.rev,
     },
     args.nowMs,
   );
@@ -307,16 +340,11 @@ export function prepareLoveApiDirectAbsence(
     if (!Number.isSafeInteger(row.generation) || row.generation < 1 || row.state === 'released') return 'conflicted';
     let sentOrigin: Exclude<Origin, 'import'> | null = null;
     if (row.sent_operation_id !== null) {
-      const binding = db.one<{ uri: string; incarnation_key: string; api_origin: string }>(
-        'SELECT uri,incarnation_key,api_origin FROM love_api_bindings WHERE did=? AND operation_id=?',
-        args.did,
-        row.sent_operation_id,
-      );
       if (
-        binding === null ||
-        binding.uri !== args.uri ||
-        binding.incarnation_key !== args.incarnationKey ||
-        !bindingOrigin(binding.api_origin)
+        row.binding_uri !== args.uri ||
+        row.binding_incarnation_key !== args.incarnationKey ||
+        row.binding_origin === null ||
+        !bindingOrigin(row.binding_origin)
       ) {
         recordLoveApiComparisonFact(
           db,
@@ -325,31 +353,21 @@ export function prepareLoveApiDirectAbsence(
             rev: args.rev,
             action: 'delete',
             cid: '',
-            horizonMs: evidence.expires_at_ms,
+            horizonMs: first.evidence_expires_at_ms,
             conflicted: true,
           },
           args.nowMs,
         );
         return 'conflicted';
       }
-      sentOrigin = binding.api_origin;
+      sentOrigin = row.binding_origin;
     }
-    const hasPendingMembers =
-      db.one(
-        `SELECT 1 AS present FROM love_api_recipient_members
-         WHERE link_id=? AND generation=? AND did=? AND uri=? AND incarnation_key=? LIMIT 1`,
-        row.link_id,
-        row.generation,
-        args.did,
-        args.uri,
-        args.incarnationKey,
-      ) !== null;
     recipients.push({
       linkId: row.link_id,
       generation: row.generation,
       sentOperationId: row.sent_operation_id,
       sentOrigin,
-      hasPendingMembers,
+      hasPendingMembers: row.has_pending_members === 1,
     });
   }
   return {
@@ -359,7 +377,7 @@ export function prepareLoveApiDirectAbsence(
     rev: args.rev,
     action: 'delete',
     cid: '',
-    horizonMs: evidence.expires_at_ms,
+    horizonMs: first.evidence_expires_at_ms,
     nowMs: args.nowMs,
     recipients,
   };
@@ -667,7 +685,7 @@ export function sealLoveApiDirectAbsence(
   return true;
 }
 
-function memberRows(db: Db, args: LoveApiBindingArgs): Array<{ link_id: string; generation: number; state: string }> {
+function memberRows(db: Db, args: LoveApiBindingArgs): LoveApiRecipientMember[] {
   return db.all(
     `SELECT l.id AS link_id,l.generation,o.state
      FROM linked_accounts l JOIN forward_outbox o ON o.link_id=l.id AND o.generation=l.generation
@@ -681,12 +699,21 @@ function memberRows(db: Db, args: LoveApiBindingArgs): Array<{ link_id: string; 
   );
 }
 
+/** Current-generation accepted love effects eligible to bind inside the executor transaction. */
+export function currentApiLoveRecipientMembers(db: Db, args: LoveApiBindingArgs): LoveApiRecipientMember[] {
+  return memberRows(db, args);
+}
+
 function bindingOrigin(value: string): value is Exclude<Origin, 'import'> {
   return value === 'web' || value === 'lastfm' || value === 'listenbrainz';
 }
 
 /** Bind one exact API operation to a present incarnation and current B2 generations atomically. */
-export function bindApiLoveOperation(db: Db, args: LoveApiBindingArgs): boolean {
+export function bindApiLoveOperation(
+  db: Db,
+  args: LoveApiBindingArgs,
+  acceptedMembers?: readonly LoveApiRecipientMember[],
+): boolean {
   return db.tx(() => {
     const parsed = parseRecordUri(args.uri);
     if (
@@ -722,7 +749,7 @@ export function bindApiLoveOperation(db: Db, args: LoveApiBindingArgs): boolean 
     )
       return false;
 
-    const links = memberRows(db, args);
+    const links = acceptedMembers ?? memberRows(db, args);
     const prepared = links.map((link) => {
       if (!Number.isSafeInteger(link.generation) || link.generation < 1)
         throw new RangeError('invalid link generation');

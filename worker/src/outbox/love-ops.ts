@@ -38,6 +38,7 @@ import {
   bindApiLoveCreatedOperation,
   bindApiLoveOperation,
   bumpLoveApiIntentEpoch,
+  currentApiLoveRecipientMembers,
 } from '../forward/love-api-recipients';
 import { admitForwardIdentity } from '../forward/projection';
 import { bindPullLoveAdmission, retirePullLoveAdmissions } from '../sync/pull-love-admissions';
@@ -471,15 +472,17 @@ export const lovePutExecutor: Executor = {
         });
       }
       if (accepted?.path === 'api' && currentIncarnation !== null) {
-        const bound = bindApiLoveOperation(ctx.m.db, {
+        const bindingArgs = {
           did: op.did,
           uri: existing.uri,
           incarnationKey: currentIncarnation.incarnation_key,
           operationId: op.id,
           admissionIdentityKey: `love-uri:${op.did}:${op.collection}:${op.rkey}`,
           nowMs: ctx.m.clock.nowMs(),
-        });
-        if (!bound) throw new Error('API love recipient binding refused');
+        };
+        const recipientMembers = currentApiLoveRecipientMembers(ctx.m.db, bindingArgs);
+        if (recipientMembers.length > 0 && !bindApiLoveOperation(ctx.m.db, bindingArgs, recipientMembers))
+          throw new Error('API love recipient binding refused');
       }
       ctx.m.db.run(
         'DELETE FROM forward_admissions WHERE did=? AND identity_key=?',

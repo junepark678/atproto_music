@@ -1,11 +1,13 @@
 // Loves through the server outbox (ADR 0005 §5.8, §6.3, §7.8; N2-05): one
 // love per (artist_key, track_key), and unlove mirrors unfollow.
 
+import { writeFileSync } from 'node:fs';
 import { verifyRecordProof } from '@atmusic/atproto/verify/record-proof';
 import { seededRandom } from '@atmusic/core/test-support/random';
 import { fromMs } from '@atmusic/core/timestamp';
 import { expect, it } from 'vitest';
 import type { Db, SqlParam } from '../../../src/do/db';
+import { cachedIdentityResolver } from '../../../src/do/ingest/identity-cache';
 import { recordLiveEvidence } from '../../../src/do/ingest/live-evidence';
 import { applyRecordProof } from '../../../src/do/write/apply-record';
 import { settleRows } from '../../../src/forward/forward-outbox';
@@ -21,36 +23,204 @@ function love(artist: string, track: string) {
 }
 
 const projectionRandom = seededRandom(27);
+const API_PARENT_REUSE_TRACE = {
+  source: '5d573706bf07bb50e0c8b79cf1d34a3f6c56a975',
+  reads: 26,
+  changedRows: 13,
+  recipients: 1,
+} as const;
+const API_PARENT_SCALE_TRACE = {
+  0: { reads: 22, changedRows: 9 },
+  2: { reads: 30, changedRows: 17 },
+} as const;
+const API_PARENT_PARTIAL_DELETE_TRACE = {
+  source: '5d573706bf07bb50e0c8b79cf1d34a3f6c56a975',
+  reads: 15,
+  mutationStatements: 15,
+  changedRows: 8,
+  returnedRows: 10,
+} as const;
+const API_N1_ALLOWED_DELTA = { reads: 12, changedRows: 11 } as const;
+const API_N1_MEASURED_DELTA = { reads: 10, changedRows: 9 } as const;
+const API_N2_MARGINAL_REFERENCE = { reads: 3, changedRows: 4 } as const;
+const API_N2_TOTAL_ALLOWED = {
+  reads: API_N1_ALLOWED_DELTA.reads + API_N2_MARGINAL_REFERENCE.reads + 1,
+  changedRows: API_N1_ALLOWED_DELTA.changedRows + API_N2_MARGINAL_REFERENCE.changedRows + 1,
+} as const;
+
+function assertApiPathBounds(recipientCount: 0 | 1 | 2, addedReads: number, addedChangedRows: number): void {
+  if (recipientCount === 0) {
+    if (addedReads > 3) throw new Error('N0 API read bound exceeded');
+    if (addedChangedRows > 2) throw new Error('N0 API changed-row bound exceeded');
+    return;
+  }
+  if (recipientCount === 1) {
+    if (addedReads > API_N1_ALLOWED_DELTA.reads) throw new Error('N1 API read bound exceeded');
+    if (addedChangedRows > API_N1_ALLOWED_DELTA.changedRows) throw new Error('N1 API changed-row bound exceeded');
+    return;
+  }
+  if (addedReads > API_N2_TOTAL_ALLOWED.reads) throw new Error('N2 API total read bound exceeded');
+  if (addedChangedRows > API_N2_TOTAL_ALLOWED.changedRows) throw new Error('N2 API total changed-row bound exceeded');
+  if (addedReads - API_N1_MEASURED_DELTA.reads > API_N2_MARGINAL_REFERENCE.reads)
+    throw new Error('N2 API marginal read bound exceeded');
+  if (addedChangedRows - API_N1_MEASURED_DELTA.changedRows > API_N2_MARGINAL_REFERENCE.changedRows)
+    throw new Error('N2 API marginal changed-row bound exceeded');
+}
+
+it('trips each measured API-path delta guard on its intended bound', () => {
+  expect(() => assertApiPathBounds(0, 4, 2)).toThrow('N0 API read bound exceeded');
+  expect(() => assertApiPathBounds(0, 3, 3)).toThrow('N0 API changed-row bound exceeded');
+  expect(() => assertApiPathBounds(1, 13, 11)).toThrow('N1 API read bound exceeded');
+  expect(() => assertApiPathBounds(1, 12, 12)).toThrow('N1 API changed-row bound exceeded');
+  expect(() => assertApiPathBounds(2, 14, 13)).toThrow('N2 API marginal read bound exceeded');
+  expect(() => assertApiPathBounds(2, 13, 14)).toThrow('N2 API marginal changed-row bound exceeded');
+  expect(() => assertApiPathBounds(2, 17, 16)).toThrow('N2 API total read bound exceeded');
+  expect(() => assertApiPathBounds(2, 16, 17)).toThrow('N2 API total changed-row bound exceeded');
+});
 
 function traceDb(raw: Db): {
   db: Db;
-  result: () => { reads: number; mutationStatements: number; returnedRows: number; changedRows: number };
+  result: () => {
+    reads: number;
+    mutationStatements: number;
+    returnedRows: number;
+    changedRows: number;
+    statements: Array<{
+      method: 'all' | 'one' | 'run';
+      source: string;
+      sql: string;
+      returnedRows: number;
+      changedRows: number;
+    }>;
+    transactions: Array<{
+      name: string;
+      parentName: string | null;
+      depth: number;
+      inclusive: true;
+      reads: number;
+      mutationStatements: number;
+      changedRows: number;
+      returnedRows: number;
+      nestedTransactions: number;
+      nestedOwners: string[];
+    }>;
+  };
 } {
   let reads = 0;
   let mutationStatements = 0;
   let returnedRows = 0;
+  const statements: Array<{
+    method: 'all' | 'one' | 'run';
+    source: string;
+    sql: string;
+    returnedRows: number;
+    changedRows: number;
+  }> = [];
+  const active: Array<{
+    name: string;
+    parentName: string | null;
+    depth: number;
+    before: number;
+    reads: number;
+    mutationStatements: number;
+    returnedRows: number;
+    nestedTransactions: number;
+    nestedOwners: string[];
+  }> = [];
+  const transactions: Array<{
+    name: string;
+    parentName: string | null;
+    depth: number;
+    inclusive: true;
+    reads: number;
+    mutationStatements: number;
+    changedRows: number;
+    returnedRows: number;
+    nestedTransactions: number;
+    nestedOwners: string[];
+  }> = [];
   const mutation = /^\s*(?:INSERT|UPDATE|DELETE|REPLACE)\b/i;
+  const callsite = () =>
+    new Error().stack
+      ?.split('\n')
+      .slice(2)
+      .find((line) => line.includes('/worker/src/'))
+      ?.trim() ?? 'test-owned transaction';
+  const account = (sql: string, count: number, method: 'all' | 'one' | 'run', changedRows: number) => {
+    if (mutation.test(sql)) {
+      mutationStatements++;
+      for (const frame of active) frame.mutationStatements++;
+    } else {
+      reads++;
+      for (const frame of active) frame.reads++;
+    }
+    returnedRows += count;
+    for (const frame of active) frame.returnedRows += count;
+    const source =
+      new Error().stack
+        ?.split('\n')
+        .find((line) => line.includes('/worker/src/'))
+        ?.trim() ?? 'test-owned';
+    statements.push({ method, source, sql, returnedRows: count, changedRows });
+  };
   const before = raw.one<{ n: number }>('SELECT total_changes() AS n')!.n;
   const db: Db = {
     all<T>(sql: string, ...params: SqlParam[]): T[] {
-      if (mutation.test(sql)) mutationStatements++;
-      else reads++;
+      const changesBefore = raw.one<{ n: number }>('SELECT total_changes() AS n')!.n;
       const rows = raw.all<T>(sql, ...params);
-      returnedRows += rows.length;
+      const changesAfter = raw.one<{ n: number }>('SELECT total_changes() AS n')!.n;
+      account(sql, rows.length, 'all', changesAfter - changesBefore);
       return rows;
     },
     one<T>(sql: string, ...params: SqlParam[]): T | null {
-      reads++;
+      const changesBefore = raw.one<{ n: number }>('SELECT total_changes() AS n')!.n;
       const row = raw.one<T>(sql, ...params);
-      if (row !== null) returnedRows++;
+      const changesAfter = raw.one<{ n: number }>('SELECT total_changes() AS n')!.n;
+      account(sql, row === null ? 0 : 1, 'one', changesAfter - changesBefore);
       return row;
     },
     run(sql: string, ...params: SqlParam[]) {
-      mutationStatements++;
-      return raw.run(sql, ...params);
+      const changesBefore = raw.one<{ n: number }>('SELECT total_changes() AS n')!.n;
+      const result = raw.run(sql, ...params);
+      const changesAfter = raw.one<{ n: number }>('SELECT total_changes() AS n')!.n;
+      account(sql, 0, 'run', changesAfter - changesBefore);
+      return result;
     },
     tx<T>(fn: () => T extends Promise<unknown> ? never : T): T {
-      return raw.tx(fn);
+      const transaction = {
+        name: callsite(),
+        parentName: active.at(-1)?.name ?? null,
+        depth: active.length,
+        before: raw.one<{ n: number }>('SELECT total_changes() AS n')!.n,
+        reads: 0,
+        mutationStatements: 0,
+        returnedRows: 0,
+        nestedTransactions: 0,
+        nestedOwners: [] as string[],
+      };
+      for (const frame of active) {
+        frame.nestedTransactions++;
+        frame.nestedOwners.push(transaction.name);
+      }
+      active.push(transaction);
+      try {
+        return raw.tx(fn);
+      } finally {
+        const after = raw.one<{ n: number }>('SELECT total_changes() AS n')!.n;
+        transactions.push({
+          name: transaction.name,
+          parentName: transaction.parentName,
+          depth: transaction.depth,
+          inclusive: true,
+          reads: transaction.reads,
+          mutationStatements: transaction.mutationStatements,
+          changedRows: after - transaction.before,
+          returnedRows: transaction.returnedRows,
+          nestedTransactions: transaction.nestedTransactions,
+          nestedOwners: transaction.nestedOwners,
+        });
+        active.pop();
+      }
     },
   };
   return {
@@ -60,6 +230,8 @@ function traceDb(raw: Db): {
       mutationStatements,
       returnedRows,
       changedRows: raw.one<{ n: number }>('SELECT total_changes() AS n')!.n - before,
+      transactions,
+      statements,
     }),
   };
 }
@@ -244,6 +416,12 @@ for (const origin of ['web', 'lastfm', 'listenbrainz'] as const) {
         path: 'snapshot',
       });
       const linkId = h.link(h.alice, 'lastfm');
+      const apiPathTrace = traceDb(h.db);
+      h.m = {
+        ...h.m,
+        db: apiPathTrace.db,
+        identity: cachedIdentityResolver(apiPathTrace.db, { transport: h.m.transport, clock: h.m.clock }),
+      };
       const reused = await enqueueLove(h.m, {
         did: h.alice,
         input: { artist: 'Bound artist', track: 'Bound track' },
@@ -251,6 +429,38 @@ for (const origin of ['web', 'lastfm', 'listenbrainz'] as const) {
       });
       if (!reused.ok) throw new Error(JSON.stringify(reused.reason));
       await h.runUntilIdle();
+      if (origin === 'web' && process.env.FINDING32_API_PHASE_TRACE_FILE !== undefined) {
+        const metric = apiPathTrace.result();
+        const boundRecipients =
+          h.db.one<{ n: number }>('SELECT count(*) AS n FROM love_api_recipients WHERE did=?', h.alice)?.n ?? 0;
+        const apiTransactionRows = metric.transactions.filter(
+          (row) =>
+            row.name.includes('enqueueLove') ||
+            row.name.includes('bindApiLoveOperation') ||
+            row.nestedOwners.some((owner) => owner.includes('bindApiLoveOperation')),
+        );
+        writeFileSync(
+          process.env.FINDING32_API_PHASE_TRACE_FILE,
+          JSON.stringify({ boundRecipients, apiTransactionRows, lifecycleInformational: metric }, null, 2),
+          'utf8',
+        );
+      }
+      if (origin === 'web') {
+        const metric = apiPathTrace.result();
+        const boundRecipients =
+          h.db.one<{ n: number }>('SELECT count(*) AS n FROM love_api_recipients WHERE did=?', h.alice)?.n ?? 0;
+        const addedReads = metric.reads - API_PARENT_REUSE_TRACE.reads;
+        const addedChangedRows = metric.changedRows - API_PARENT_REUSE_TRACE.changedRows;
+        expect(
+          () => assertApiPathBounds(1, addedReads, addedChangedRows),
+          JSON.stringify({
+            source: API_PARENT_REUSE_TRACE.source,
+            baseline: API_PARENT_REUSE_TRACE,
+            current: metric,
+            boundRecipients,
+          }),
+        ).not.toThrow();
+      }
       const binding = h.db.one<{ api_origin: string; uri: string; incarnation_key: string }>(
         'SELECT api_origin,uri,incarnation_key FROM love_api_bindings WHERE did=? AND operation_id=?',
         h.alice,
@@ -277,6 +487,127 @@ for (const origin of ['web', 'lastfm', 'listenbrainz'] as const) {
     });
   });
 }
+
+for (const recipientCount of [0, 2] as const) {
+  it(`traces actual reused-snapshot API acceptance with ${recipientCount} recipient links`, async () => {
+    await withHarness(async (h) => {
+      h.seedUser(h.alice);
+      const projectionRkey = `3kapi${recipientCount}bound`;
+      await h.kit.externalPut('Alice', LOVE, projectionRkey, love('Bound artist', 'Bound track'));
+      expect((await projectLove(h, projectionRkey)).outcome).toBe('applied');
+      if (recipientCount > 0) h.link(h.alice, 'listenbrainz');
+      if (recipientCount > 1) h.link(h.alice, 'lastfm');
+      const apiPathTrace = traceDb(h.db);
+      h.m = {
+        ...h.m,
+        db: apiPathTrace.db,
+        identity: cachedIdentityResolver(apiPathTrace.db, { transport: h.m.transport, clock: h.m.clock }),
+      };
+      const accepted = await enqueueLove(h.m, {
+        did: h.alice,
+        input: { artist: 'Bound artist', track: 'Bound track' },
+        origin: 'web',
+      });
+      if (!accepted.ok) throw new Error(JSON.stringify(accepted.reason));
+      await h.runUntilIdle();
+      const actualRecipients =
+        h.db.one<{ n: number }>('SELECT count(*) AS n FROM love_api_recipients WHERE did=?', h.alice)?.n ?? 0;
+      expect(actualRecipients).toBe(recipientCount);
+      const metric = apiPathTrace.result();
+      const parent = API_PARENT_SCALE_TRACE[recipientCount];
+      const addedReads = metric.reads - parent.reads;
+      const addedChangedRows = metric.changedRows - parent.changedRows;
+      assertApiPathBounds(recipientCount, addedReads, addedChangedRows);
+      if (process.env.FINDING32_API_SCALE_TRACE_DIR !== undefined) {
+        writeFileSync(
+          `${process.env.FINDING32_API_SCALE_TRACE_DIR}/current-n${recipientCount}.json`,
+          JSON.stringify({ recipientCount, parent, addedReads, addedChangedRows, metric }, null, 2),
+          'utf8',
+        );
+      }
+    });
+  });
+}
+
+it('traces the actual API love partial-delete comparison hook transaction', async () => {
+  await withHarness(async (h) => {
+    h.seedUser(h.alice);
+    h.link(h.alice, 'lastfm');
+    const rkey = '3kpartialmeter';
+    await h.kit.externalPut('Alice', LOVE, rkey, love('Meter artist', 'Meter track'));
+    expect((await projectLove(h, rkey)).outcome).toBe('applied');
+    const reused = await enqueueLove(h.m, {
+      did: h.alice,
+      input: { artist: 'Meter artist', track: 'Meter track' },
+      origin: 'web',
+    });
+    if (!reused.ok) throw new Error(JSON.stringify(reused.reason));
+    await h.runUntilIdle();
+
+    await h.kit.externalDelete('Alice', LOVE, rkey);
+    const absentCar = await h.kit.repos.Alice.getRecordCar(LOVE, rkey);
+    const absentProof = await verifyRecordProof(absentCar, {
+      did: h.alice,
+      collection: LOVE,
+      rkey,
+      signingKey: h.kit.users.Alice.key.didKey,
+    });
+    const traced = traceDb(h.db);
+    recordLiveEvidence(
+      traced.db,
+      {
+        uri: `at://${h.alice}/${LOVE}/${rkey}`,
+        did: h.alice,
+        collection: LOVE,
+        rkey,
+        rev: absentProof.commit.rev,
+        action: 'delete',
+      },
+      h.m.clock.nowMs(),
+    );
+    const nowNs = fromMs(h.m.clock.nowMs());
+    const applyOptions = authorizedLiveOptions(traced.db, absentProof, projectionRandom);
+    const result = traced.db.tx(() =>
+      applyRecordProof(traced.db, absentProof, {
+        ...applyOptions,
+        nowNs,
+        receiptNs: nowNs,
+      }),
+    );
+    expect(result.outcome).toBe('absent');
+    const metric = traced.result();
+    if (process.env.FINDING32_PARTIAL_DELETE_TRACE_FILE !== undefined)
+      writeFileSync(
+        process.env.FINDING32_PARTIAL_DELETE_TRACE_FILE,
+        JSON.stringify({ metric, result, fact: h.db.one('SELECT * FROM love_api_comparison_facts') }, null, 2),
+        'utf8',
+      );
+    const factHook = metric.transactions.find((transaction) =>
+      transaction.name.includes('recordLoveApiComparisonFact'),
+    );
+    expect(factHook).toBeDefined();
+    const loveApiStatements = metric.statements.filter((statement) =>
+      statement.source.includes('/forward/love-api-recipients.ts:'),
+    );
+    const completeHook = {
+      reads: loveApiStatements.filter((statement) => !/^\s*(?:INSERT|UPDATE|DELETE|REPLACE)\b/i.test(statement.sql))
+        .length,
+      mutationStatements: loveApiStatements.filter((statement) =>
+        /^\s*(?:INSERT|UPDATE|DELETE|REPLACE)\b/i.test(statement.sql),
+      ).length,
+      changedRows: loveApiStatements.reduce((sum, statement) => sum + statement.changedRows, 0),
+    };
+    expect(completeHook).toEqual({ reads: 2, mutationStatements: 3, changedRows: 2 });
+    expect(factHook!.reads).toBeLessThanOrEqual(2);
+    expect(factHook!.mutationStatements).toBeLessThanOrEqual(3);
+    expect(factHook!.changedRows).toBeLessThanOrEqual(2);
+    expect(metric.reads - API_PARENT_PARTIAL_DELETE_TRACE.reads).toBe(completeHook.reads);
+    expect(metric.mutationStatements - API_PARENT_PARTIAL_DELETE_TRACE.mutationStatements).toBe(
+      completeHook.mutationStatements,
+    );
+    expect(metric.changedRows - API_PARENT_PARTIAL_DELETE_TRACE.changedRows).toBe(completeHook.changedRows);
+  });
+});
 
 it('binds an API operation to a present import incarnation without treating API origin as an exclusion', async () => {
   await withHarness(async (h) => {
