@@ -4,20 +4,29 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { expect, test } from 'vitest';
+import { expect, test, vi } from 'vitest';
 import { MIN_CDP_CONNECT_MS, startOwnedChromium } from '../live/owned-chromium.ts';
 
 const require = createRequire(fileURLToPath(new URL('../../package.json', import.meta.url)));
-const chromiumExecutable = require('@playwright/test').chromium.executablePath() as string;
+const { chromium } = require('@playwright/test') as typeof import('@playwright/test');
+const chromiumExecutable = chromium.executablePath();
 const tsx = require.resolve('tsx/cli') as string;
 const driver = fileURLToPath(new URL('./owned-chromium-driver.ts', import.meta.url));
 
-function processExists(pid: number): boolean {
+function processExists(pid: number, group = false): boolean {
   try {
-    process.kill(pid, 0);
+    process.kill(group ? -pid : pid, 0);
     return true;
   } catch (error) {
     return (error as NodeJS.ErrnoException).code !== 'ESRCH';
+  }
+}
+
+function killGroupForCleanup(pid: number): void {
+  try {
+    process.kill(-pid, 'SIGKILL');
+  } catch {
+    // terminate() below owns confirmation; this is only a final best-effort guard.
   }
 }
 
@@ -47,12 +56,55 @@ test('an unresponsive owned startup process is killed and reaped before ready re
   const pid = Number(await readFile(pidFile, 'utf8'));
   expect(performance.now() - startedAt).toBeLessThan(2_200);
   expect(processExists(pid)).toBe(false);
+  expect(processExists(pid, true)).toBe(false);
   expect(await launch.terminate()).toMatchObject({
     processStopped: true,
     profileRemoved: true,
     connectionSettled: true,
   });
   await rm(evidenceDir, { recursive: true, force: true });
+});
+
+test('a pre-ready connection rejection cannot satisfy ready-and-stopped lifecycle coverage', async () => {
+  await expect(
+    access(chromiumExecutable),
+    'installed local Chromium is required for lifecycle acceptance',
+  ).resolves.toBeUndefined();
+  const connect = vi
+    .spyOn(chromium, 'connectOverCDP')
+    .mockRejectedValue(new Error('controlled CDP rejection before ready'));
+  const deadline = deadlines(2_000, 2_500);
+  const launch = startOwnedChromium({ interactive: false, ...deadline });
+  let readyFulfilled = false;
+  let sigstopSucceeded = false;
+  const readyWithStopWitness = launch.ready.then((browser) => {
+    readyFulfilled = true;
+    if (launch.pid === undefined) throw new Error('owned Chromium PID is missing after ready');
+    process.kill(-launch.pid, 'SIGSTOP');
+    sigstopSucceeded = true;
+    return browser;
+  });
+  try {
+    await expect(readyWithStopWitness).rejects.toThrow('controlled CDP rejection before ready');
+    const status = await launch.terminate();
+    const evidence = { readyFulfilled, sigstopSucceeded, status };
+    expect(readyFulfilled, JSON.stringify(evidence)).toBe(false);
+    expect(sigstopSucceeded, JSON.stringify(evidence)).toBe(false);
+    expect(status, JSON.stringify(evidence)).toEqual({
+      processStopped: true,
+      profileRemoved: true,
+      connectionSettled: true,
+    });
+    expect(processExists(launch.pid!)).toBe(false);
+    expect(processExists(launch.pid!, true)).toBe(false);
+    await expect(access(launch.root)).rejects.toMatchObject({ code: 'ENOENT' });
+  } finally {
+    connect.mockRestore();
+    if (launch.pid !== undefined) killGroupForCleanup(launch.pid);
+    await launch.terminate();
+    await launch.ready.catch(() => undefined);
+    await rm(launch.root, { recursive: true, force: true });
+  }
 });
 
 test('actual Chromium cancellation exits promptly and leaves no profile or referenced transport handle', async () => {
@@ -77,6 +129,7 @@ test('actual Chromium cancellation exits promptly and leaves no profile or refer
     expect(payload.lifecycleMs, `${scenario} lifecycle`).toBeLessThan(2_000);
     expect(payload.status).toEqual({ processStopped: true, profileRemoved: true, connectionSettled: true });
     expect(() => process.kill(payload.pid, 0)).toThrow();
+    expect(() => process.kill(-payload.pid, 0)).toThrow();
     await expect(access(payload.root)).rejects.toMatchObject({ code: 'ENOENT' });
   }
 });
@@ -95,6 +148,7 @@ test('CDP connection is never started below the minimum remaining budget', async
   await expect(launch.ready).rejects.toThrow(/budget exhausted/);
   const status = await launch.terminate();
   expect(status).toMatchObject({ processStopped: true, profileRemoved: true, connectionSettled: true });
+  expect(processExists(launch.pid!, true)).toBe(false);
   expect(MIN_CDP_CONNECT_MS).toBe(100);
 });
 

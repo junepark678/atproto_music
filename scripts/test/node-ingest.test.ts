@@ -1,4 +1,5 @@
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { access, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
@@ -24,6 +25,28 @@ import { OAUTH_ENV } from '../live/workers_oauth_check.ts';
 
 const REPO = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const TSX = createRequire(resolve(REPO, 'package.json')).resolve('tsx/cli');
+
+const ownedRmBarriers = vi.hoisted(() => ({
+  beforeRm: null as null | ((path: string) => Promise<void>),
+  afterRm: null as null | ((path: string) => void),
+}));
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    rm: async (...args: Parameters<typeof actual.rm>) => {
+      const path = String(args[0]);
+      await ownedRmBarriers.beforeRm?.(path);
+      try {
+        return await actual.rm(...args);
+      } finally {
+        ownedRmBarriers.afterRm?.(path);
+      }
+    },
+  };
+});
+
 const DID_A = 'did:plc:abcdefghijklmnopqrstuvwx';
 const DID_B = 'did:plc:zyxwvutsrqponmlkjihgfedc';
 const URI_A = `at://${DID_A}/org.atproto.music.scrobble/3jzfcijpj2z2a`;
@@ -71,6 +94,14 @@ function makeContext(
     block: () => undefined,
     cleanup: (message) => cleanup.push(message),
   };
+}
+
+function killGroupForCleanup(pid: number): void {
+  try {
+    process.kill(-pid, 'SIGKILL');
+  } catch {
+    // terminate() below owns confirmation; this is only a final best-effort guard.
+  }
 }
 
 function ioCapture() {
@@ -838,15 +869,20 @@ test('Node ingest reaps the actual owned startup process before returning timeou
   await rm(fixtureDir, { recursive: true, force: true });
 });
 
-test('a stalled actual owned Chromium is killed within the ingest teardown reserve', async () => {
+test('a stopped ready Chromium is killed within the ingest deadline and its profile is confirmed removed', async () => {
   const { deps } = mockDependencies();
   let owned: ReturnType<typeof startOwnedChromium> | undefined;
+  let readyFulfilled = false;
+  let sigstopSucceeded = false;
   deps.startBrowser = (launchDeadlineAt, cleanupDeadlineAt) => {
     owned = startOwnedChromium({ interactive: false, launchDeadlineAt, cleanupDeadlineAt });
     return {
       ...owned,
       ready: owned.ready.then((browser) => {
-        if (owned?.pid !== undefined) process.kill(-owned.pid, 'SIGSTOP');
+        readyFulfilled = true;
+        if (owned?.pid === undefined) throw new Error('owned Chromium PID is missing after ready');
+        process.kill(-owned.pid, 'SIGSTOP');
+        sigstopSucceeded = true;
         return browser;
       }),
     };
@@ -854,16 +890,154 @@ test('a stalled actual owned Chromium is killed within the ingest teardown reser
   const failures: string[] = [];
   const cleanup: string[] = [];
   const startedAt = performance.now();
-  await runNodeIngest(makeContext(failures, cleanup, { ...goodEnv, [NODE_INGEST_ENV.timeoutSeconds]: '3' }), deps);
-  const elapsedMs = performance.now() - startedAt;
+  let ingest: Promise<Awaited<ReturnType<typeof runNodeIngest>>> | undefined;
+  try {
+    ingest = runNodeIngest(makeContext(failures, cleanup, { ...goodEnv, [NODE_INGEST_ENV.timeoutSeconds]: '3' }), deps);
+    await ingest;
+    const elapsedMs = performance.now() - startedAt;
+    expect(owned).toBeDefined();
+    const launch = owned!;
+    const status = await launch.terminate();
+    const evidence = {
+      readyFulfilled,
+      sigstopSucceeded,
+      status,
+      failures,
+      cleanup,
+      rootExists: existsSync(launch.root),
+    };
+    expect(elapsedMs, JSON.stringify(evidence)).toBeLessThan(3_100);
+    expect(readyFulfilled, JSON.stringify(evidence)).toBe(true);
+    expect(sigstopSucceeded, JSON.stringify(evidence)).toBe(true);
+    expect(status, JSON.stringify(evidence)).toEqual({
+      processStopped: true,
+      connectionSettled: true,
+      profileRemoved: true,
+    });
+    expect(() => process.kill(launch.pid!, 0), JSON.stringify(evidence)).toThrow();
+    expect(() => process.kill(-launch.pid!, 0), JSON.stringify(evidence)).toThrow();
+    await expect(access(launch.root), JSON.stringify(evidence)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(failures).not.toContain('owned browser process termination was not confirmed during teardown');
+    expect(cleanup).not.toContain(
+      'owned browser temporary profile removal was not confirmed; inspect the runner temp directory',
+    );
+  } finally {
+    if (ingest !== undefined) await ingest.catch(() => undefined);
+    if (owned !== undefined) {
+      killGroupForCleanup(owned.pid!);
+      await owned.terminate();
+      await owned.ready.catch(() => undefined);
+      await rm(owned.root, { recursive: true, force: true });
+    }
+  }
+});
 
-  expect(owned).toBeDefined();
-  expect(elapsedMs).toBeLessThan(3_100);
-  expect(failures).not.toContain('owned browser process termination was not confirmed during teardown');
-  expect(cleanup).not.toContain('owned browser process termination was not confirmed; inspect the runner process');
-  expect(owned!.pid).toBeDefined();
-  expect(() => process.kill(owned!.pid!, 0)).toThrow();
-  await expect(access(owned!.root)).rejects.toMatchObject({ code: 'ENOENT' });
+test('a deadline-expired root removal reports failure until the held real removal completes', async () => {
+  const { deps } = mockDependencies();
+  let owned: ReturnType<typeof startOwnedChromium> | undefined;
+  let readyFulfilled = false;
+  let sigstopSucceeded = false;
+  let rootToHold: string | undefined;
+  let rootRmStarted = false;
+  let rootRmSettled = false;
+  let releaseRootRm!: () => void;
+  const rootRmBarrier = new Promise<void>((resolve) => {
+    releaseRootRm = resolve;
+  });
+  let resolveRootRmSettled!: () => void;
+  const rootRmDone = new Promise<void>((resolve) => {
+    resolveRootRmSettled = resolve;
+  });
+  ownedRmBarriers.beforeRm = async (path) => {
+    if (path === rootToHold) {
+      rootRmStarted = true;
+      await rootRmBarrier;
+    }
+  };
+  ownedRmBarriers.afterRm = (path) => {
+    if (path === rootToHold) {
+      rootRmSettled = true;
+      resolveRootRmSettled();
+    }
+  };
+  deps.startBrowser = (launchDeadlineAt, cleanupDeadlineAt) => {
+    owned = startOwnedChromium({ interactive: false, launchDeadlineAt, cleanupDeadlineAt });
+    rootToHold = owned.root;
+    return {
+      ...owned,
+      ready: owned.ready.then((browser) => {
+        readyFulfilled = true;
+        if (owned?.pid === undefined) throw new Error('owned Chromium PID is missing after ready');
+        process.kill(-owned.pid, 'SIGSTOP');
+        sigstopSucceeded = true;
+        return browser;
+      }),
+    };
+  };
+  const failures: string[] = [];
+  const cleanup: string[] = [];
+  const startedAt = performance.now();
+  let ingest: Promise<Awaited<ReturnType<typeof runNodeIngest>>> | undefined;
+  try {
+    ingest = runNodeIngest(makeContext(failures, cleanup, { ...goodEnv, [NODE_INGEST_ENV.timeoutSeconds]: '3' }), deps);
+    await ingest;
+    const elapsedMs = performance.now() - startedAt;
+    expect(owned).toBeDefined();
+    const launch = owned!;
+    const status = await launch.terminate();
+    const rootExistsOnReturn = existsSync(launch.root);
+    const evidence = {
+      readyFulfilled,
+      sigstopSucceeded,
+      rootRmStarted,
+      rootRmSettled,
+      status,
+      rootExistsOnReturn,
+      failures,
+      cleanup,
+    };
+    expect(elapsedMs, JSON.stringify(evidence)).toBeLessThan(3_100);
+    expect(readyFulfilled, JSON.stringify(evidence)).toBe(true);
+    expect(sigstopSucceeded, JSON.stringify(evidence)).toBe(true);
+    expect(rootRmStarted, JSON.stringify(evidence)).toBe(true);
+    expect(rootRmSettled, JSON.stringify(evidence)).toBe(false);
+    expect(status, JSON.stringify(evidence)).toEqual({
+      processStopped: true,
+      connectionSettled: true,
+      profileRemoved: false,
+    });
+    expect(() => process.kill(launch.pid!, 0), JSON.stringify(evidence)).toThrow();
+    expect(() => process.kill(-launch.pid!, 0), JSON.stringify(evidence)).toThrow();
+    expect(rootExistsOnReturn, JSON.stringify(evidence)).toBe(true);
+    expect(
+      failures.some((failure) => failure.startsWith('Node ingest failed during ')),
+      JSON.stringify(evidence),
+    ).toBe(true);
+    expect(failures).toContain('owned browser temporary profile removal was not confirmed during teardown');
+    expect(cleanup).toContain(
+      'owned browser temporary profile removal was not confirmed; inspect the runner temp directory',
+    );
+    expect(failures).not.toContain('owned browser process termination was not confirmed during teardown');
+
+    releaseRootRm();
+    await rootRmDone;
+    expect(existsSync(launch.root)).toBe(false);
+  } finally {
+    releaseRootRm();
+    if (ingest !== undefined) await ingest.catch(() => undefined);
+    if (owned !== undefined) {
+      killGroupForCleanup(owned.pid!);
+      await owned.terminate();
+      await owned.ready.catch(() => undefined);
+      if (rootRmStarted) await rootRmDone;
+      ownedRmBarriers.beforeRm = null;
+      ownedRmBarriers.afterRm = null;
+      await rm(owned.root, { recursive: true, force: true });
+    } else {
+      ownedRmBarriers.beforeRm = null;
+      ownedRmBarriers.afterRm = null;
+    }
+  }
 });
 
 test.each([1_100, 1_500])('browser startup scheduled at %d ms is canceled at the launch deadline', async (launchMs) => {
