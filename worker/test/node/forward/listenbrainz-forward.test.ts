@@ -2257,7 +2257,7 @@ it('review: external unlove retains its known MBID after terminal forward GC', a
   expect(w.rows().find((r) => r.kind === 'unlove')?.state).toBe('sent');
 });
 
-it.fails('known residual: source-excluded pull love plus verified survivor must suppress premature unlove', async () => {
+it.fails('known inherited: a verified live delete sends unlove while a same-track projection survives', async () => {
   const { SignedRepo } = await import('@atmusic/atproto/test-support/signed-repo');
   const { fixtureKeys } = await import('@atmusic/atproto/test-support/keys');
   const { applyRecordProof } = await import('../../../src/do/write/apply-record');
@@ -2318,6 +2318,7 @@ it.fails('known residual: source-excluded pull love plus verified survivor must 
       .filter((row) => row.kind === 'love')
       .map((row) => row.link_id),
   ).toEqual([targetLinkId]);
+  const importedLoveKey = w.rows().find((row) => row.kind === 'love')!.dedupe_key;
   await w.run();
   expect(w.lb.feedback.map((entry) => entry.json)).toEqual([{ recording_mbid: recordingMbid, score: 1 }]);
 
@@ -2360,6 +2361,8 @@ it.fails('known residual: source-excluded pull love plus verified survivor must 
     );
   };
 
+  // These are independent live URIs, not a projection of the queued import
+  // operation. Its source exclusion does not propagate to their transitions.
   const first = await putProof(repo, collection, 'projection-survivor-a', makeRecord('2026-01-15T12:01:00Z'));
   await applyVerified(first, 'create', 'projection-survivor-a');
   const second = await putProof(repo, collection, 'projection-survivor-b', makeRecord('2026-01-15T12:02:00Z'));
@@ -2391,5 +2394,10 @@ it.fails('known residual: source-excluded pull love plus verified survivor must 
     { recording_mbid: recordingMbid, score: 0 },
   ]);
   expect(w.rows().filter((row) => row.kind === 'unlove' && row.state === 'sent')).toHaveLength(1);
-  expect(w.rows().some((row) => row.link_id === sourceLinkId)).toBe(false);
+  expect(
+    w
+      .rows()
+      .filter((row) => row.kind === 'love' && row.dedupe_key === importedLoveKey)
+      .map((row) => row.link_id),
+  ).toEqual([targetLinkId]);
 });
