@@ -4,11 +4,55 @@
 
 L2 is stacked on READY PR #209 at `5d573706bf07bb50e0c8b79cf1d34a3f6c56a975`.
 Root orchestration thread: <t3-thread://v2/087fc341-1687-4dc7-ab25-e7c53896db5e/31bac5d7-edc0-4879-af3e-91e9f6e2600c>.
-Migration 57 is allocated and registered from the exact reviewed
-[final v4 DDL](finding32-l2-v4-proposed.sql): 17 statements, eight non-derived
-tables and nine indexes. Migrations 1–56 remain byte-identical. The actual
-restore CLI upgraded schema-56 backup/live files to 57; this does not yet prove
-populated-L2 restore or whole-path readiness.
+Migration 57 is allocated but not yet pushed with the planner-authorized
+original-origin amendment. Its exact revised proposal is
+[finding32-source-origin-revised57-proposal.sql](finding32-source-origin-revised57-proposal.sql):
+17 statements, eight non-derived tables, and nine indexes.
+Current proposal SHA-256:
+`54dc2d344097763e055b0f8f7f10d8f85993ccdaf0e31620b699726c35256a96`.
+Migration 57 adds only `api_origin` to `love_api_bindings`, constrained to
+`web`, `lastfm`, or `listenbrainz`; the binding transaction must capture the
+accepted operation's actual origin, with no default or inferred history.
+Migrations 1–56 remain byte-identical. Superseded proposal SHA-256:
+`8f13e1943e5ad59984c4bd9d783e299cce931963f40643303e0f30cce3768a5d`.
+Its receipts are preserved as superseded evidence. Prior old-hash 56→57 CLI
+receipts do not prove the amended migration; rerun them against the new hash.
+Populated-L2 restore and whole-path readiness remain pending.
+
+### Pre-amendment database audit
+
+Audit scope was this PR worktree (including ignored files, excluding generated
+dependency/build trees), the sibling project worktrees under
+`/home/june/.t3/worktrees/atproto_music`, the source checkout
+`/home/june/atproto_music`, and the project-owned state location
+`/home/june/.local/state/atmusic` and its backups. No tracked `.db`, `.sqlite`,
+or `.sqlite3` files were found. Tracked binary goldens were signed CAR test
+fixtures, not database files. No database-like file was found in this PR
+worktree. Ignored E2E `work/e2e/state/atmusic.db` candidates in sibling
+worktrees were classified as disposable E2E state; read-only `schema_migrations`
+maximums ranged from 3 to 38, all below 57. Exact ignored E2E candidates and
+ledger maxima were: `p136` (3), `t3-00ce61ee` (14), `t3-086c3461` (3),
+`t3-0b3bd325` (3), `t3-1f53053e` (3), `t3-2432087f` (3), `t3-26cbf84d` (3),
+`t3-416384ed` (20), `t3-6c3de083` (21), `t3-afc4ba59` (15),
+`t3-bb756701` (38), `t3-c0086f15` (4), `t3-cbd00b22` (4),
+`t3-cf20597c` (3), and source checkout `/home/june/atproto_music` (3); each
+candidate is at `work/e2e/state/atmusic.db`. They are ignored generated E2E
+state, not production databases. Project-state backups, including the
+pre-migration backup, were read-only inspected through their schema ledger;
+`atmusic-20261105T0508Z.db`, `atmusic-20261106T0827Z.db`,
+`atmusic-20261107T0330Z.db`, and `atmusic-20261107T1356Z.pre-migration.db`
+reported max3; `atmusic-20261108T0330Z.db`,
+`atmusic-20261109T0330Z.db`, and `atmusic-20261110T0330Z.db` reported max14.
+All are below57.
+
+The non-disposable live candidate
+`/home/june/.local/state/atmusic/atmusic.db` could not be ledger-read because
+SQLite reported `database is locked`; it and its WAL were not modified. Per
+owner-provided provenance, live release `41ee496` predates this stack and
+master has not shipped migration 57. This local lock leaves its current ledger
+unverified; no global filesystem scan or network access to the live system was
+performed. The planner's owner-provided release provenance plus the readable
+project backup ledgers found no old-57 database to protect from amendment.
 
 Binding design is replay addendum > batch addendum > Opus v4 plan. Q1 is YES
 (proof is independent of egress pause), Q2 is NO (no opaque revival proof).
@@ -143,16 +187,16 @@ Those artifacts measured materialization plus one link-scoped enqueue only.
 
 ## Remaining gates
 
-Migration57 is registered at the authorized final DDL hash
-`8f13e1943e5ad599-84c4bd9d783e299c-ce931963f4064330-3e0f30cce3768a5d` (four SHA-256 groups). The
-Node migration-authorizer test confirms its 17 statements match the proposal and
-creates eight tables/nine indexes with clean foreign keys. The real restore CLI
-upgraded a populated 56 backup/live pair to 57 and verified the 57 ledger,
-tables, and foreign keys. Full L2 behavior, whole-path128 traces/countercontrol,
-fresh Astra review of that gate, populated-L2 restore and remaining terminal,
-cleanup, and scale gates are still pending. Small behavior fixtures belong in
-`worker-node`; growing fixtures belong in `worker-bench` with VM/statement/
-returned-row bounds, not elapsed-time claims.
+The pushed checkpoint `654905a` still registers the superseded old-hash 57.
+The amendment must update the registered migration and additive schema guards
+to match the revised proposal above, then rerun the Node authorizer/shape test
+and real restore CLI against new-hash 56→57 files, plus an older-live restore.
+Old-hash authorizer and CLI receipts are historical and superseded, not
+evidence for the amended registration. Full L2 behavior, whole-path128
+traces/countercontrol, fresh Astra review of that gate, populated-L2 restore
+and remaining terminal, cleanup, and scale gates are still pending. Small
+behavior fixtures belong in `worker-node`; growing fixtures belong in
+`worker-bench` with VM/statement/returned-row bounds, not elapsed-time claims.
 
 
 ## Narrow request-metadata correction

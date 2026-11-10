@@ -76,7 +76,10 @@ function recordingTarget(db: SqliteDb) {
 describe('migrate over node:sqlite', () => {
   it('applies the exact allocated schema-57 proposal from schema 56 through the Node authorizer', () => {
     const db = freshDb();
-    const ddl = readFileSync(new URL('../../../docs/planning/finding32-l2-v4-proposed.sql', import.meta.url), 'utf8');
+    const ddl = readFileSync(
+      new URL('../../../docs/planning/finding32-source-origin-revised57-proposal.sql', import.meta.url),
+      'utf8',
+    );
     const statements = ddl
       .split(';')
       .map((statement) => statement.trim())
@@ -84,7 +87,7 @@ describe('migrate over node:sqlite', () => {
     const migration = MIGRATIONS.at(-1)!;
     expect(migration).toMatchObject({ version: 57, name: 'api_love_recipient_proof' });
     expect(createHash('sha256').update(ddl).digest('hex')).toBe(
-      '8f13e1943e5ad59984c4bd9d783e299cce931963f40643303e0f30cce3768a5d',
+      '54dc2d344097763e055b0f8f7f10d8f85993ccdaf0e31620b699726c35256a96',
     );
     expect(statements).toHaveLength(17);
     expect(migration.statements).toEqual(statements);
@@ -101,7 +104,6 @@ describe('migrate over node:sqlite', () => {
     );
     expect(indexes).toHaveLength(9);
     expect(db.exec('SELECT max(version) AS version FROM schema_migrations')).toEqual([{ version: 57 }]);
-
     const verify = new DatabaseSync(':memory:');
     try {
       verify.exec('PRAGMA foreign_keys=ON');
@@ -109,6 +111,9 @@ describe('migrate over node:sqlite', () => {
         "SELECT sql FROM sqlite_master WHERE type IN ('table','index') AND sql IS NOT NULL ORDER BY rowid",
       ))
         verify.exec(sql);
+      expect(verify.prepare('PRAGMA table_info(love_api_bindings)').all()).toContainEqual(
+        expect.objectContaining({ name: 'api_origin', notnull: 1, dflt_value: null }),
+      );
       expect(verify.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
     } finally {
       verify.close();

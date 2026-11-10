@@ -62,6 +62,7 @@ const RULES: readonly { rule: string; pattern: RegExp }[] = [
  * previous line.
  */
 const DIGEST_RECORDS: Readonly<Record<string, 'manifest' | 'labelled' | 'node-backend-receipt'>> = {
+  'docs/planning/PLAN-api-love-recipient-proof.md': 'labelled',
   'docs/VALIDATION.md': 'labelled',
   'docs/adr/0002-oauth.md': 'labelled',
   'docs/benchmarks/read_models.json': 'labelled',

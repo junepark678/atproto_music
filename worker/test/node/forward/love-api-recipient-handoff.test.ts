@@ -170,6 +170,51 @@ describe('API recipient unlove handoff acknowledgements', () => {
     });
   });
 
+  it('persists each API origin across operation GC and file reopen; the binding schema rejects import', async () => {
+    await withMigratedDb((initial) => {
+      const origins = ['web', 'lastfm', 'listenbrainz'] as const;
+      for (const [index, origin] of origins.entries()) {
+        const operationId = `bound-origin-${index}`;
+        initial.run(
+          `INSERT INTO operations(id,did,kind,origin,priority,collection,rkey,state,due_at,created_at_ms,updated_at_ms)
+           VALUES(?,?,'love.put',?,0,'com.example.atmusic.love',?,'succeeded',1,1,1)`,
+          operationId,
+          DID,
+          origin,
+          `request-${index}`,
+        );
+        initial.run(
+          `INSERT INTO love_api_bindings(did,operation_id,api_origin,uri,incarnation_key,binding_seq,created_at_ms)
+           VALUES(?,?,?,?,?,?,1)`,
+          DID,
+          operationId,
+          origin,
+          URI,
+          `${INCARNATION}-${index}`,
+          index + 1,
+        );
+      }
+      initial.run('DELETE FROM operations WHERE id LIKE ?', 'bound-origin-%');
+      expect(() =>
+        initial.run(
+          `INSERT INTO love_api_bindings(did,operation_id,api_origin,uri,incarnation_key,binding_seq,created_at_ms)
+           VALUES(?,?,?,?,?,?,1)`,
+          DID,
+          'bound-import',
+          'import',
+          URI,
+          INCARNATION,
+          4,
+        ),
+      ).toThrow();
+      const reopened = reopen(initial);
+      expect(
+        reopened.all<{ api_origin: string }>('SELECT api_origin FROM love_api_bindings ORDER BY binding_seq'),
+      ).toEqual(origins.map((api_origin) => ({ api_origin })));
+      expect(reopened.one('SELECT 1 AS present FROM operations WHERE id LIKE ?', 'bound-origin-%')).toBeNull();
+    });
+  });
+
   for (const mode of ['active', 'disabled', 'revoked'] as const) {
     for (const service of ['lastfm', 'listenbrainz'] as const) {
       for (const source of ['web', 'lastfm', 'listenbrainz'] as const) {
