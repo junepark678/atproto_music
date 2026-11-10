@@ -799,7 +799,13 @@ describe('import uploads', () => {
             jobId,
             dirMaxBytes: MiB,
             minFreeBytes: Number(floorBytes),
-            freeBytes: () => floorBytes + 1_000n,
+            freeBytes: (path) => {
+              const written = readdirSync(path).reduce((total, name) => {
+                const file = statSync(join(path, name), { throwIfNoEntry: false });
+                return total + (file?.isFile() ? file.size : 0);
+              }, 0);
+              return floorBytes + 1_000n - BigInt(written);
+            },
             declaredLength: 700,
           },
         ),
@@ -808,6 +814,7 @@ describe('import uploads', () => {
     expect(floorRace.filter((r) => r.ok)).toHaveLength(1);
     expect(floorRace.filter((r) => !r.ok)).toEqual([{ ok: false, status: 507, code: 'insufficient_storage' }]);
     expect(readdirSync(floorRaceDir)).toHaveLength(1);
+    expect(statSync(join(floorRaceDir, readdirSync(floorRaceDir)[0]!)).size).toBe(700);
 
     // Unknown and underestimated lengths must reserve each growth before any
     // bytes from that chunk reach disk. A single sub-1 MiB chunk used to pass
