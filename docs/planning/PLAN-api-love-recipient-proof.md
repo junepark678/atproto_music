@@ -621,6 +621,22 @@ asserts the durable post-progress state instead of requiring the dispatch
 transaction itself to reclaim it. A separate production-handoff test checks
 the direct single-page reclaim result after the final dependency releases.
 
+After real API admission, PDS SENT, verified absence, source-row cleanup, and
+schema-57 CLI reopen, one actual fresh-session scheduler invocation is now
+measured before the production timer takes over. Its transaction rows
+(phase: reads / mutation statements / changed rows / returned rows / visits)
+are: singleton-init `2/1/0/2/0`, decision `63/8/8/34/1`, sweep
+`11/1/1/11/1`, reclaim `24/6/3/26/5`, second decision `2/0/0/2/0`, second
+sweep `2/0/0/2/0`, second reclaim `8/2/1/8/1`, and lane-turn
+`3/1/1/3/0`. The complete invocation is 135 reads across its separate
+transactions, 19 mutation statements, 14 changed rows, 108 returned rows, and
+8 visits. The two decision units are individually 63/8 and 2/0 reads/changed
+rows, within the per-unit 128-read/28-changed-row hard bounds; invocation-wide
+reads are not compared to the per-decision cap. The first acknowledgement is
+deferred, and the second candidate is not due in that invocation. The following
+production timer and fake transports still prove zero egress while paused,
+then one unlove per same remote after resume and zero on rerun.
+
 The large 100/1k/10k production-reclaimer fixture now gives every historical
 binding a matching released generation-1 recipient row, advances the linked
 account to generation 2, and keeps one exact current-generation recipient

@@ -86,6 +86,7 @@ import {
 import { ListenbrainzClient } from '../../worker/src/forward/listenbrainz-client.ts';
 import { reclaimLoveApiProofRows } from '../../worker/src/forward/love-api-maintenance.ts';
 import { materializeLoveApiRecipientDecisions } from '../../worker/src/forward/love-api-materializer.ts';
+import { runLoveApiMaintenance } from '../../worker/src/forward/love-api-scheduler.ts';
 import { runDeferredLoveMaintenance } from '../../worker/src/forward/love-deferral-maintenance.ts';
 import { admitForwardIdentity } from '../../worker/src/forward/projection.ts';
 import { UpstreamPacing } from '../../worker/src/forward/upstream-pacing.ts';
@@ -1868,6 +1869,30 @@ describe('restore.ts', () => {
           generation,
         }))
         .sort((a, b) => a.link_id.localeCompare(b.link_id)),
+    );
+    const restoredMaintenance = runLoveApiMaintenance(
+      restored,
+      world.clock.nowMs(),
+      seededRandom(0x77),
+      'restore-producer-fresh-session',
+    );
+    expect(restoredMaintenance.decisions).toEqual({
+      queued: 0,
+      deferred: 1,
+      replay: 0,
+      refused: 0,
+      awaiting: 0,
+      expired: 0,
+    });
+    expect(restoredMaintenance.writes).toBeLessThanOrEqual(96);
+    expect(restoredMaintenance.visits).toBeLessThanOrEqual(16);
+    const restoredDecisionPhases = restoredMaintenance.transactions.filter((row) => row.phase === 'l2-decision');
+    expect(restoredDecisionPhases.map(({ reads, changedRows, visits }) => ({ reads, changedRows, visits }))).toEqual([
+      { reads: 63, changedRows: 8, visits: 1 },
+      { reads: 2, changedRows: 0, visits: 0 },
+    ]);
+    expect(restoredDecisionPhases.every((row) => row.reads <= 128 && row.changedRows <= 28 && row.visits <= 1)).toBe(
+      true,
     );
     const timer = systemd
       .server!.server.features.features.flatMap((feature) => feature.extensions ?? [])
