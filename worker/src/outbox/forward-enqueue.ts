@@ -127,8 +127,6 @@ export interface AcceptedApiLoveRecipientEnvelope {
   readonly recordUri: string;
   readonly incarnationKey: string;
   readonly apiOperationId: string;
-  /** The API request rkey may differ from the reused projection record rkey. */
-  readonly apiRequestRkey: string;
   readonly projectionRkey: string;
   readonly source: Exclude<Origin, 'import'>;
   /** Captured with API acceptance; current API-love admission supplies an empty list. */
@@ -232,7 +230,6 @@ function acceptedApiEnvelopeValid(envelope: AcceptedApiLoveRecipientEnvelope, di
     typeof envelope.apiOperationId === 'string' &&
     envelope.apiOperationId.length > 0 &&
     isRecordKey(envelope.projectionRkey) &&
-    isRecordKey(envelope.apiRequestRkey) &&
     typeof envelope.authorization.uri === 'string' &&
     typeof envelope.authorization.rev === 'string' &&
     (envelope.source === 'web' || envelope.source === 'lastfm' || envelope.source === 'listenbrainz') &&

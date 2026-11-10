@@ -650,7 +650,6 @@ describe('ListenBrainz forwarding', () => {
         recordUri: uri,
         incarnationKey,
         apiOperationId: operation.id,
-        apiRequestRkey: operation.rkey,
         projectionRkey: reusedRecordRkey,
         source: 'web',
         sourceExclusions: [],

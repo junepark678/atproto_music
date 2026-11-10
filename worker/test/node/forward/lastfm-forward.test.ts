@@ -1376,7 +1376,6 @@ describe('Last.fm forwarding', () => {
           recordUri: uri,
           incarnationKey,
           apiOperationId: 'recipient-lastfm-put',
-          apiRequestRkey: 'recipient-lastfm-api',
           projectionRkey,
           source: 'lastfm',
           sourceExclusions: [],

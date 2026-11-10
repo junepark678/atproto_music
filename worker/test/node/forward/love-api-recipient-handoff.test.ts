@@ -10,7 +10,7 @@ import {
   enqueueApiRecipientUnlove,
   enqueueForwards,
 } from '../../../src/outbox/forward-enqueue';
-import { withMigratedDb } from '../support/node-db';
+import { reopen, withMigratedDb } from '../support/node-db';
 
 const DID = 'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa';
 const REV = '3lbcdefghijmu';
@@ -84,7 +84,6 @@ function args(
     recordUri: URI,
     incarnationKey: INCARNATION,
     apiOperationId: 'original-love-put',
-    apiRequestRkey: 'request-rkey-differs',
     projectionRkey: 'api-recipient',
     source,
     sourceExclusions: excludeSourceServices,
@@ -155,6 +154,22 @@ function measuredRecipient(db: Db, input: ApiRecipientUnloveArgs) {
 }
 
 describe('API recipient unlove handoff acknowledgements', () => {
+  it('accepts a serialized envelope without request metadata after operation GC and database reopen', async () => {
+    await withMigratedDb((initial) => {
+      addLink(initial, 'restored-recipient', 'listenbrainz', 'active');
+      addApiFact(initial, 'web', null, 'snapshot', 'original-request-rkey');
+      const input = args('restored-recipient');
+      // Only durable-contract fields are available to the future binding leaf.
+      const serialized = JSON.stringify(input.envelope);
+      initial.run('DELETE FROM operations');
+      const db = reopen(initial);
+      expect(db.one('SELECT 1 FROM operations')).toBeNull();
+      const envelope = JSON.parse(serialized);
+      expect(envelope).not.toHaveProperty('apiRequestRkey');
+      expect(enqueueApiRecipientUnlove(db, { ...input, envelope })).toEqual({ status: 'queued' });
+    });
+  });
+
   for (const mode of ['active', 'disabled', 'revoked'] as const) {
     for (const service of ['lastfm', 'listenbrainz'] as const) {
       for (const source of ['web', 'lastfm', 'listenbrainz'] as const) {
@@ -406,7 +421,6 @@ describe('API recipient unlove handoff acknowledgements', () => {
               measuredRecipient(
                 db,
                 args('original-import-recipient', 'lastfm', [], {
-                  apiRequestRkey: 'different-api-request-rkey',
                   source: 'lastfm',
                 }),
               );

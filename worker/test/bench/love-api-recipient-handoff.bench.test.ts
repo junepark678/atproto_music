@@ -110,7 +110,6 @@ function args(
       recordUri: URI,
       incarnationKey: INCARNATION,
       apiOperationId: 'bench-api-op',
-      apiRequestRkey: 'different-request-rkey',
       projectionRkey: 'recipient',
       source: 'web',
       sourceExclusions: forwardSourceExclusions,

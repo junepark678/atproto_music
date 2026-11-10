@@ -44,7 +44,7 @@ remain accepted.
 `enqueueApiRecipientUnlove` preserves ordinary `enqueueForwards`' row-count
 contract. It now consumes a trusted accepted API-recipient envelope from the
 future L2 binding owner. The envelope carries DID, projected record URI and
-incarnation, API operation ID and request rkey, distinct projection rkey,
+incarnation, API operation ID, projection rkey,
 source/exclusion context, immutable projected track fields, and exact A2
 authorization. The adapter validates URI/DID/rkey/incarnation/key/auth/current
 link generation consistency, then maps that envelope to the B2 payload. It
@@ -59,8 +59,9 @@ same-named recipient service. Only exclusions captured in the accepted
 envelope can refuse the target, before witnesses/effects. Broad import
 exclusions remain unchanged. The production `love.put` executor test also
 proves that a reused record can have a request `rkey` different from its
-projection URI `rkey`; an accepted envelope can preserve both through
-operation cleanup. Snapshot/import reuse fixtures and operation-GC/mutable-
+projection URI `rkey`. The handoff does not require the original request rkey:
+that diagnostic is absent from the approved durable schema and cannot be
+reconstructed after operation cleanup. Snapshot/import reuse fixtures and operation-GC/mutable-
 source controls exercise the adapter without consulting those mutable rows.
 
 Effect acknowledgements use exact `(link_id,kind,dedupe_key)` seeks without
@@ -153,3 +154,18 @@ terminal, cleanup, and scale gates. Small behavior fixtures belong in
 `worker-node`; growing fixtures belong in `worker-bench` with VM/statement/
 returned-row bounds, not elapsed-time claims. No schema-57 runtime behavior or
 full recipient/materializer is part of this stage.
+
+
+## Narrow request-metadata correction
+
+The stage-one recheck rejected `4979eda` only because the envelope required
+`apiRequestRkey`, which has no storage in the approved binding/aggregate/decision
+contract after operation GC. The field and its unconditional validator are
+removed, with no new schema or reconstruction query. Exact API operation ID
+remains part of the trusted binding contract; projection rkey still matches
+the stored record URI. The executor distinct-request/projection-rkey regression
+is retained. A new regression serializes an envelope with no request metadata,
+deletes the operation and reopens the real Node database before handoff. It
+fails before the correction and passes afterward. This is stage-one envelope/
+reopen evidence, not real L2 table reconstruction or CLI restore acceptance.
+Fresh independent acceptance and all stage-two gates remain required.
