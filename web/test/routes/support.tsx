@@ -68,10 +68,13 @@ export function mount(
 }
 
 type OwnedTest = ReturnType<typeof ownTest>;
+let activeOwner: symbol | null = null;
 
-/** Register test-owned roots and global state before the first render. */
+/** One live owner per test realm; multiple sequential roots share that owner. */
 export function ownTest(signal: AbortSignal) {
   if (signal.aborted) throw new DOMException('Test owner closed', 'AbortError');
+  if (activeOwner !== null) throw new Error('A route test owner is already active');
+  const token = Symbol('route test owner');
   type Root = { element: HTMLElement; mounted: boolean };
   const roots = new Set<Root>();
   const releases = new Set<() => void>();
@@ -81,63 +84,95 @@ export function ownTest(signal: AbortSignal) {
   const unexpectedFetches: string[] = [];
   const imageFetches: string[] = [];
   let closed = false;
+  let settingUp = true;
   const guard = ((input: RequestInfo | URL) => {
     const label = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
     unexpectedFetches.push(label);
     return Promise.reject(new Error(`Unexpected global fetch in owned route test: ${label}`));
   }) as typeof fetch;
-  vi.stubGlobal('fetch', guard);
-  Object.defineProperty(window, 'fetch', {
-    configurable: true,
-    writable: true,
-    value: ((input: RequestInfo | URL) => {
-      const label = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-      imageFetches.push(label);
-      return Promise.reject(new Error(`Unexpected HappyDOM window.fetch in owned route test: ${label}`));
-    }) as typeof fetch,
-  });
-
   const cleanup = () => {
     if (closed) return;
     closed = true;
-    signal.removeEventListener('abort', cleanup);
     let failure: unknown;
-    for (const release of releases) {
+    const attempt = (release: () => void) => {
       try {
         release();
       } catch (error) {
         failure ??= error;
       }
+    };
+    attempt(() => signal.removeEventListener('abort', abortCleanup));
+    for (const release of releases) {
+      attempt(release);
     }
     releases.clear();
     for (const entry of roots) {
-      try {
+      attempt(() => {
         if (entry.mounted) render(null, entry.element);
-      } catch (error) {
-        failure ??= error;
-      } finally {
-        entry.element.remove();
-        entry.mounted = false;
-      }
+      });
+      attempt(() => entry.element.remove());
+      entry.mounted = false;
     }
     roots.clear();
-    try {
+    attempt(() => {
       (window as unknown as { happyDOM: { setURL(url: string): void } }).happyDOM.setURL(initialUrl);
+    });
+    attempt(() => {
       window.history.replaceState(null, '', initialUrl);
-    } catch (error) {
-      failure ??= error;
-    }
-    vi.stubGlobal('fetch', initialFetch);
-    if (initialWindowFetch) Object.defineProperty(window, 'fetch', initialWindowFetch);
-    else Reflect.deleteProperty(window, 'fetch');
+    });
+    attempt(() => {
+      vi.stubGlobal('fetch', initialFetch);
+    });
+    attempt(() => {
+      if (initialWindowFetch) Object.defineProperty(window, 'fetch', initialWindowFetch);
+      else Reflect.deleteProperty(window, 'fetch');
+    });
+    if (activeOwner === token) activeOwner = null;
     if (unexpectedFetches.length)
       failure ??= new Error(`Unexpected global fetch calls: ${unexpectedFetches.join(', ')}`);
     if (imageFetches.length)
       failure ??= new Error(`Unexpected HappyDOM window.fetch calls: ${imageFetches.join(', ')}`);
     if (failure) throw failure;
   };
-  signal.addEventListener('abort', cleanup, { once: true });
-  onTestFinished(cleanup);
+  const abortCleanup = () => {
+    // A synchronous acquisition may still mutate after dispatching abort.
+    // Unwind it after the call returns, before starting any next acquisition.
+    if (!settingUp) cleanup();
+  };
+  activeOwner = token;
+  try {
+    // Both cleanup paths exist before either global acquisition. An abort
+    // during a synchronous setup hook is handled before the next acquisition.
+    onTestFinished(cleanup);
+    signal.addEventListener('abort', abortCleanup, { once: true });
+    if (signal.aborted) cleanup();
+    if (!closed) {
+      vi.stubGlobal('fetch', guard);
+      if (signal.aborted) cleanup();
+    }
+    if (!closed) {
+      Object.defineProperty(window, 'fetch', {
+        configurable: true,
+        writable: true,
+        value: ((input: RequestInfo | URL) => {
+          const label = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+          imageFetches.push(label);
+          return Promise.reject(new Error(`Unexpected HappyDOM window.fetch in owned route test: ${label}`));
+        }) as typeof fetch,
+      });
+      if (signal.aborted) cleanup();
+    }
+  } catch (error) {
+    try {
+      cleanup();
+    } catch (cleanupError) {
+      throw new AggregateError([error, cleanupError], 'Route test setup and cleanup failed');
+    }
+    throw error;
+  } finally {
+    settingUp = false;
+    if (signal.aborted) cleanup();
+  }
 
   return {
     get closed() {

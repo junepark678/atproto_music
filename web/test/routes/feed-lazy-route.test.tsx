@@ -54,6 +54,80 @@ describe('real cold feed route readiness', () => {
     expect((failure as DOMException).name).toBe('AbortError');
   });
 
+  it.each(['before', 'after'] as const)('closes an owner aborted %s the global setup mutation', (when) => {
+    const controller = new AbortController();
+    const fetch = globalThis.fetch;
+    const windowFetch = Object.getOwnPropertyDescriptor(window, 'fetch');
+    const url = window.location.href;
+    const stub = vi.stubGlobal.bind(vi);
+    const spy = vi.spyOn(vi, 'stubGlobal').mockImplementation((name, value) => {
+      if (when === 'before') controller.abort();
+      const result = stub(name, value);
+      if (when === 'after') controller.abort();
+      return result;
+    });
+    try {
+      const owner = ownTest(controller.signal);
+      expect(owner.closed).toBe(true);
+      expect(globalThis.fetch).toBe(fetch);
+      expect(Object.getOwnPropertyDescriptor(window, 'fetch')).toEqual(windowFetch);
+      owner.setUrl('/must-not-change');
+      expect(window.location.href).toBe(url);
+    } finally {
+      spy.mockRestore();
+      controller.abort();
+    }
+  });
+
+  it('restores globals if the explicit window descriptor installation fails', () => {
+    const controller = new AbortController();
+    const fetch = globalThis.fetch;
+    const windowFetch = Object.getOwnPropertyDescriptor(window, 'fetch');
+    const define = Object.defineProperty;
+    const failure = new Error('controlled window descriptor setup failure');
+    let fetchDefinitions = 0;
+    const spy = vi.spyOn(Object, 'defineProperty').mockImplementation((target, key, descriptor) => {
+      if (target === window && key === 'fetch' && ++fetchDefinitions === 2) throw failure;
+      return define(target, key, descriptor);
+    });
+    try {
+      expect(() => ownTest(controller.signal)).toThrow(failure);
+      expect(globalThis.fetch).toBe(fetch);
+      expect(Object.getOwnPropertyDescriptor(window, 'fetch')).toEqual(windowFetch);
+    } finally {
+      spy.mockRestore();
+      controller.abort();
+    }
+    // Failed setup must also release exclusivity for a later valid owner.
+    const next = new AbortController();
+    expect(ownTest(next.signal).closed).toBe(false);
+    next.abort();
+  });
+
+  it('refuses overlapping owners before mutation and allows a new owner after close', () => {
+    const first = new AbortController();
+    const second = new AbortController();
+    const owner = ownTest(first.signal);
+    owner.setUrl('/first-owner');
+    const fetch = globalThis.fetch;
+    const windowFetch = Object.getOwnPropertyDescriptor(window, 'fetch');
+    try {
+      expect(() => ownTest(second.signal)).toThrow('A route test owner is already active');
+      expect(globalThis.fetch).toBe(fetch);
+      expect(Object.getOwnPropertyDescriptor(window, 'fetch')).toEqual(windowFetch);
+      expect(window.location.pathname).toBe('/first-owner');
+    } finally {
+      first.abort();
+    }
+    const next = ownTest(second.signal);
+    next.setUrl('/second-owner');
+    const nextFetch = globalThis.fetch;
+    first.abort();
+    expect(globalThis.fetch).toBe(nextFetch);
+    expect(window.location.pathname).toBe('/second-owner');
+    second.abort();
+  });
+
   it('holds the real lazy route, then verifies cold and warm route behavior', async ({ signal }) => {
     const owner = ownTest(signal);
     owner.onCleanup(gate.release);
