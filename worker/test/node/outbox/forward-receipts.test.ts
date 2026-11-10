@@ -6,6 +6,7 @@ import {
   expireRows,
   holdLinkRows,
   resumeHeldRows,
+  type SettledForwardRow,
   settleRows,
   settleRowsReturning,
 } from '../../../src/forward/forward-outbox';
@@ -40,6 +41,38 @@ async function withLink(run: (db: Db) => void) {
 }
 
 describe('settlement returning contract', () => {
+  it.each(['settlement', 'age expiry', 'held expiry'] as const)(
+    'rolls back %s and its SENT ledger when a terminal hook returns a Promise',
+    async (transition) => {
+      await withLink((db) => {
+        enqueueForwards(db, {
+          did: DID,
+          items: [{ kind: 'love', operationId: 'async-hook-love', payload: { artist: 'Artist', track: 'Track' } }],
+          now: 1,
+          random: seededRandom(6),
+        });
+        if (transition === 'held expiry') holdLinkRows(db, LINK.id, 2);
+        const before = db.all('SELECT * FROM forward_outbox');
+        const id = db.one<{ id: string }>('SELECT id FROM forward_outbox')!.id;
+        let calls = 0;
+        const hook = (rows: readonly SettledForwardRow[]) => {
+          calls += 1;
+          expect(rows).toHaveLength(1);
+          expect(rows[0]).toMatchObject({ id, kind: 'love', state: transition === 'settlement' ? 'sent' : 'expired' });
+          return Promise.resolve();
+        };
+        const act = () =>
+          transition === 'settlement'
+            ? settleRows(db, [id], 'sent', 3, null, true, LINK.generation, hook)
+            : expireRows(db, 31 * 24 * 60 * 60 * 1000, hook);
+        expect(act).toThrow(/must be synchronous/);
+        expect(calls).toBe(1);
+        expect(db.all('SELECT * FROM forward_outbox')).toEqual(before);
+        expect(db.all('SELECT * FROM forward_love_delivery')).toEqual([]);
+      });
+    },
+  );
+
   it('returns only generation-fenced changed rows and preserves the SENT ledger', async () => {
     await withLink((db) => {
       enqueueForwards(db, {

@@ -34,15 +34,23 @@ callback can observe those rows inside the transition transaction; no L2 proof
 hook is claimed before the recipient tables exist. The existing expiry report
 shape is unchanged.
 
-The existing enqueue path's post-state is still only exposed as a row count.
-Its witness key is `(link_id,generation,operation_id)` and cannot safely encode
-the required distinct `api-recipient` identity or four acknowledgements
-(queued/deferred/replay/refused). Do not infer deferred/replay from an existing
-witness alone. This checkpoint must add a narrowly scoped handoff only if it
-can be derived from durable post-state without changing old caller behavior;
-otherwise the seam remains an explicit next-stage gate for Sol to resolve before
-recipient-table implementation. Existing source and link filters stay ahead of
-witness recording.
+The existing enqueue path still exposes only a row count; the four-way
+queued/deferred/replay/refused acknowledgement remains to be implemented.
+The witness key `(link_id,generation,operation_id)` already represents distinct
+broad and `:api-recipient` operation IDs without a schema change. Sol's six
+production probes confirm coexistence in both invocation orders on active,
+disabled and revoked links. A witness alone is not proof of a deferred or
+replay-covered outcome; the new handoff must inspect exact durable acceptance.
+Source and link filters remain ahead of witness recording.
+
+The terminal observer rejects Promise/thenable results before transaction
+commit. Three regressions verify rollback of ordinary settlement and SENT
+ledger, age expiry, and held expiry. The new hook is a trusted synchronous
+internal contract, not cancellation of arbitrary asynchronous callback work.
+Sol's pre-guard probe reproduced the missing rejection; all three durable cases
+fail when only the Promise guard is bypassed and pass with the guard. Empty
+transition batches do not invoke the observer; expiry controls each observe
+the actual changed love row before verifying rollback.
 
 ## Read-cap relaxation and evidence gate
 

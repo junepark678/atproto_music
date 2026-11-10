@@ -298,6 +298,21 @@ export type SettledForwardRowsHook = (rows: readonly SettledForwardRow[], now: n
 
 const SETTLED_COLUMNS = 'id,link_id,generation,did,kind,dedupe_key,state,love_artist_key,love_track_key,created_at_ms';
 
+function notifySettled(
+  onSettled: SettledForwardRowsHook | undefined,
+  rows: readonly SettledForwardRow[],
+  now: number,
+): void {
+  if (rows.length === 0 || onSettled === undefined) return;
+  const result: unknown = onSettled?.(rows, now);
+  if (
+    result !== null &&
+    (typeof result === 'object' || typeof result === 'function') &&
+    typeof (result as { then?: unknown }).then === 'function'
+  )
+    throw new TypeError('terminal settlement hook must be synchronous');
+}
+
 /** Runs `update` over `ids` in slices that fit one statement, in one transaction. */
 function inSlices(db: Db, ids: readonly string[], update: (slice: readonly string[]) => void): void {
   if (ids.length === 0) return;
@@ -349,7 +364,7 @@ export function settleRowsReturning(
     const rows = db.all<SettledForwardRow>(`${sql} RETURNING ${SETTLED_COLUMNS}`, ...params);
     changed.push(...rows);
     if (state === 'sent') recordLoveDelivery(db, rows satisfies SentLoveRow[], now);
-    onSettled?.(rows, now);
+    notifySettled(onSettled, rows, now);
   });
   return changed;
 }
@@ -505,7 +520,7 @@ export function expireRows(db: Db, now: number, onSettled?: SettledForwardRowsHo
           });
         }
       }
-      onSettled?.(rows, now);
+      notifySettled(onSettled, rows, now);
       remaining -= selected.length;
       if (bucket === 'aged') aged += rows.length;
       else staleNowPlaying += rows.length;
@@ -532,7 +547,7 @@ export function expireRows(db: Db, now: number, onSettled?: SettledForwardRowsHo
           row.seq,
         ),
       );
-      onSettled?.(rows, now);
+      notifySettled(onSettled, rows, now);
       held = rows.length;
       remaining -= selected.length;
     }
