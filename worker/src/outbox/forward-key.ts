@@ -1,6 +1,8 @@
 import type { ForwardKind } from '../app/rows';
 import type { Db } from '../do/db';
+import { countLinkCoverage } from '../forward/coverage';
 import { touchLoveLane } from '../forward/love-lanes';
+import { releaseUnsentReceipts } from './forward-receipts';
 
 /** Stores generation 1 unchanged and namespaces later generations in the legacy unique key. */
 export function storedForwardDedupeKey(generation: number, canonicalKey: string): string {
@@ -31,6 +33,9 @@ export function deleteQueuedForwardIdentity(
   );
   const kindSlots = kinds.map(() => '?').join(',');
   for (const link of links) {
+    const receiptKinds = kinds.filter((kind): kind is Exclude<ForwardKind, 'nowplaying'> => kind !== 'nowplaying');
+    const releasedReceipts = releaseUnsentReceipts(db, link, receiptKinds, canonicalKey);
+    if (releasedReceipts > 0) countLinkCoverage(db, 'receipt_released', releasedReceipts);
     if (kinds.includes('love'))
       db.run(
         `DELETE FROM forward_love_recording_targets WHERE forward_rowid IN (

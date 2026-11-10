@@ -40,8 +40,10 @@ import { MusicKeyError, trackKey } from '@atmusic/core/music-key';
 import type { ForwardKind } from '../app/rows';
 import type { Db } from '../do/db';
 import { noteForwardLoveCurrent, touchLoveLane } from '../forward/love-lanes';
+import { countLinkCoverage } from '../forward/coverage';
 import { indexForwardLoveTarget } from '../forward/love-recording-targets';
 import { storedForwardDedupeKey } from './forward-key';
+import { dropStaleReceipt, forwardCoverage, noteForwardReceipt } from './forward-receipts';
 import { newOperationId } from './operations';
 
 export const NOW_PLAYING_KEY_DOMAIN = 'atmusic:nowplaying-key:v1';
@@ -172,6 +174,14 @@ export function enqueueForwards(db: Db, args: EnqueueForwardsArgs): number {
         )
           continue;
         if (link[flagColumn(item.kind)] !== 1) continue;
+        if (item.kind !== 'nowplaying') {
+          const coverage = forwardCoverage(db, link, item.kind, key);
+          if (coverage === 'retired') continue;
+          if (coverage === 'stale') {
+            dropStaleReceipt(db, link, item.kind, key);
+            countLinkCoverage(db, 'receipt_stale_released');
+          }
+        }
         const id = newOperationId(args.random);
         const insertSql =
           args.priority === undefined
@@ -203,6 +213,7 @@ export function enqueueForwards(db: Db, args: EnqueueForwardsArgs): number {
         ];
         const inserted = db.run(insertSql, ...params).rowsWritten;
         created += inserted;
+        if (item.kind !== 'nowplaying') noteForwardReceipt(db, link, item.kind, key, args.now);
         if (inserted === 1 && loveArtistKey !== null && loveTrackKey !== null) {
           const row = db.one<{ rowid: number }>('SELECT rowid FROM forward_outbox WHERE id=?', id);
           if (row && (item.kind === 'love' || item.kind === 'unlove')) {
