@@ -523,9 +523,12 @@ all eight L2 tables from real API admission, exact PDS/SENT and verified
 absence producers, clean operation/outbox rows, then exercise actual CLI
 restore into schema56/57 and real timer/backfill/dispatch/resume with fresh
 session state and both fake transports. Direct SQL remains limited to
-legacy/rollback/corruption setup and growth fixtures. Whole-decision cold,
-partial-delete, two-recipient, all outcomes, over-128 negative control,
-fresh Astra review, and populated real restore acceptance remain gates.
+legacy/rollback/corruption setup and growth fixtures. Populated schema-57
+producer-derived CLI restore, restored coverage/dispatch/resume, and fresh
+session invocation accounting now pass. Schema-56 producer-derived L2 restore,
+accept-loss behavior across all eight tables, alias-session rescan after
+reopen/rollback, the complete whole-decision scenario matrix, over-128 negative
+control, and fresh Astra review remain gates.
 
 The direct-SQL worker-bench retention proof runs the production reclaimer over
 100/1,000/10,000 same-DID API bindings with one selected SENT aggregate held at
@@ -544,18 +547,22 @@ controls trip their own guards.
 Migration57 is registered at the planner-authorized revised hash above. The
 old-hash authorizer/CLI receipts are preserved and explicitly superseded; the
 new-hash authorizer, real 56→57 CLI upgrade, and older-live restore passed on
-the amended migration slice. A populated schema-57 restore test now verifies
-all eight L2 tables survive live-DB restore after API operation and SENT-outbox
-cleanup, then invokes the production materializer and reclaimer in the fresh
-server composition, runs the actual link-backfill timer to revisit restored
-awaiting decisions, and checks FK integrity. Its proof rows are direct-SQL
-fixtures; actual producer-to-restore reconstruction and restored
-coverage/dispatch/resume remain pending. Whole-path128 scenario matrix and
-countercontrol, fresh Astra review of that gate, producer-batch pinning,
-complete scheduler/maintenance accounting, terminal cleanup, and scale gates
-remain pending. Small behavior fixtures belong in `worker-node`; growing
-fixtures belong in `worker-bench` with VM/statement/returned-row bounds, not
-elapsed-time claims.
+the amended migration slice. A populated schema-57 restore test verifies all
+eight L2 tables survive. The separate producer-derived case creates binding,
+recipient/member, fact, window-owner, decision, and epoch/state rows through
+real API/PDS/SENT/verified-absence producers; after operation and SENT outbox
+cleanup it restores through the real CLI, reopens a fresh server, proves the
+origin and SENT authorization joins, invokes actual scheduler/timer/backfill,
+and delivers through both fake transports after same-remote resume. The restored
+path now has per-transaction invocation accounting and bounded origin cleanup
+coverage. A seeded real-CLI failure injection compares all eight L2 tables in
+both live and backup files at the post-merge/pre-swap rollback point.
+Whole-path128 scenario matrix and over-cap control, fresh Astra review of that
+gate, schema-56 producer-derived L2 restoration, accept-loss all-eight-table
+behavior, alias-session rescan after reopen/rollback, producer-batch pinning,
+remaining maintenance scenarios, and scale gates remain pending. Small
+behavior fixtures belong in `worker-node`; growing fixtures belong in
+`worker-bench` with VM/statement/returned-row bounds, not elapsed-time claims.
 
 
 ## Narrow request-metadata correction
@@ -600,10 +607,13 @@ restore case also checks both exact service/link/generation rows joined to the
 single original API binding, selected SENT operation ID, immutable delete
 authorization/fact, accepted payload origin, and window-owner identities. It
 asserts the selected operation/outbox rows and member are gone; origin and
-SENT proof are recovered from durable L2 rows after fresh-server reopen.
-does not yet cover schema-56 producer-generated L2 state, accept-loss of all
-eight tables, failure-stage atomicity, or fresh alias-session rescan after
-rollback.
+SENT proof are recovered from durable L2 rows after fresh-server reopen. It
+also runs one actual scheduler invocation and checks per-phase reads, mutation
+statements, changed rows, returned rows, visits, total writes, and acknowledgements
+before the production timer/transport steps. A separate seeded CLI failure-stage
+regression covers eight-table atomicity. Schema-56 producer-generated L2 state,
+accept-loss of all eight tables, and fresh alias-session rescan after
+reopen/rollback remain uncovered.
 
 The previous active-at-absence fixture emitted both broad live-delete and
 narrow API-recipient effects for each remote. That observed four-effect result
