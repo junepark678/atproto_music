@@ -2,7 +2,13 @@ import { seededRandom } from '@atmusic/core/test-support/random';
 import { describe, expect, it } from 'vitest';
 import type { Db, SqlParam } from '../../../src/do/db';
 import { ADMISSION_HIGH_WATER_SQL, GAP_ADMISSION_OWNER_SQL, NEWEST_LINK_GAP_SQL } from '../../../src/forward/coverage';
-import { expireRows, holdLinkRows, resumeHeldRows, settleRows } from '../../../src/forward/forward-outbox';
+import {
+  expireRows,
+  holdLinkRows,
+  resumeHeldRows,
+  settleRows,
+  settleRowsReturning,
+} from '../../../src/forward/forward-outbox';
 import { enqueueForwards } from '../../../src/outbox/forward-enqueue';
 import { deleteQueuedForwardIdentity } from '../../../src/outbox/forward-key';
 import {
@@ -32,6 +38,55 @@ async function withLink(run: (db: Db) => void) {
     run(db);
   });
 }
+
+describe('settlement returning contract', () => {
+  it('returns only generation-fenced changed rows and preserves the SENT ledger', async () => {
+    await withLink((db) => {
+      enqueueForwards(db, {
+        did: DID,
+        items: [{ kind: 'love', operationId: 'returning-love', payload: { artist: 'Artist', track: 'Track' } }],
+        now: 100,
+        random: seededRandom(7),
+      });
+      const row = db.one<{ id: string; generation: number }>(
+        'SELECT id,generation FROM forward_outbox WHERE link_id=?',
+        LINK.id,
+      )!;
+      const observed: string[] = [];
+      expect(
+        settleRowsReturning(db, [row.id, 'missing-id'], 'sent', 101, null, true, row.generation, (rows) => {
+          observed.push(...rows.map((changed) => changed.id));
+        }),
+      ).toEqual([
+        expect.objectContaining({
+          id: row.id,
+          link_id: LINK.id,
+          generation: row.generation,
+          did: DID,
+          kind: 'love',
+          state: 'sent',
+        }),
+      ]);
+      expect(observed).toEqual([row.id]);
+      expect(db.one('SELECT last_sent_kind FROM forward_love_delivery WHERE link_id=?', LINK.id)).toEqual({
+        last_sent_kind: 'love',
+      });
+      expect(settleRowsReturning(db, [row.id], 'failed', 102, null, true, row.generation)).toEqual([]);
+    });
+  });
+
+  it('passes age and held expiry rows through the same synchronous contract', async () => {
+    await withLink((db) => {
+      enqueueForwards(db, { did: DID, items: [ITEM], now: 1, random: seededRandom(8) });
+      const observed: Array<{ id: string; state: string }> = [];
+      const report = expireRows(db, 15 * 24 * 60 * 60 * 1000, (rows) => {
+        observed.push(...rows.map((changed) => ({ id: changed.id, state: changed.state })));
+      });
+      expect(report.aged).toBe(1);
+      expect(observed).toEqual([{ id: db.one<{ id: string }>('SELECT id FROM forward_outbox')?.id, state: 'expired' }]);
+    });
+  });
+});
 
 describe('forward enqueue coverage receipts', () => {
   it('records a legacy outbox identity lazily and releases it before explicit unsent withdrawal', async () => {
