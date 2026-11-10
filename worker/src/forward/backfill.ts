@@ -347,13 +347,6 @@ export async function runLinkBackfill(
 ): Promise<number> {
   const maxPageSize = Math.max(1, Math.min(BACKFILL_CHUNK_SIZE, Math.trunc(chunkSize)));
   const link = db.tx(() => {
-    const staleGaps = db.all<{ id: string; generation: number; generation_start_seq: number }>(
-      `SELECT la.id,la.generation,la.generation_start_seq FROM linked_accounts la
-       WHERE la.status='active' AND la.forward_scrobbles=1 AND EXISTS (
-         SELECT 1 FROM forward_link_gaps g WHERE g.link_id=la.id AND g.generation=la.generation AND g.to_seq IS NULL
-       )`,
-    );
-    for (const stale of staleGaps) closeOpenLinkGap(db, stale, stale.generation_start_seq, now);
     const selected = db.one<LinkedAccountRow>(
       `SELECT la.* FROM linked_accounts la JOIN users u ON u.did=la.did
      WHERE la.status='active' AND la.forward_scrobbles=1 AND la.backfill_state IN ('pending','running')
@@ -362,6 +355,9 @@ export async function runLinkBackfill(
       now,
     );
     if (selected === null) return null;
+    // A schema-54 writer could reset the marker without closing its gap.
+    // Reconcile only the eligible link selected for this bounded backfill turn.
+    closeOpenLinkGap(db, selected, selected.generation_start_seq, now);
     db.run("INSERT OR IGNORE INTO counters(name,label,value) VALUES('link_backfill','service_sequence',0)");
     const nextSeq = db.one<{ value: number }>(
       "UPDATE counters SET value=value+1 WHERE name='link_backfill' AND label='service_sequence' RETURNING value",

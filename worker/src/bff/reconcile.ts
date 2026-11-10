@@ -77,12 +77,12 @@ function signOutLocally(deps: ReconcileDeps, did: string, changed: Record<string
       add(table, db.run(`DELETE FROM ${table} WHERE did = ?`, did).rowsWritten);
     }
     add('lastfm_tokens', db.run('DELETE FROM lastfm_tokens WHERE did = ?', did).rowsWritten);
-    for (const r of db.all<{ id: string; generation: number }>(
-      "SELECT id,generation FROM linked_accounts WHERE did = ? AND status != 'revoked'",
+    for (const r of db.all<{ id: string; generation: number; status: string; forward_scrobbles: number }>(
+      "SELECT id,generation,status,forward_scrobbles FROM linked_accounts WHERE did = ? AND status != 'revoked'",
       did,
     )) {
       revocations.record({ kind: 'linked_account', id: r.id, did });
-      openLinkGap(db, r, 'revoked', now);
+      if (r.status === 'active' && r.forward_scrobbles === 1) openLinkGap(db, r, 'revoked', now);
     }
     add(
       'linked_accounts',
