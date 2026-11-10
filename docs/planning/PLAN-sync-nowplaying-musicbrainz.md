@@ -18,6 +18,7 @@ Owner request:
 - Nothing calls `noteLinkError` (`worker/src/forward/links.ts:296`). The UI shows only `link.status`.
 - The outbox has no maximum attempt count; a row leaves only when it ages out.
 - A verified love-record update that changes its canonical artist/track identity currently does not queue a replacement love or remove the old remote love. The old remote love may remain as an acceptable best-effort sync limitation. Manual-enqueue update tests model a future producer and do not establish current caller coverage.
+- Inherited live-delete survivor behavior is unchanged by B2: an event-caused unlove can be sent while another same-track love is locally present. It is not counted as fixed. The approved [separate P1 LIVE-DELETE-SURVIVOR slice](#live-delete-survivor-p1) follows B2 and precedes finding 32 code.
 
 **Now playing** (`worker/src/do/read/now-playing.ts`, `now_playing` at `schema.ts:491-503`)
 - There is one row per DID, holding `started_at_ms` (the server's receive time), duration, album, album artist, recording MBID, client and source.
@@ -387,3 +388,16 @@ The copy stays short, and no DIDs are shown.
   - Each stays a draft until its scoped acceptance evidence is recorded in the PR body, then is marked ready.
   - Commit small and push often. Stage only the slice's files. Run the secret scan (`scripts/test/secret-scan.test.ts`) before each push.
   - Never force-push to master or to someone else's branch.
+
+## LIVE-DELETE-SURVIVOR (P1)
+
+Planner ruling, 2026-11-10: this is a separate safety slice, next after B2 and
+ahead of finding 32 implementation. B2 discloses the inherited limitation and
+does not ship its expected-red reproduction or count it as repaired. The
+reproduction belongs to this separate slice and must start red and end green.
+
+- For an event-caused unlove (verified live/other-client deletion or any non-API absence), enqueue only when no other locally present love maps to that canonical artist/track key. Recheck at dispatch; a newly present survivor settles the row as `ignored` with a distinct `local_survivor` reason, not a failure.
+- Explicit API unlove always forwards as user intent. No automatic love-update producer is added; LOVE-UPDATE-CALLER remains a later separate slice.
+- Survivor checks must use indexed point lookups. Reuse an existing index if sufficient; otherwise coordinate the next free additive migration after B2’s 56 with finding 32’s still-unallocated number. No new migration is allocated here.
+- Prove the inherited reproduction red on B1 and B2, then green; two-link behavior, enqueue and dispatch races, an API-unlove positive control, and a load-bearing negative control are required.
+- Stack on the ready branch with the fewest real dependencies: B1 for enqueue-only work, B2 if the dispatch path is needed. Readiness requires exact-head local gate, fresh Astra acceptance and green hosted checks.

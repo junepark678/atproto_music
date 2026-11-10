@@ -73,7 +73,7 @@ finding01 closure.
 | Revocation-to-unlove and relink transport order | `worker/test/node/outbox/astra-d050-independent.test.ts` — parameterized “keeps a revoked %s love authoritative while an unlove waits, then sends it once after same-remote relink” | PASS for both ListenBrainz and Last.fm. Real enqueue while revoked creates no outbox row or wire call; same-remote `saveLink` plus backfill creates one queued unlove, which settles sent once through each service's fake client. |
 | Held terminal expiry receipt | `worker/test/node/outbox/astra-d050-independent.test.ts` — parameterized “expires a held %s row without transport and retains its local receipt” | PASS for both service values. Expiry sends nothing and preserves the unretired receipt. |
 | Later API love after coverage reaches DONE | `scripts/test/restore.test.ts` — populated schema-56 merge test above | PASS. The real API love is queued after backfill reaches `done`, maintenance runs, cancellation removes it, and the earlier U remains queued for one delivery; history coverage count stays one. |
-| Inherited active-delete survivor behavior | `worker/test/node/forward/listenbrainz-forward.test.ts` — “known inherited: a verified live delete sends unlove while a same-track projection survives” (`it.fails`) | KNOWN RED, inherited: the real pull writer initially forwards only to the opposite service. Two later independent live URIs do not inherit that import operation’s source exclusion. After one verified deletion, one same-track projection survives; one unlove is queued for each of two destinations (not a same-link dedupe violation). Sol’s actual wire probe sends score 0 while the survivor remains, on both this head and accepted B1 `a2f1ee1`. The direct absence producer is byte-identical to B1. The proposal to suppress this live deletion requires separate scope reconciliation; no production fix or whole-finding closure is claimed. The source-exclusion assertion is scoped to the original imported operation’s identity. |
+| Inherited active-delete survivor behavior | [Separate P1 LIVE-DELETE-SURVIVOR](planning/PLAN-sync-nowplaying-musicbrainz.md#live-delete-survivor-p1) | OUT OF B2 SCOPE, disclosed. Event-caused deletion can still send an unlove while another same-track love is projected, as reproduced on accepted B1 and B2. The reproduction is moved out of this PR to the separate slice, where it must run red then green; no expected-red case ships in B2. Two destination rows are not a same-link dedupe violation. Import source exclusion remains scoped to the original imported operation identity, not unrelated later live URIs. Explicit API unlove and the later LOVE-UPDATE-CALLER slice remain unchanged. |
 | Verified love-record update caller | `docs/planning/PLAN-sync-nowplaying-musicbrainz.md` records that a verified canonical identity change currently does not enqueue the replacement love or remove the old remote love. `worker/test/node/forward/love-authority-signed.test.ts` labels manual update cases as a FUTURE producer model. | ACCEPTED best-effort limitation; old remote love may remain. Manual-enqueue tests are not current caller coverage. No automatic update behavior is implemented here. |
 | Cross-slice acceptance | L2, R12, and finding 48 (pull-love cancellation) | DEFERRED to their owning slices; this B2 matrix does not close those requirements or all of finding01. |
 
@@ -85,7 +85,6 @@ taskset -c 8-11 npx vitest run --config vitest.node.config.ts test/node/outbox/a
 taskset -c 8-11 npx vitest run --config vitest.node.config.ts test/node/forward/listenbrainz-forward.test.ts -t "imports a real Last.fm love through the pull writer" --maxWorkers=1
 taskset -c 8-11 npx vitest run --config vitest.node.config.ts test/node/forward/lastfm-forward.test.ts -t "delivers a linked ListenBrainz love through the real signed Last.fm fake" --maxWorkers=1
 taskset -c 8-11 npx vitest run --config vitest.node.config.ts test/node/forward/love-maintenance-accounting.test.ts test/node/forward/love-deferral-maintenance.test.ts test/node/forward/love-deferral.test.ts --maxWorkers=1
-taskset -c 8-11 npx vitest run --config vitest.node.config.ts test/node/forward/listenbrainz-forward.test.ts -t "known residual: source-excluded pull love plus verified survivor" --maxWorkers=1
 taskset -c 8-11 npx vitest run scripts/test/restore.test.ts worker/test/node/outbox/astra-d050-independent.test.ts worker/test/node/forward/listenbrainz-forward.test.ts worker/test/node/forward/lastfm-forward.test.ts --maxWorkers=1
 taskset -c 8-11 npm run typecheck
 taskset -c 8-11 npx biome check worker/test/node/outbox/astra-d050-independent.test.ts worker/test/node/forward/listenbrainz-forward.test.ts docs/forward-love-maintenance.md
@@ -93,8 +92,8 @@ taskset -c 8-11 npx biome check worker/test/node/outbox/astra-d050-independent.t
 
 The current restore filter passed 4 tests, the transport suite passed 51 tests,
 the two producer tests passed 1 each, and the maintenance command passed 35
-tests (including the seven accounting regressions). The expanded restore and
-forwarder batch passed 148 tests with one explicitly expected source/projection
-failure. Typecheck, scoped Biome, and `git diff --check` passed.
+tests (including the seven accounting regressions). The earlier expanded batch included one explicitly expected source/projection
+reproduction. That case is now removed from B2 and belongs to the separate
+P1 slice; its prior result is not evidence of a B2 fix. Typecheck, scoped Biome, and `git diff --check` passed.
 These are scoped evidence only; exact-head full and hosted gates plus fresh
 acceptance review remain outstanding.
