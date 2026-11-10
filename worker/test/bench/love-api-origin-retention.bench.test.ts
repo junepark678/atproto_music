@@ -107,6 +107,7 @@ it('keeps selected origins and reclaims large unneeded binding history in finite
         try {
           h.seedUser(h.alice);
           const linkId = h.link(h.alice, 'listenbrainz');
+          h.db.run('UPDATE linked_accounts SET generation=2 WHERE id=?', linkId);
           const retainedSeq = size;
           const retainedOperation = `api-op-${retainedSeq}`;
           const retainedUri = `at://${h.alice}/${LOVE}/retained${retainedSeq.toString(36)}`;
@@ -125,21 +126,34 @@ it('keeps selected origins and reclaims large unneeded binding history in finite
                 incarnation,
                 seq,
               );
+              h.db.run(
+                `INSERT INTO love_api_recipients(did,uri,incarnation_key,link_id,generation,aggregate_seq,state,
+                   sent_operation_id,created_at_ms,updated_at_ms)
+                 VALUES(?,?,?, ?,1,?,'released',?,1,1)`,
+                h.alice,
+                uri,
+                incarnation,
+                linkId,
+                seq,
+                operation,
+              );
             }
             h.db.run(
               `INSERT INTO love_api_recipients(did,uri,incarnation_key,link_id,generation,aggregate_seq,state,
                  sent_operation_id,created_at_ms,updated_at_ms)
-               VALUES(?,?,?, ?,1,1,'present',?,1,1)`,
+               VALUES(?,?,?, ?,2,?,'present',?,1,1)`,
               h.alice,
               retainedUri,
               retainedIncarnation,
               linkId,
+              size + 1,
               retainedOperation,
             );
             h.db.run(
-              `INSERT INTO love_api_proof_state(singleton,next_binding_seq,reclaim_kind,binding_cursor,binding_frontier,reclaim_passes)
-               VALUES(1,?,'binding',0,?,1)`,
+              `INSERT INTO love_api_proof_state(singleton,next_binding_seq,next_aggregate_seq,reclaim_kind,binding_cursor,binding_frontier,reclaim_passes)
+               VALUES(1,?,?,'binding',0,?,1)`,
               size + 1,
+              size + 2,
               size,
             );
           });
@@ -173,7 +187,7 @@ it('keeps selected origins and reclaims large unneeded binding history in finite
 
           h.db.run(
             `UPDATE love_api_recipients SET state='released',sent_operation_id=NULL
-             WHERE did=? AND uri=? AND incarnation_key=? AND link_id=? AND generation=1`,
+             WHERE did=? AND uri=? AND incarnation_key=? AND link_id=? AND generation=2`,
             h.alice,
             retainedUri,
             retainedIncarnation,

@@ -621,6 +621,16 @@ asserts the durable post-progress state instead of requiring the dispatch
 transaction itself to reclaim it. A separate production-handoff test checks
 the direct single-page reclaim result after the final dependency releases.
 
+The large 100/1k/10k production-reclaimer fixture now gives every historical
+binding a matching released generation-1 recipient row, advances the linked
+account to generation 2, and keeps one exact current-generation recipient
+live. The reclaimer retains that binding through history cleanup, then deletes
+it only after the current-generation recipient releases. This exercises the
+matching old-generation dependency history that was absent from the earlier
+fixture; production query plans and read/return/VM growth bounds remain flat,
+with the deliberately unbounded scan/sort controls still failing their plan
+oracle.
+
 Restore failure injection now snapshots all eight L2 tables from both the
 readable live DB and backup and compares their complete rows after an injected
 failure at the real CLI `merged` stage (after B2/L2 merge and before file swap).
