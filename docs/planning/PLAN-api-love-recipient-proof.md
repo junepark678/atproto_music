@@ -526,8 +526,8 @@ session state and both fake transports. Direct SQL remains limited to
 legacy/rollback/corruption setup and growth fixtures. Populated schema-57
 producer-derived CLI restore, restored coverage/dispatch/resume, and fresh
 session invocation accounting now pass. Schema-56 producer-derived L2 restore,
-accept-loss behavior across all eight tables, alias-session rescan after the
-injected restore rollback, the complete whole-decision scenario matrix,
+alias-session rescan after the injected restore rollback, the complete
+whole-decision scenario matrix,
 over-128 negative control, and fresh Astra review remain gates.
 
 The direct-SQL worker-bench retention proof runs the production reclaimer over
@@ -558,8 +558,8 @@ path now has per-transaction invocation accounting and bounded origin cleanup
 coverage. A seeded real-CLI failure injection compares all eight L2 tables in
 both live and backup files at the post-merge/pre-swap rollback point.
 Whole-path128 scenario matrix and over-cap control, fresh Astra review of that
-gate, schema-56 producer-derived L2 restoration, accept-loss all-eight-table
-behavior, alias-session rescan after restore rollback, producer-batch pinning,
+gate, schema-56 producer-derived L2 restoration, alias-session rescan after
+restore rollback, producer-batch pinning,
 remaining maintenance scenarios, and scale gates remain pending. Small
 behavior fixtures belong in `worker-node`; growing fixtures belong in
 `worker-bench` with VM/statement/returned-row bounds, not elapsed-time claims.
@@ -662,8 +662,11 @@ Restore failure injection now snapshots all eight L2 tables from both the
 readable live DB and backup and compares their complete rows after an injected
 failure at the real CLI `merged` stage (after B2/L2 merge and before file swap).
 This is rollback/atomicity coverage using seeded rows; it does not replace the
-producer-derived restore and dispatch scenario. Accept-loss all-eight-table
-behavior remains pending. The retained-fact Node integration now creates a
+producer-derived restore and dispatch scenario. The unreadable-live
+`--accept-loss` case now seeds all eight L2 tables for restore-cascade
+verification: revocation cascades recipient/member/window/decision rows,
+bounded reclaim deletes the orphan binding, and the unexpired verified fact,
+intent epoch, and allocator frontiers remain intact. The retained-fact Node integration now creates a
 full 16-row alias page through real API admissions, cancels those unsent
 operations through the production cancellation path, closes/reopens the actual
 Node DB, and proves a new session rescans the full page rather than trusting

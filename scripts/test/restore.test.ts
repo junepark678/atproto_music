@@ -3097,7 +3097,12 @@ describe('restore.ts', () => {
   }, 30_000);
 
   it('with --accept-loss on an unreadable live db, every web session is gone and each credential, link and OAuth session in revocations.log is deleted from the restored copy', async () => {
-    const world = await buildWorld({ journalLinkAndOauth: true });
+    const world = await buildWorld({
+      journalLinkAndOauth: true,
+      beforeBackup: ({ db, clock, linkId }) => {
+        populateLoveApiProofState(db, clock, linkId, 'Backup');
+      },
+    });
     const journal = readFileSync(revocationLogPath(world.state), 'utf8')
       .split('\n')
       .filter((l) => l !== '')
@@ -3179,6 +3184,38 @@ describe('restore.ts', () => {
     expect(
       rows('SELECT next_head_seq,next_group_seq,next_authority_seq FROM forward_deferred_love_maintenance'),
     ).toEqual([{ next_head_seq: 3, next_group_seq: 2, next_authority_seq: 3 }]);
+    expect(rows('SELECT count(*) AS n FROM love_api_recipients')).toEqual([{ n: 0 }]);
+    expect(rows('SELECT count(*) AS n FROM love_api_recipient_members')).toEqual([{ n: 0 }]);
+    expect(rows('SELECT count(*) AS n FROM love_api_window_owners')).toEqual([{ n: 0 }]);
+    expect(rows('SELECT count(*) AS n FROM love_api_unlove_decisions')).toEqual([{ n: 0 }]);
+    expect(rows('SELECT count(*) AS n FROM love_api_bindings')).toEqual([{ n: 1 }]);
+    expect(rows('SELECT count(*) AS n FROM love_api_comparison_facts')).toEqual([{ n: 1 }]);
+    expect(rows('SELECT epoch FROM love_api_intent_epochs WHERE did=?', DID_A)).toEqual([{ epoch: 3 }]);
+    expect(rows('SELECT next_binding_seq,next_aggregate_seq,next_fact_seq FROM love_api_proof_state')).toEqual([
+      { next_binding_seq: 32, next_aggregate_seq: 33, next_fact_seq: 34 },
+    ]);
+    const acceptedDb = openSqliteDb(world.dbPath, { busyTimeoutMs: BUSY_MS });
+    try {
+      expect(reclaimLoveApiProofRows(acceptedDb, world.clock.nowMs(), 8)).toMatchObject({ bindingsDeleted: 1 });
+      expect(acceptedDb.one('SELECT 1 FROM love_api_bindings')).toBeNull();
+      // Unexpired comparison facts remain sticky; accept-loss revocation must
+      // not erase their verified negative while old consumers are cleaning up.
+      expect(acceptedDb.one('SELECT action,cid,conflicted FROM love_api_comparison_facts')).toEqual({
+        action: 'delete',
+        cid: '',
+        conflicted: 0,
+      });
+      expect(acceptedDb.one('SELECT epoch FROM love_api_intent_epochs WHERE did=?', DID_A)).toEqual({ epoch: 3 });
+      expect(
+        acceptedDb.one('SELECT next_binding_seq,next_aggregate_seq,next_fact_seq FROM love_api_proof_state'),
+      ).toEqual({
+        next_binding_seq: 32,
+        next_aggregate_seq: 33,
+        next_fact_seq: 34,
+      });
+    } finally {
+      acceptedDb.close();
+    }
     expect(rows('SELECT did FROM oauth_sessions ORDER BY did')).toEqual([{ did: DID_A }]);
     const restoredDb = openSqliteDb(world.dbPath, { busyTimeoutMs: BUSY_MS });
     try {
