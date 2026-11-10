@@ -596,6 +596,11 @@ per recipient across the fake Last.fm and ListenBrainz transports; a rerun
 sends zero. The coverage-frontier setup is explicit fixture state; API
 admission, PDS SENT, absence, L2 binding/fact/decision, CLI restore, timer, and
 dispatch are production paths. Foreign keys are checked after shutdown. This
+restore case also checks both exact service/link/generation rows joined to the
+single original API binding, selected SENT operation ID, immutable delete
+authorization/fact, accepted payload origin, and window-owner identities. It
+asserts the selected operation/outbox rows and member are gone; origin and
+SENT proof are recovered from durable L2 rows after fresh-server reopen.
 does not yet cover schema-56 producer-generated L2 state, accept-loss of all
 eight tables, failure-stage atomicity, or fresh alias-session rescan after
 rollback.

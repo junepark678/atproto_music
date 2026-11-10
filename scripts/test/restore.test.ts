@@ -1762,6 +1762,104 @@ describe('restore.ts', () => {
       restored.one("SELECT 1 FROM forward_outbox WHERE kind='love' AND dedupe_key=?", source!.operationId),
     ).toBeNull();
     expect(restored.one('SELECT count(*) AS n FROM love_api_unlove_decisions')).toEqual({ n: 2 });
+    const restoredProof = restored.all<{
+      did: string;
+      uri: string;
+      incarnation_key: string;
+      link_id: string;
+      generation: number;
+      state: string;
+      sent_operation_id: string | null;
+      service: string;
+      current_generation: number;
+      api_origin: string;
+      authorization_uri: string;
+      authorization_rev: string;
+      decision_action: string;
+      decision_cid: string;
+      payload_json: string;
+      fact_action: string;
+      fact_cid: string;
+      conflicted: number;
+    }>(
+      `SELECT r.did,r.uri,r.incarnation_key,r.link_id,r.generation,r.state,r.sent_operation_id,
+         l.service,l.generation AS current_generation,b.api_origin,d.authorization_uri,d.authorization_rev,
+         d.fact_action AS decision_action,d.fact_cid AS decision_cid,d.payload_json,
+         f.action AS fact_action,f.cid AS fact_cid,f.conflicted
+       FROM love_api_recipients r
+       JOIN linked_accounts l ON l.id=r.link_id AND l.did=r.did
+       JOIN love_api_bindings b ON b.did=r.did AND b.operation_id=r.sent_operation_id
+       JOIN love_api_unlove_decisions d ON d.did=r.did AND d.uri=r.uri AND d.incarnation_key=r.incarnation_key
+         AND d.link_id=r.link_id AND d.generation=r.generation
+       JOIN love_api_comparison_facts f ON f.authorization_uri=d.authorization_uri AND f.authorization_rev=d.authorization_rev
+       WHERE r.uri=? ORDER BY l.service`,
+      source!.uri,
+    );
+    expect(restoredProof).toHaveLength(2);
+    expect(restoredProof.map((row) => row.service)).toEqual(['lastfm', 'listenbrainz']);
+    for (const row of restoredProof) {
+      expect(row).toMatchObject({
+        did: DID_A,
+        uri: source!.uri,
+        state: 'sealed',
+        sent_operation_id: source!.operationId,
+        current_generation: row.generation,
+        api_origin: 'lastfm',
+        authorization_uri: source!.uri,
+        authorization_rev: absenceRev,
+        decision_action: 'delete',
+        decision_cid: '',
+        fact_action: 'delete',
+        fact_cid: '',
+        conflicted: 0,
+      });
+      expect(JSON.parse(row.payload_json)).toEqual({
+        artist: 'Producer restore Live',
+        track: 'SENT love',
+        album: 'Actual producer album',
+        recordingMbid: '12345678-1234-1234-1234-123456789abc',
+        origin: 'lastfm',
+      });
+    }
+    expect(
+      restored.all(
+        'SELECT did,operation_id,uri,incarnation_key,api_origin FROM love_api_bindings WHERE did=? AND operation_id=?',
+        DID_A,
+        source!.operationId,
+      ),
+    ).toEqual([
+      {
+        did: DID_A,
+        operation_id: source!.operationId,
+        uri: source!.uri,
+        incarnation_key: restoredProof[0]!.incarnation_key,
+        api_origin: 'lastfm',
+      },
+    ]);
+    expect(
+      restored.one(
+        'SELECT 1 FROM love_api_recipient_members WHERE did=? AND uri=? AND operation_id=?',
+        DID_A,
+        source!.uri,
+        source!.operationId,
+      ),
+    ).toBeNull();
+    expect(
+      restored.all(
+        'SELECT did,uri,incarnation_key,link_id,generation FROM love_api_window_owners WHERE uri=? ORDER BY link_id',
+        source!.uri,
+      ),
+    ).toEqual(
+      restoredProof
+        .map(({ did, uri, incarnation_key, link_id, generation }) => ({
+          did,
+          uri,
+          incarnation_key,
+          link_id,
+          generation,
+        }))
+        .sort((a, b) => a.link_id.localeCompare(b.link_id)),
+    );
     const timer = systemd
       .server!.server.features.features.flatMap((feature) => feature.extensions ?? [])
       .find((extension) => extension.name === 'link-backfill')?.timers?.['link-backfill'];
