@@ -1,9 +1,10 @@
-import { access } from 'node:fs/promises';
+import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:net';
-import { dirname } from 'node:path';
-import type { TestPlc } from '@atproto/dev-env';
-import { describe, expect, it } from 'vitest';
-import { createOwnedTestPds, createOwnedTestPlc, type DevEnvAttempt } from './dev-env-startup';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { TestPds, type TestPlc } from '@atproto/dev-env';
+import { describe, expect, it, vi } from 'vitest';
+import { closeOwnedDevEnv, createOwnedTestPds, createOwnedTestPlc, type DevEnvAttempt } from './dev-env-startup';
 
 async function occupy(port: number): Promise<Server> {
   const blocker = createServer();
@@ -39,6 +40,66 @@ const pdsOptions = (plc: TestPlc): Parameters<typeof createOwnedTestPds>[0] => (
 });
 
 describe('owned dev-env startup', () => {
+  it.each(['dataDirectory', 'blobstoreDiskLocation', 'blobstoreDiskTmpLocation'] as const)(
+    'rejects caller storage override %s before the dependency allocates resources',
+    async (field) => {
+      const root = await mkdtemp(join(tmpdir(), 'atmusic-caller-storage-'));
+      const marker = join(root, 'caller-marker');
+      await writeFile(marker, 'caller-owned');
+      const factory = vi.spyOn(TestPds, 'create').mockRejectedValue(new Error('dependency factory was reached'));
+      let starts = 0;
+      try {
+        await expect(
+          createOwnedTestPds({ didPlcUrl: 'http://127.0.0.1:1', hostname: 'storage.test', [field]: root }, undefined, {
+            beforeStart: () => {
+              starts += 1;
+              throw new Error('must not start');
+            },
+          }),
+        ).rejects.toBeInstanceOf(TypeError);
+        expect(factory).not.toHaveBeenCalled();
+        expect(starts).toBe(0);
+        expect(await readFile(marker, 'utf8')).toBe('caller-owned');
+      } finally {
+        factory.mockRestore();
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('closes a real PLC after an earlier fixture fails and preserves every close error', async () => {
+    const first = new Error('first close failed');
+    const last = new Error('last close failed');
+    const plc = await createOwnedTestPlc({});
+    let lastAttempted = false;
+    try {
+      await expect(
+        closeOwnedDevEnv(
+          {
+            close: async () => {
+              throw first;
+            },
+          },
+          plc,
+          {
+            close: async () => {
+              lastAttempted = true;
+              throw last;
+            },
+          },
+        ),
+      ).rejects.toSatisfy((error: unknown) => {
+        expect(error).toBeInstanceOf(AggregateError);
+        expect((error as AggregateError).errors).toEqual([first, last]);
+        return true;
+      });
+      expect(lastAttempted).toBe(true);
+      expect(plc.server.server?.listening).toBe(false);
+    } finally {
+      if (plc.server.server?.listening) await plc.close();
+    }
+  });
+
   it('cleans a PLC after a real occupied-port bind and retries on a fresh autoport', async () => {
     const dbCloseCalls: number[] = [];
     const blockers: Server[] = [];

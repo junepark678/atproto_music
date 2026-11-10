@@ -79,6 +79,19 @@ interface CapturedServer {
   contextCleanupSucceeded?: boolean;
 }
 
+/** Attempt every independently owned fixture even when an earlier close fails. */
+export async function closeOwnedDevEnv(...fixtures: Array<{ close(): Promise<void> } | undefined>): Promise<void> {
+  const errors: unknown[] = [];
+  for (const fixture of fixtures) {
+    try {
+      await fixture?.close();
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  if (errors.length > 0) throw aggregate('dev-env fixture cleanup failed', errors);
+}
+
 async function cleanupFailedServer(kind: Kind, captured: CapturedServer): Promise<void> {
   const { server } = captured;
   const errors: unknown[] = [];
@@ -233,7 +246,6 @@ async function createOwned<T extends { close(): Promise<void> }>(
       }
 
       if (result) {
-        for (const item of captured) item.restoreContext();
         if (kind === 'pds' && captured[0]) {
           const record = captured[0];
           const ownCloseDescriptor = Object.getOwnPropertyDescriptor(result, 'close');
@@ -243,10 +255,32 @@ async function createOwned<T extends { close(): Promise<void> }>(
             enumerable: ownCloseDescriptor?.enumerable ?? false,
             writable: true,
             value: async () => {
-              await originalClose.call(result);
-              for (const root of record.roots) await rm(root, { recursive: true, force: true });
+              const errors: unknown[] = [];
+              try {
+                try {
+                  await originalClose.call(result);
+                } catch (error) {
+                  errors.push(error);
+                }
+                // Never unlink a context's storage until its destructor really completed.
+                if (record.contextCleanupSucceeded) {
+                  for (const root of record.roots) {
+                    try {
+                      await rm(root, { recursive: true, force: true });
+                    } catch (error) {
+                      errors.push(error);
+                    }
+                  }
+                }
+              } finally {
+                for (const item of captured) item.restoreContext();
+                restoreDescriptor(result, 'close', ownCloseDescriptor);
+              }
+              if (errors.length > 0) throw aggregate('dev-env PDS cleanup failed', errors);
             },
           });
+        } else {
+          for (const item of captured) item.restoreContext();
         }
         return result;
       }
@@ -280,10 +314,15 @@ export function createOwnedTestPlc(
   return createOwned('plc', () => TestPlc.create(options), startup);
 }
 
-export function createOwnedTestPds(
+export async function createOwnedTestPds(
   options: Parameters<typeof TestPds.create>[0],
   overrides?: Parameters<typeof TestPds.create>[1],
   startup: DevEnvStartupOptions = {},
 ): Promise<TestPds> {
+  // The dependency allocates its own default temporary roots. Explicit paths
+  // belong to the caller, so refuse them before TestPds.create allocates anything.
+  if (['dataDirectory', 'blobstoreDiskLocation', 'blobstoreDiskTmpLocation'].some((key) => key in options)) {
+    throw new TypeError('owned dev-env PDS does not accept storage directory overrides');
+  }
   return createOwned('pds', () => TestPds.create(options, overrides), startup);
 }

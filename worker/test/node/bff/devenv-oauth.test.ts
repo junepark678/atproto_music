@@ -17,7 +17,7 @@ import {
 } from '../../../src/bff/client-metadata';
 import type { OAuthKeyset } from '../../../src/bff/keyset';
 import { createPolicyFetch } from '../../../src/node/policy-fetch';
-import { createOwnedTestPds, createOwnedTestPlc } from '../support/dev-env-startup';
+import { closeOwnedDevEnv, createOwnedTestPds, createOwnedTestPlc } from '../support/dev-env-startup';
 import { withMigratedDb } from '../support/node-db';
 import { createWorld, freezeDate } from './oauth-world';
 
@@ -270,8 +270,7 @@ describe('the confidential OAuth client against @atproto/dev-env', () => {
         // vitest runs this project sequentially; restore the process fetch even
         // when an assertion or provider operation fails.
         globalThis.fetch = originalFetch;
-        await pds?.close();
-        await plc?.close();
+        await closeOwnedDevEnv(pds, plc);
       }
     });
   }, 60_000);
