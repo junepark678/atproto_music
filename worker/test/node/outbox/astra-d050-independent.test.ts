@@ -6,14 +6,16 @@ import { ensureAccount } from '../../../src/credentials/accounts';
 import { createBox } from '../../../src/crypto/box';
 import type { Db } from '../../../src/do/db';
 import { enqueueHints } from '../../../src/do/ingest/hints';
+import { readLiveEvidence } from '../../../src/do/ingest/live-evidence';
 import { executeAuthorizedRemovals, recordPendingRemoval } from '../../../src/do/ingest/live-pending-removals';
 import { migrate } from '../../../src/do/migrate';
 import { MIGRATIONS } from '../../../src/do/schema';
 import { applyRecordProof } from '../../../src/do/write/apply-record';
+import { runLinkBackfill } from '../../../src/forward/backfill';
 import { expireRows, HELD_RETENTION_MS, holdLinkRows, settleRows } from '../../../src/forward/forward-outbox';
 import { type ForwardRuntime, runForward } from '../../../src/forward/forwarder';
 import { LastfmClient } from '../../../src/forward/lastfm-client';
-import { saveLink } from '../../../src/forward/links';
+import { patchLink, saveLink } from '../../../src/forward/links';
 import { ListenbrainzClient } from '../../../src/forward/listenbrainz-client';
 import { conflictDeferredLoveAuthority } from '../../../src/forward/love-coverage-authority';
 import { remoteLoveState } from '../../../src/forward/love-delivery';
@@ -21,10 +23,12 @@ import { noteForwardLoveCurrent } from '../../../src/forward/love-lanes';
 import { UpstreamPacing } from '../../../src/forward/upstream-pacing';
 import { enqueueRevivedLoves } from '../../../src/musicbrainz/revive-loves';
 import { enqueueForwards } from '../../../src/outbox/forward-enqueue';
+import { cancelUnsent } from '../../../src/outbox/operations';
 import {
   ALICE,
   authorizedLiveOptions,
   deleteProof,
+  liveApplyOptions,
   NOW_MS,
   OPTS,
   putProof,
@@ -52,10 +56,10 @@ function seedLink(db: Db) {
   );
 }
 const uri = (key: string) => `at://${ALICE}/${SCROBBLE}/${key}`;
-async function forward(db: Db) {
+async function forward(db: Db, now = NOW_MS) {
   const submissions: Array<{ type: string; payload: unknown }> = [];
   const feedbacks: Array<{ recordingMbid: string; score: number }> = [];
-  const clock = { nowMs: () => NOW_MS };
+  const clock = { nowMs: () => now };
   const runtime = {
     db,
     clock,
@@ -85,7 +89,7 @@ async function forward(db: Db) {
       },
     }),
   } as unknown as ForwardRuntime;
-  const report = await runForward(runtime, NOW_MS);
+  const report = await runForward(runtime, now);
   return { submissions, feedbacks, report };
 }
 
@@ -464,6 +468,200 @@ it('does not settle or dispatch a stale-generation row after a real remote rotat
     expect(db.one('SELECT state FROM forward_outbox WHERE id=?', row.id)).toEqual({ state: 'expired' });
     expect((await forward(db)).feedbacks).toEqual([]);
     expect(db.one('SELECT count(*) AS n FROM forward_love_delivery')).toEqual({ n: 0 });
+  });
+});
+
+for (const service of ['listenbrainz', 'lastfm'] as const) {
+  for (const priorState of ['queued', 'held', 'sent', 'failed', 'expired', 'ignored', 'cancelled'] as const) {
+    it(`runs deferred coverage from a real ${service} link with prior love ${priorState}`, async () => {
+      await withMigratedDb(async (db) => {
+        seedLink(db);
+        db.run('UPDATE linked_accounts SET service=? WHERE id=?', service, 'replacement-link');
+        const payload = { artist: 'Prior State Artist', track: 'Prior State Track', recordingMbid: REVIVAL_MBID };
+        if (priorState === 'cancelled')
+          db.run(
+            `INSERT INTO operations(id,did,kind,origin,priority,collection,rkey,record_json,digest,state,due_at,
+               created_at_ms,updated_at_ms,send_state)
+             VALUES('prior-love-operation',?,'love.put','web',0,'com.example.atmusic.love','prior-love',?,?,'queued',?,?,?,'unsent')`,
+            ALICE,
+            JSON.stringify(payload),
+            'prior-love-digest',
+            NOW_MS,
+            NOW_MS,
+            NOW_MS,
+          );
+        enqueueForwards(db, {
+          did: ALICE,
+          items: [{ kind: 'love', operationId: 'prior-love-operation', payload }],
+          now: NOW_MS,
+          random: rng,
+        });
+        const loveRow = db.one<{ id: string }>(
+          "SELECT id FROM forward_outbox WHERE link_id='replacement-link' AND kind='love'",
+        )!;
+        if (priorState === 'held') expect(holdLinkRows(db, 'replacement-link', NOW_MS, 1)).toBe(1);
+        else if (
+          priorState === 'sent' ||
+          priorState === 'failed' ||
+          priorState === 'expired' ||
+          priorState === 'ignored'
+        )
+          settleRows(
+            db,
+            [loveRow.id],
+            priorState,
+            NOW_MS + 1,
+            priorState === 'ignored' ? 'fixture_ignored' : 'fixture',
+          );
+        else if (priorState === 'cancelled') expect(cancelUnsent(db, 'prior-love-operation', NOW_MS + 1)).toBe(true);
+
+        const [priorArtistKey, priorTrackKey] = trackKey(payload.artist, payload.track);
+        expect(remoteLoveState(db, { id: 'replacement-link', generation: 1 }, priorArtistKey, priorTrackKey)).toBe(
+          priorState === 'queued' || priorState === 'held' || priorState === 'sent' ? 'love' : 'none',
+        );
+
+        patchLink({ db, clock: { nowMs: () => NOW_MS + 2 } }, ALICE, 'replacement-link', {
+          forwardScrobbles: false,
+        });
+        db.run(
+          `INSERT INTO operations(id,did,kind,origin,priority,collection,rkey,record_json,digest,state,due_at,
+             created_at_ms,updated_at_ms,send_state)
+           VALUES('deferred-unlove-operation',?,'love.delete','web',0,'com.example.atmusic.love','remove-prior-love',?,?,'queued',?,?,?,'unsent')`,
+          ALICE,
+          JSON.stringify(payload),
+          'deferred-unlove-digest',
+          NOW_MS + 3,
+          NOW_MS + 3,
+          NOW_MS + 3,
+        );
+        enqueueForwards(db, {
+          did: ALICE,
+          items: [{ kind: 'unlove', operationId: 'deferred-unlove-operation', payload }],
+          now: NOW_MS + 3,
+          random: rng,
+        });
+        if (priorState === 'held') {
+          const resumed = saveLink(
+            {
+              db,
+              clock: { nowMs: () => NOW_MS + 4 },
+              random: rng,
+              box: createBox(testSecrets().encryptionKeys, rng),
+            },
+            { did: ALICE, service, remoteUser: 'alice', credential: 'same-remote-credential' },
+          );
+          expect(resumed.resumed).toBe(1);
+        }
+        patchLink({ db, clock: { nowMs: () => NOW_MS + 5 } }, ALICE, 'replacement-link', {
+          forwardScrobbles: true,
+        });
+        db.run("UPDATE users SET indexing_state='current' WHERE did=?", ALICE);
+        for (let turn = 0; turn < 8; turn++) await runLinkBackfill(db, rng, NOW_MS + 10 + turn);
+        const unloveQueued = db.one("SELECT 1 FROM forward_outbox WHERE kind='unlove' AND state='queued'") !== null;
+        expect(unloveQueued).toBe(priorState === 'queued' || priorState === 'held' || priorState === 'sent');
+        if (unloveQueued) {
+          for (let turn = 0; turn < 8; turn++) {
+            await forward(db, NOW_MS + 1_000 + turn * 1_000);
+            if (db.one("SELECT 1 FROM forward_outbox WHERE kind='unlove' AND state='sent'") !== null) break;
+          }
+          expect(db.one("SELECT state FROM forward_outbox WHERE kind='unlove'")).toEqual({ state: 'sent' });
+        } else {
+          expect(db.one("SELECT count(*) AS n FROM forward_outbox WHERE kind='unlove'")).toEqual({ n: 0 });
+        }
+      });
+    });
+  }
+}
+
+it('lets a verified surviving love projection veto deferred unlove, then sends one after verified removal', async () => {
+  const repo = await repoFor('alice');
+  const collection = 'com.example.atmusic.love';
+  const rkey = 'survivor-wire-control';
+  const makeRecord = (track: string, createdAt: string) => ({
+    $type: collection,
+    artist: 'Survivor Artist',
+    track,
+    recordingMbid: REVIVAL_MBID,
+    createdAt,
+  });
+  const initial = await putProof(repo, collection, rkey, makeRecord('Survivor Track', '2026-01-15T11:00:00Z'));
+
+  await withMigratedDb(async (db) => {
+    seedLink(db);
+    const uri = `at://${ALICE}/${collection}/${rkey}`;
+    const applyVerified = (
+      proof: Awaited<ReturnType<typeof putProof | typeof deleteProof>>,
+      action: 'create' | 'update' | 'delete',
+      now: number,
+    ) => {
+      enqueueHints(db, [
+        {
+          did: ALICE,
+          collection,
+          rkey,
+          source: 'jetstream',
+          hintRev: proof.commit.rev,
+          live: proof.state === 'absent' ? { operation: 'delete' as const } : { operation: action, cid: proof.cid },
+          receiptMs: now,
+        },
+      ]);
+      db.tx(() =>
+        applyRecordProof(db, proof, {
+          ...liveApplyOptions(proof, rng, action),
+          live: { random: rng, evidence: readLiveEvidence(db, uri, now), legacyRev: null },
+        }),
+      );
+    };
+    applyVerified(initial, 'create', NOW_MS);
+    expect((await forward(db)).feedbacks).toEqual([{ recordingMbid: REVIVAL_MBID, score: 1 }]);
+
+    patchLink({ db, clock: { nowMs: () => NOW_MS + 1 } }, ALICE, 'replacement-link', { forwardScrobbles: false });
+    const firstDelete = await deleteProof(repo, collection, rkey);
+    applyVerified(firstDelete, 'delete', NOW_MS + 2);
+    expect(db.one("SELECT count(*) AS n FROM forward_deferred_love_intents WHERE kind='unlove'")).toEqual({ n: 1 });
+
+    const survivor = await putProof(repo, collection, rkey, makeRecord('Survivor Track', '2026-01-15T11:01:00Z'));
+    applyVerified(survivor, 'create', NOW_MS + 3);
+    expect(db.one('SELECT count(*) AS n FROM loves WHERE did=?', ALICE)).toEqual({ n: 1 });
+
+    patchLink({ db, clock: { nowMs: () => NOW_MS + 2 } }, ALICE, 'replacement-link', { forwardScrobbles: true });
+    db.run("UPDATE users SET indexing_state='current' WHERE did=?", ALICE);
+    for (let turn = 0; turn < 8; turn++) await runLinkBackfill(db, rng, NOW_MS + 3 + turn);
+    expect(db.one("SELECT count(*) AS n FROM forward_outbox WHERE kind='unlove'")).toEqual({ n: 0 });
+    expect((await forward(db)).feedbacks).not.toContainEqual({ recordingMbid: REVIVAL_MBID, score: 0 });
+    const [survivorArtistKey, survivorTrackKey] = trackKey('Survivor Artist', 'Survivor Track');
+    expect(remoteLoveState(db, { id: 'replacement-link', generation: 1 }, survivorArtistKey, survivorTrackKey)).toBe(
+      'love',
+    );
+
+    patchLink({ db, clock: { nowMs: () => NOW_MS + 20 } }, ALICE, 'replacement-link', { forwardScrobbles: false });
+    const finalDelete = await deleteProof(repo, collection, rkey);
+    applyVerified(finalDelete, 'delete', NOW_MS + 21);
+    expect(db.one('SELECT count(*) AS n FROM loves WHERE did=?', ALICE)).toEqual({ n: 0 });
+    patchLink({ db, clock: { nowMs: () => NOW_MS + 21 } }, ALICE, 'replacement-link', { forwardScrobbles: true });
+    for (let turn = 0; turn < 8; turn++) await runLinkBackfill(db, rng, NOW_MS + 22 + turn);
+    const removedFeedbacks: Array<{ recordingMbid: string; score: number }> = [];
+    for (let turn = 0; turn < 8; turn++) {
+      removedFeedbacks.push(...(await forward(db, NOW_MS + 1_000 + turn * 1_000)).feedbacks);
+      if (db.one("SELECT 1 FROM forward_outbox WHERE kind='unlove' AND state='sent'") !== null) break;
+    }
+    expect(
+      removedFeedbacks,
+      JSON.stringify({
+        outbox: db.all(
+          "SELECT kind,state,last_error,due_at,dedupe_key FROM forward_outbox WHERE kind IN ('love','unlove')",
+        ),
+        intents: db.all(
+          'SELECT kind,operation_id,intent_seq,authorization_uri,authorization_rev FROM forward_deferred_love_intents',
+        ),
+        heads: db.all('SELECT head_seq,next_seq,live_from_seq,armed_seq,decided_seq FROM forward_deferred_love_heads'),
+        link: db.one(
+          "SELECT forward_scrobbles,backfill_state,backfill_discovery_done FROM linked_accounts WHERE id='replacement-link'",
+        ),
+        counters: db.all("SELECT label,value FROM counters WHERE name='link_coverage' ORDER BY label"),
+      }),
+    ).toContainEqual({ recordingMbid: REVIVAL_MBID, score: 0 });
+    expect(db.one("SELECT count(*) AS n FROM forward_outbox WHERE kind='unlove' AND state='sent'")).toEqual({ n: 1 });
   });
 });
 

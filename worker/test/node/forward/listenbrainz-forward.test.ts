@@ -56,6 +56,8 @@ import { openSqliteDb, type SqliteDb } from '../../../src/node/sqlite-db';
 import { enqueueForwards, type ForwardItem } from '../../../src/outbox/forward-enqueue';
 import { enqueueLove, enqueueUnlove } from '../../../src/outbox/love-ops';
 import { cancelUnsent } from '../../../src/outbox/operations';
+import { stageLovePage } from '../../../src/sync/pull-staging';
+import { writePullSlice } from '../../../src/sync/pull-writer';
 import { closeApps, startApp, type TestApp, testSecretsDocument } from '../support/app';
 import { FakeLastfm } from '../support/fake-lastfm';
 import { FakeListenBrainz, type LbSubmission } from '../support/fake-listenbrainz';
@@ -191,6 +193,64 @@ function queueDelete(w: World, linkId: string, id: string, listenedAt: number, a
 }
 
 describe('ListenBrainz forwarding', () => {
+  it('imports a real Last.fm love through the pull writer and excludes its source before ListenBrainz wire dispatch', async () => {
+    const w = await world();
+    const targetLinkId = w.link();
+    const sourceLinkId = 'linked-pull-lastfm-source';
+    w.app.db.run(
+      `INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,forward_scrobbles,
+         forward_now_playing,pull_enabled,status,created_at_ms,updated_at_ms)
+       VALUES(?,?,'lastfm','remote-fm',X'00','e1',1,1,1,'active',?,?)`,
+      sourceLinkId,
+      ALICE,
+      w.clock.nowMs(),
+      w.clock.nowMs(),
+    );
+    w.app.db.run(
+      `INSERT INTO linked_pull_state(link_id,generation,source_service,source_account,listen_watermark_ms,updated_at_ms)
+       VALUES(?,1,'lastfm','remote-fm',0,?)`,
+      sourceLinkId,
+      w.clock.nowMs(),
+    );
+    const recordingMbid = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    expect(
+      stageLovePage(w.app.db, {
+        linkId: sourceLinkId,
+        generation: 1,
+        sourceService: 'lastfm',
+        sourceAccount: 'remote-fm',
+        did: ALICE,
+        proposedCursor: null,
+        proposedBoundaryMs: w.clock.nowMs(),
+        proposedBoundaryKey: null,
+        nowMs: w.clock.nowMs(),
+        items: [
+          {
+            itemKey: 'remote-fm-love',
+            artist: 'Imported Band',
+            track: 'Imported Song',
+            recordingMbid,
+            payload: { artist: 'Imported Band', track: 'Imported Song', recordingMbid },
+          },
+        ],
+      }),
+    ).toEqual(['accepted']);
+    const written = await writePullSlice(w.app.composed.core.deps, {
+      linkId: sourceLinkId,
+      generation: 1,
+      available: async () => ({ available: true }),
+    });
+    expect(written.accepted).toBe(1);
+    expect(
+      w.app.db.all<{ link_id: string; state: string }>(
+        "SELECT link_id,state FROM forward_outbox WHERE kind='love' ORDER BY link_id",
+      ),
+    ).toEqual([{ link_id: targetLinkId, state: 'queued' }]);
+    await w.run();
+    expect(w.lb.feedback.map((entry) => entry.json)).toEqual([{ recording_mbid: recordingMbid, score: 1 }]);
+    expect(w.rows().find((row) => row.link_id === targetLinkId)).toMatchObject({ kind: 'love', state: 'sent' });
+  });
+
   it.each([false, true])(
     'preserves schema-55 accepted effects unless a retained B2 conflict vetoes them (%s)',
     async (conflicted) => {

@@ -46,6 +46,7 @@ import { seededRandom } from '@atmusic/core/test-support/random';
 import { fromMs } from '@atmusic/core/timestamp';
 import { build } from 'esbuild';
 import { afterEach, describe, expect, it } from 'vitest';
+import type { ExtensionContext } from '../../worker/src/app/host.ts';
 import { FileRevocations, revocationLogPath } from '../../worker/src/app/revocations.ts';
 import { OAuthSessionStore } from '../../worker/src/bff/oauth-stores.ts';
 import { createWebSessions } from '../../worker/src/bff/sessions.ts';
@@ -60,7 +61,11 @@ import { MIGRATIONS, SCHEMA_VERSION, TABLE_CLASS } from '../../worker/src/do/sch
 import { applyRecordProof } from '../../worker/src/do/write/apply-record.ts';
 import { runLinkBackfill } from '../../worker/src/forward/backfill.ts';
 import { settleRows } from '../../worker/src/forward/forward-outbox.ts';
-import { FORWARD_LOVE_RECORDING_LOOKUP_SQL } from '../../worker/src/forward/forwarder.ts';
+import {
+  FORWARD_LOVE_RECORDING_LOOKUP_SQL,
+  type ForwardRuntime,
+  runForward,
+} from '../../worker/src/forward/forwarder.ts';
 import {
   deleteLink,
   getLinkById,
@@ -69,8 +74,10 @@ import {
   revokeLink,
   saveLink,
 } from '../../worker/src/forward/links.ts';
+import { ListenbrainzClient } from '../../worker/src/forward/listenbrainz-client.ts';
 import { runDeferredLoveMaintenance } from '../../worker/src/forward/love-deferral-maintenance.ts';
 import { admitForwardIdentity } from '../../worker/src/forward/projection.ts';
+import { UpstreamPacing } from '../../worker/src/forward/upstream-pacing.ts';
 import { enqueueCoverArt, putCoverArt } from '../../worker/src/musicbrainz/cover-art-store.ts';
 import { createBackups } from '../../worker/src/node/backup.ts';
 import { type ExitCode, type RunningServer, run } from '../../worker/src/node/run.ts';
@@ -78,6 +85,7 @@ import { parseSecrets, type Secrets } from '../../worker/src/node/secrets.ts';
 import { openSqliteDb, type SqliteDb } from '../../worker/src/node/sqlite-db.ts';
 import { enqueueForwards } from '../../worker/src/outbox/forward-enqueue.ts';
 import { acceptListens } from '../../worker/src/outbox/ingress.ts';
+import { enqueueLove } from '../../worker/src/outbox/love-ops.ts';
 import { cancelUnsent } from '../../worker/src/outbox/operations.ts';
 import {
   captureLog,
@@ -330,8 +338,15 @@ function populateDeferredLoveState(db: SqliteDb, clock: FixedClock, linkId: stri
   const tag = label.toLowerCase();
   const loveOperation = `${tag}-delivery-love`;
   const unloveOperation = `${tag}-deferred-unlove`;
-  const lovePayload = { artist: 'Restore Matrix Artist', track: `${label} delivery`, origin: 'web' };
-  const deferredPayload = { artist: 'Restore Matrix Artist', track: `${label} deferred`, origin: 'web' };
+  const sharedPayload = {
+    artist: 'Restore Matrix Artist',
+    track: `${label} shared track`,
+    recordingMbid: '8f3471b5-7e6a-48da-86a9-c1c07a0f47ae',
+    origin: 'web',
+  };
+  const lovePayload = sharedPayload;
+  const deferredPayload = sharedPayload;
+  db.run("UPDATE linked_accounts SET service='listenbrainz' WHERE id=?", linkId);
   const [deliveryArtist, deliveryTrack] = trackKey(lovePayload.artist, lovePayload.track);
   const [deferredArtist, deferredTrack] = trackKey(deferredPayload.artist, deferredPayload.track);
 
@@ -422,6 +437,52 @@ function populateDeferredLoveState(db: SqliteDb, clock: FixedClock, linkId: stri
   )
     throw new Error(`restore fixture ${label} did not populate all six B2 tables`);
   return unloveOperation;
+}
+
+function restoreB2Snapshot(path: string): string {
+  const tables: Array<[string, string]> = [
+    ['forward_love_delivery', 'link_id,generation,love_artist_key,love_track_key'],
+    ['forward_deferred_love_heads', 'link_id,generation,love_artist_key,love_track_key'],
+    ['forward_deferred_love_intents', 'link_id,generation,love_artist_key,love_track_key,intent_seq'],
+    ['forward_deferred_love_witnesses', 'link_id,generation,operation_id'],
+    ['forward_deferred_love_authorities', 'authorization_uri,authorization_rev'],
+    ['forward_deferred_love_maintenance', 'singleton'],
+    ['forward_receipts', 'link_id,generation,kind,dedupe_key'],
+    ['forward_link_gaps', 'link_id,generation,from_seq'],
+    ['forward_outbox', 'id'],
+  ];
+  return JSON.stringify(
+    tables.map(([table, order]) => [table, query(path, `SELECT * FROM ${table} ORDER BY ${order}`)]),
+  );
+}
+
+async function dispatchListenbrainz(
+  db: SqliteDb,
+  now: number,
+): Promise<{ report: Awaited<ReturnType<typeof runForward>>; feedbacks: unknown[] }> {
+  const feedbacks: unknown[] = [];
+  const clock = { nowMs: () => now };
+  const listenbrainz = new ListenbrainzClient({
+    apiRoot: 'https://listenbrainz.invalid/',
+    fetch: async (_url, init) => {
+      feedbacks.push(JSON.parse(String(init?.body)));
+      return new Response(JSON.stringify({ status: 'ok' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    },
+  });
+  const runtime = {
+    db,
+    clock,
+    random: seededRandom(741),
+    log: { log: () => undefined },
+    box: { openText: () => 'fixture-token' },
+    pacing: new UpstreamPacing(clock),
+    lastfm: null,
+    listenbrainz,
+  } as unknown as ForwardRuntime;
+  return { report: await runForward(runtime, now), feedbacks };
 }
 
 /** Overwrites the live database with bytes that are not SQLite (a failed disk). */
@@ -1111,15 +1172,18 @@ describe('restore.ts', () => {
       group_seq: number;
       authority_seq: number;
       due_seq: number;
+      maintenance_seq: number;
     }>(
       `SELECT (SELECT coalesce(max(head_seq),0) FROM forward_deferred_love_heads) AS head_seq,
          (SELECT coalesce(max(armed_seq),0) FROM forward_deferred_love_heads) AS armed_seq,
+         (SELECT coalesce(max(maintenance_seq),0) FROM forward_deferred_love_heads) AS maintenance_seq,
          (SELECT coalesce(max(group_seq),0) FROM forward_deferred_love_witnesses) AS group_seq,
          (SELECT coalesce(max(authority_seq),0) FROM forward_deferred_love_authorities) AS authority_seq,
          (SELECT coalesce(max(due_seq),0) FROM forward_deferred_love_authorities) AS due_seq`,
     )!;
     expect(allocator.next_head_seq).toBeGreaterThan(frontier.head_seq);
     expect(allocator.next_head_seq).toBeGreaterThan(frontier.armed_seq);
+    expect(allocator.next_head_seq).toBeGreaterThan(frontier.maintenance_seq);
     expect(allocator.next_group_seq).toBeGreaterThan(frontier.group_seq);
     expect(allocator.next_authority_seq).toBeGreaterThan(frontier.authority_seq);
     expect(allocator.next_authority_seq).toBeGreaterThan(frontier.due_seq);
@@ -1130,6 +1194,30 @@ describe('restore.ts', () => {
          WHERE i.operation_id='live-deferred-unlove' AND a.state='active'`,
       ),
     ).toEqual({ operation_id: 'live-deferred-unlove' });
+    expect(
+      db.one(
+        `SELECT count(*) AS n FROM forward_deferred_love_heads h
+         JOIN forward_love_delivery d ON d.link_id=h.link_id AND d.generation=h.generation
+           AND d.love_artist_key=h.love_artist_key AND d.love_track_key=h.love_track_key
+         JOIN forward_deferred_love_intents i ON i.link_id=h.link_id AND i.generation=h.generation
+           AND i.love_artist_key=h.love_artist_key AND i.love_track_key=h.love_track_key
+         JOIN forward_deferred_love_witnesses w ON w.link_id=i.link_id AND w.generation=i.generation
+           AND w.operation_id=i.operation_id
+         JOIN forward_deferred_love_authorities a ON a.authorization_uri=i.authorization_uri
+           AND a.authorization_rev=i.authorization_rev
+         WHERE i.operation_id='live-deferred-unlove' AND i.kind='unlove' AND w.kind=i.kind
+           AND w.love_artist_key=i.love_artist_key AND w.love_track_key=i.love_track_key
+           AND w.authorization_uri=i.authorization_uri AND w.authorization_rev=i.authorization_rev
+           AND a.state='active' AND d.last_sent_kind='love' AND d.last_sent_dedupe_key='live-delivery-love'`,
+      ),
+    ).toEqual({ n: 1 });
+    const headSequences = db.one<{ next_seq: number; live_from_seq: number; intent_seq: number }>(
+      `SELECT h.next_seq,h.live_from_seq,max(i.intent_seq) AS intent_seq FROM forward_deferred_love_heads h
+       JOIN forward_deferred_love_intents i USING(link_id,generation,love_artist_key,love_track_key)
+       WHERE i.operation_id='live-deferred-unlove' GROUP BY h.link_id,h.generation,h.love_artist_key,h.love_track_key`,
+    )!;
+    expect(headSequences.next_seq).toBeGreaterThan(headSequences.intent_seq);
+    expect(headSequences.live_from_seq).toBeLessThanOrEqual(headSequences.next_seq);
     expect(db.one('SELECT 1 FROM forward_deferred_love_intents WHERE operation_id=?', backupUnlove!)).toBeNull();
     for (const table of [
       'forward_love_delivery',
@@ -1140,9 +1228,132 @@ describe('restore.ts', () => {
       'forward_deferred_love_maintenance',
     ])
       expect(db.one(`SELECT 1 FROM ${table} LIMIT 1`)).not.toBeNull();
+    patchLink({ db, clock: world.clock }, DID_A, world.ids.link!, { forwardScrobbles: true });
+    db.run("UPDATE users SET indexing_state='current' WHERE did=?", DID_A);
+    const extensions = systemd.server!.server.features.features.flatMap((feature) => feature.extensions ?? []);
+    const backfillTimer = extensions.find((extension) => extension.name === 'link-backfill')?.timers?.['link-backfill'];
+    expect(backfillTimer).toBeTypeOf('function');
+    const scheduled: number[] = [];
+    const timerContext = {
+      schedule: (_name: string, at: number) => {
+        scheduled.push(at);
+        return at;
+      },
+      kick: () => null,
+    } as unknown as ExtensionContext;
+    for (let turn = 0; turn < 8; turn++) {
+      await backfillTimer!(world.clock.nowMs() + turn, timerContext);
+      if (db.one("SELECT 1 FROM forward_outbox WHERE kind='unlove' AND state='queued'") !== null) break;
+    }
+    for (let turn = 8; turn < 16; turn++) {
+      if (
+        db.one<{ backfill_state: string }>('SELECT backfill_state FROM linked_accounts WHERE id=?', world.ids.link!)
+          ?.backfill_state === 'done'
+      )
+        break;
+      await backfillTimer!(world.clock.nowMs() + turn, timerContext);
+    }
+    expect(db.one('SELECT backfill_state FROM linked_accounts WHERE id=?', world.ids.link!)).toEqual({
+      backfill_state: 'done',
+    });
+    expect(scheduled.length).toBeGreaterThan(0);
+    expect(
+      db.one("SELECT state FROM forward_outbox WHERE kind='unlove' AND dedupe_key='live-deferred-unlove'"),
+    ).toEqual({ state: 'queued' });
+    const laterLove = await enqueueLove(systemd.server!.server.app.core.deps, {
+      did: DID_A,
+      input: {
+        artist: 'Restore Matrix Artist',
+        track: 'Live shared track',
+        recordingMbid: '8f3471b5-7e6a-48da-86a9-c1c07a0f47ae',
+      },
+      origin: 'web',
+    });
+    expect(laterLove.ok).toBe(true);
+    if (!laterLove.ok) throw new Error('restore fixture later API love was rejected');
+    expect(db.one('SELECT state FROM operations WHERE id=?', laterLove.operation.id)).toEqual({ state: 'queued' });
+    runDeferredLoveMaintenance(db, world.clock.nowMs() + 20_000);
+    expect(cancelUnsent(db, laterLove.operation.id, world.clock.nowMs() + 21_000)).toBe(true);
+    runDeferredLoveMaintenance(db, world.clock.nowMs() + 22_000);
+    expect(
+      db.one(
+        "SELECT count(*) AS n FROM forward_outbox WHERE kind='unlove' AND dedupe_key='live-deferred-unlove' AND state='queued'",
+      ),
+    ).toEqual({ n: 1 });
+    expect(
+      db.one("SELECT value FROM counters WHERE name='link_coverage' AND label='deferred_coverage_unlove'"),
+    ).toEqual({ value: 1 });
+    const feedbacks: unknown[] = [];
+    for (let turn = 0; turn < 8; turn++) {
+      const delivered = await dispatchListenbrainz(db, world.clock.nowMs() + 10_000 + turn * 10_000);
+      feedbacks.push(...delivered.feedbacks);
+      if (
+        db.one(
+          "SELECT 1 FROM forward_outbox WHERE kind='unlove' AND dedupe_key='live-deferred-unlove' AND state='sent'",
+        ) !== null
+      )
+        break;
+    }
+    expect(feedbacks).toContainEqual({ recording_mbid: '8f3471b5-7e6a-48da-86a9-c1c07a0f47ae', score: 0 });
+    expect(
+      db.one("SELECT state FROM forward_outbox WHERE kind='unlove' AND dedupe_key='live-deferred-unlove'"),
+    ).toEqual({ state: 'sent' });
+    expect(
+      db.one(
+        "SELECT last_sent_kind,last_sent_dedupe_key FROM forward_love_delivery WHERE last_sent_dedupe_key='live-deferred-unlove'",
+      ),
+    ).toEqual({ last_sent_kind: 'unlove', last_sent_dedupe_key: 'live-deferred-unlove' });
     await stopServer(systemd.server!.server);
     systemd.server = null;
     expect(query(world.dbPath, 'PRAGMA foreign_key_check')).toEqual([]);
+  }, 30_000);
+
+  it('keeps populated schema-56 live and backup state intact when the completed merge fails before the file swap', async () => {
+    const world = await buildWorld({
+      beforeBackup: ({ db, clock, linkId }) => {
+        populateDeferredLoveState(db, clock, linkId, 'Backup');
+      },
+      afterBackup: ({ db, clock, linkId }) => {
+        populateDeferredLoveState(db, clock, linkId, 'Live');
+      },
+    });
+    const backupBytes = readFileSync(world.backupPath);
+    const liveBefore = restoreB2Snapshot(world.dbPath);
+    const backupBefore = restoreB2Snapshot(world.backupPath);
+    for (const table of [
+      'forward_love_delivery',
+      'forward_deferred_love_heads',
+      'forward_deferred_love_intents',
+      'forward_deferred_love_witnesses',
+      'forward_deferred_love_authorities',
+      'forward_deferred_love_maintenance',
+    ]) {
+      expect(query(world.dbPath, `SELECT count(*) AS n FROM ${table}`)[0]?.n).toBeGreaterThan(0);
+      expect(query(world.backupPath, `SELECT count(*) AS n FROM ${table}`)[0]?.n).toBeGreaterThan(0);
+    }
+    const servicePort = await freePort();
+    const systemd = new FakeSystemd(world, { servicePort });
+    await systemd.boot();
+    const result = await restoreCli(
+      world,
+      systemd,
+      [...baseArgs(world), '--listen', `127.0.0.1:${servicePort}`],
+      (step) => {
+        if (step === 'merged') throw new Error('injected after complete six-table merge');
+      },
+    );
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain('failed (Error)');
+    expect(result.stderr).toContain('both units are left stopped');
+    expect(systemd.server).toBeNull();
+    expect(restoreB2Snapshot(world.dbPath)).toBe(liveBefore);
+    expect(restoreB2Snapshot(world.backupPath)).toBe(backupBefore);
+    expect(readFileSync(world.backupPath).equals(backupBytes)).toBe(true);
+    expect(restoreB2Snapshot(`${world.dbPath}.pre-restore`)).toBe(liveBefore);
+    expect(existsSync(`${world.dbPath}.restore.tmp`)).toBe(false);
+    expect(existsSync(`${world.dbPath}.restore.tmp-wal`)).toBe(false);
+    expect(query(world.dbPath, 'PRAGMA foreign_key_check')).toEqual([]);
+    expect(query(`${world.dbPath}.pre-restore`, 'PRAGMA foreign_key_check')).toEqual([]);
   }, 30_000);
 
   it('keeps the newest live evidence, candidate, and pending removal when a readable restore merges an older backup', async () => {

@@ -226,6 +226,7 @@ describe('Last.fm forwarding', () => {
     });
     expect(accepted.accepted).toBe(1);
     expect(w.rows(ALICE)).toHaveLength(1);
+    expect(w.rows(ALICE).some((row) => row.link_id === sourceLinkId)).toBe(false);
     await w.run();
     expect(w.lastfm.loveCalls.map(({ method, artist, track }) => [method, artist, track])).toEqual([
       ['track.love', 'Band', 'Song'],
