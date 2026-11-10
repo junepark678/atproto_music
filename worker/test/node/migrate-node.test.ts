@@ -75,7 +75,7 @@ describe('migrate over node:sqlite', () => {
   it('migration 30 creates durable per-generation pull state, staging and tombstone tables', () => {
     const db = freshDb();
     migrate(db);
-    expect(SCHEMA_VERSION).toBe(55);
+    expect(SCHEMA_VERSION).toBe(56);
     for (const table of [
       'linked_pull_state',
       'linked_pull_items',
@@ -186,7 +186,7 @@ describe('migrate over node:sqlite', () => {
     const before = db.all(
       'SELECT id,link_id,generation,kind,dedupe_key,payload_json,state,created_at_ms FROM forward_outbox ORDER BY id',
     );
-    expect(migrate(db)).toEqual({ status: 'ready', version: 55 });
+    expect(migrate(db, MIGRATIONS.slice(0, 55))).toEqual({ status: 'ready', version: 55 });
     expect(
       db.all(
         'SELECT id,link_id,generation,kind,dedupe_key,payload_json,state,created_at_ms FROM forward_outbox ORDER BY id',
