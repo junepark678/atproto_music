@@ -136,8 +136,15 @@ it('charges complete eight-decision and eight-orphan maintenance across shared i
         `orphan-inc-${i}`,
         8 + i,
       );
-    const observations: Array<{ writes: number; visits: number; reads: number; decisions: number; reclaim: number }> =
-      [];
+    const observations: Array<{
+      writes: number;
+      visits: number;
+      reads: number;
+      decisions: number;
+      reclaim: number;
+      transactions: Maintenance['transactions'];
+      units: Maintenance['lanes'];
+    }> = [];
     let acknowledgements = 0;
     for (let invocation = 0; invocation < 20; invocation++) {
       const before = total(db);
@@ -157,6 +164,8 @@ it('charges complete eight-decision and eight-orphan maintenance across shared i
         decisions:
           result.decisions.queued + result.decisions.deferred + result.decisions.replay + result.decisions.refused,
         reclaim: result.reclaimUnits,
+        transactions: result.transactions,
+        units: result.lanes,
       });
       if (
         db.one('SELECT 1 FROM love_api_unlove_decisions LIMIT 1') === null &&
