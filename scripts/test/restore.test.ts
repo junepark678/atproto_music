@@ -53,7 +53,7 @@ import { createAppPassword, revokeAppPassword, verifyAppPassword } from '../../w
 import { type Box, createBox } from '../../worker/src/crypto/box.ts';
 import { executeAuthorizedRemovals, nextPendingRemovalDue } from '../../worker/src/do/ingest/live-pending-removals';
 import { migrate } from '../../worker/src/do/migrate.ts';
-import { SCHEMA_VERSION, TABLE_CLASS } from '../../worker/src/do/schema.ts';
+import { MIGRATIONS, SCHEMA_VERSION, TABLE_CLASS } from '../../worker/src/do/schema.ts';
 import { applyRecordProof } from '../../worker/src/do/write/apply-record.ts';
 import { FORWARD_LOVE_RECORDING_LOOKUP_SQL } from '../../worker/src/forward/forwarder.ts';
 import { deleteLink, getLinkById, openLinkCredential, saveLink } from '../../worker/src/forward/links.ts';
@@ -583,6 +583,81 @@ function boxOf(doc: Record<string, unknown>): { box: Box; secrets: Secrets } {
 // ---------------------------------------------------------------------------
 
 describe('restore.ts', () => {
+  it('retains live receipts and gaps in a readable restore', async () => {
+    const world = await buildWorld({
+      backupSql: [
+        `INSERT INTO forward_outbox(id,link_id,did,kind,dedupe_key,payload_json,state,attempts,due_at,created_at_ms,updated_at_ms)
+         SELECT 'backup-receipt-row',id,did,'scrobble','backup-receipt','{}','sent',0,10,10,10 FROM linked_accounts WHERE did='${DID_A}'`,
+        `INSERT INTO forward_receipts(link_id,generation,kind,dedupe_key,created_at_ms)
+         SELECT id,generation,'scrobble','backup-receipt',10 FROM linked_accounts WHERE did='${DID_A}'`,
+      ],
+      liveSql: [
+        `INSERT INTO forward_outbox(id,link_id,did,kind,dedupe_key,payload_json,state,attempts,due_at,created_at_ms,updated_at_ms)
+         SELECT 'live-receipt-row',id,did,'love','live-receipt','{}','sent',0,20,20,20 FROM linked_accounts WHERE did='${DID_A}'`,
+        `INSERT INTO forward_receipts(link_id,generation,kind,dedupe_key,created_at_ms)
+         SELECT id,generation,'love','live-receipt',20 FROM linked_accounts WHERE did='${DID_A}'`,
+        `INSERT INTO forward_link_gaps(link_id,generation,from_seq,to_seq,reason,opened_at_ms,closed_at_ms)
+         SELECT id,generation,3,8,'revoked',20,25 FROM linked_accounts WHERE did='${DID_A}'`,
+      ],
+    });
+    const systemd = new FakeSystemd(world, { servicePort: null });
+    await systemd.boot();
+    const result = await restoreCli(world, systemd, [...baseArgs(world), '--no-ready-check']);
+    expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(query(world.dbPath, 'SELECT kind,dedupe_key FROM forward_receipts ORDER BY generation,kind')).toEqual([
+      { kind: 'love', dedupe_key: 'live-receipt' },
+      { kind: 'scrobble', dedupe_key: 'backup-receipt' },
+    ]);
+    expect(query(world.dbPath, 'SELECT generation,from_seq,to_seq,reason FROM forward_link_gaps')).toEqual([
+      { generation: 1, from_seq: 3, to_seq: 8, reason: 'revoked' },
+    ]);
+    expect(query(world.dbPath, 'PRAGMA foreign_key_check')).toEqual([]);
+  });
+
+  it('clears migration-55 state when readable live schema 54 has no receipt or gap tables', async () => {
+    const world = await buildWorld({
+      backupSql: [
+        `INSERT INTO forward_receipts(link_id,generation,kind,dedupe_key,created_at_ms)
+         SELECT id,generation,'scrobble','backup-only',1 FROM linked_accounts WHERE did='${DID_A}'`,
+        `INSERT INTO forward_link_gaps(link_id,generation,from_seq,to_seq,reason,opened_at_ms,closed_at_ms)
+         SELECT id,generation,0,1,'disabled',1,2 FROM linked_accounts WHERE did='${DID_A}'`,
+      ],
+    });
+    const oldLivePath = join(world.dir, 'live-schema-54.db');
+    const oldLive = openSqliteDb(oldLivePath, { create: true, busyTimeoutMs: BUSY_MS });
+    expect(migrate(oldLive, MIGRATIONS.slice(0, 54))).toEqual({ status: 'ready', version: 54 });
+    oldLive.run(
+      `INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,created_at_ms,updated_at_ms)
+       VALUES(?,?,'lastfm','alice',X'00','e1',1,1)`,
+      world.ids.link!,
+      DID_A,
+    );
+    oldLive.run(
+      `INSERT INTO forward_outbox(id,link_id,did,kind,dedupe_key,payload_json,state,attempts,due_at,created_at_ms,updated_at_ms)
+       VALUES('live-54-row',?,?,'scrobble','live-54-key','{}','sent',0,1,1,1)`,
+      world.ids.link!,
+      DID_A,
+    );
+    oldLive.close();
+
+    const liveWorld = { ...world, dbPath: oldLivePath };
+    const systemd = new FakeSystemd(liveWorld, { servicePort: null });
+    await systemd.boot();
+    const result = await restoreCli(liveWorld, systemd, [...baseArgs(liveWorld), '--no-ready-check']);
+    expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
+    const restored = openSqliteDb(oldLivePath, { busyTimeoutMs: BUSY_MS });
+    try {
+      expect(restored.one('SELECT id FROM forward_outbox WHERE link_id=?', world.ids.link!)).toEqual({
+        id: 'live-54-row',
+      });
+      expect(restored.one('SELECT 1 FROM forward_receipts')).toBeNull();
+      expect(restored.one('SELECT 1 FROM forward_link_gaps')).toBeNull();
+    } finally {
+      restored.close();
+    }
+    expect(query(oldLivePath, 'PRAGMA foreign_key_check')).toEqual([]);
+  });
+
   it('keeps the newest live evidence, candidate, and pending removal when a readable restore merges an older backup', async () => {
     const uri = `at://${DID_A}/${PREFIX}.scrobble/evidence-restore`;
     const identity = 'listen:restore-candidate';
@@ -1419,6 +1494,10 @@ describe('restore.ts', () => {
         SELECT 100,'restore-cached-love',id,did,'love','restore-cached-love','{}','sent',1,1,1 FROM linked_accounts LIMIT 1;
         INSERT INTO forward_outbox(rowid,id,link_id,did,kind,dedupe_key,payload_json,state,due_at,created_at_ms,updated_at_ms)
         SELECT 101,'restore-cached-unlove',id,did,'unlove','restore-cached-unlove','{}','queued',1,1,1 FROM linked_accounts LIMIT 1;
+        INSERT INTO forward_receipts(link_id,generation,kind,dedupe_key,created_at_ms)
+        SELECT id,1,'scrobble','revoked-link-receipt',1 FROM linked_accounts LIMIT 1;
+        INSERT INTO forward_link_gaps(link_id,generation,from_seq,to_seq,reason,opened_at_ms,closed_at_ms)
+        SELECT id,1,0,1,'disabled',1,2 FROM linked_accounts LIMIT 1;
         INSERT INTO forward_love_recording_targets(forward_rowid,link_id,generation,artist_key,track_key,created_at_ms,recording_mbid)
         SELECT 100,id,1,'band','song',1,'8f3471b5-7e6a-48da-86a9-c1c07a0f47ae' FROM linked_accounts LIMIT 1;
         INSERT INTO forward_unlove_lookup_progress VALUES(101,1,200);
@@ -1442,6 +1521,8 @@ describe('restore.ts', () => {
     expect(rows('SELECT count(*) AS n FROM app_passwords')).toEqual([{ n: 1 }]); // bob's P3, never revoked
     expect(rows('SELECT count(*) AS n FROM linked_accounts')).toEqual([{ n: 0 }]);
     expect(rows('SELECT count(*) AS n FROM forward_outbox')).toEqual([{ n: 0 }]);
+    expect(rows('SELECT count(*) AS n FROM forward_receipts')).toEqual([{ n: 0 }]);
+    expect(rows('SELECT count(*) AS n FROM forward_link_gaps')).toEqual([{ n: 0 }]);
     expect(rows('SELECT count(*) AS n FROM forward_love_recording_targets')).toEqual([{ n: 0 }]);
     expect(rows('SELECT count(*) AS n FROM forward_unlove_lookup_progress')).toEqual([{ n: 0 }]);
     expect(rows('SELECT did FROM oauth_sessions ORDER BY did')).toEqual([{ did: DID_A }]);

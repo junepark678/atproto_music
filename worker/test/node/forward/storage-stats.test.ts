@@ -163,4 +163,51 @@ describe('forward storage statistics refresh', () => {
       expect(context.current).toBe(db);
     });
   });
+
+  it('pages receipt and gap primary keys without coercing integer cursor components', async () => {
+    await withMigratedDb((db) => {
+      db.run(
+        `INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,created_at_ms,updated_at_ms)
+         VALUES('stats-link',?,'lastfm','remote',X'00','key',1,1)`,
+        DID,
+      );
+      for (let i = 0; i < 101; i++) {
+        const generation = i < 60 ? 1 : 2;
+        db.run(
+          'INSERT INTO forward_receipts(link_id,generation,kind,dedupe_key,created_at_ms) VALUES(?,?,?,?,?)',
+          'stats-link',
+          generation,
+          'scrobble',
+          `receipt-${String(i).padStart(3, '0')}`,
+          i,
+        );
+        db.run(
+          `INSERT INTO forward_link_gaps(link_id,generation,from_seq,to_seq,reason,opened_at_ms,closed_at_ms)
+           VALUES('stats-link',1,?,?, 'disabled',?,?)`,
+          i,
+          i + 1,
+          i,
+          i,
+        );
+      }
+      expect(refreshForwardStorageStats(db, 10)).toBe(false);
+      const cursorJson = db.one<{ cursor_json: string }>(
+        'SELECT cursor_json FROM forward_storage_scan WHERE table_key=?',
+        'forward_receipts',
+      )?.cursor_json;
+      expect(cursorJson).toBeTypeOf('string');
+      const cursor = JSON.parse(cursorJson!) as Array<string | number>;
+      expect(cursor).toHaveLength(4);
+      expect(cursor[1]).toBe(2);
+      expect(typeof cursor[1]).toBe('number');
+
+      let complete = false;
+      for (let i = 0; i < 30 && !complete; i++) complete = refreshForwardStorageStats(db, 10);
+      expect(complete).toBe(true);
+      expect(readForwardStorageStats(db).tables).toMatchObject({
+        forward_receipts: { rows: 101 },
+        forward_link_gaps: { rows: 101 },
+      });
+    });
+  });
 });
