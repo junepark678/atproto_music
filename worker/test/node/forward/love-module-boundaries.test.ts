@@ -15,6 +15,7 @@ const entries = [
   './worker/src/outbox/forward-enqueue.ts',
   './worker/src/outbox/forward-key.ts',
   './worker/src/outbox/forward-receipts.ts',
+  './worker/src/forward/love-coverage-authority.ts',
   './worker/src/outbox/operation-certainty.ts',
   './worker/src/forward/backfill.ts',
   './worker/src/forward/forwarder.ts',

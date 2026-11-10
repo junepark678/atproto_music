@@ -5,6 +5,7 @@ import { enqueueHints } from '../../../src/do/ingest/hints';
 import { recordLiveEvidence } from '../../../src/do/ingest/live-evidence';
 import { authorizePendingRemovals } from '../../../src/do/ingest/live-pending-removals';
 import { desiredLoved, runLoveCoverageChunk } from '../../../src/forward/love-coverage';
+import { recordVerifiedDeferredLoveAuthority } from '../../../src/forward/love-coverage-authority';
 import { allocateDeferredSequence, hasArmedLoveCoverage } from '../../../src/forward/love-deferral-storage';
 import { remoteLoveState } from '../../../src/forward/love-delivery';
 import { enqueueForwards } from '../../../src/outbox/forward-enqueue';
@@ -30,6 +31,51 @@ function addLink(
 }
 
 describe('deferred love coverage', () => {
+  it('retains only exact verified authority facts and never clears a conflict', async () => {
+    await withMigratedDb((db) => {
+      const authorization = { uri: `at://${DID}/com.example.atmusic.love/retained`, rev: '3lbcdefghijmu' };
+      expect(recordVerifiedDeferredLoveAuthority(db, authorization, { action: 'delete', cid: '' }, 20)).toBe('active');
+      expect(recordVerifiedDeferredLoveAuthority(db, authorization, { action: 'update', cid: 'bbcdefghij' }, 21)).toBe(
+        'conflicted',
+      );
+      expect(recordVerifiedDeferredLoveAuthority(db, authorization, { action: 'delete', cid: '' }, 22)).toBe(
+        'conflicted',
+      );
+      expect(db.one('SELECT action,cid,state FROM forward_deferred_love_authorities')).toEqual({
+        action: 'delete',
+        cid: '',
+        state: 'conflicted',
+      });
+      expect(
+        recordVerifiedDeferredLoveAuthority(
+          db,
+          { uri: `https://${DID}/bad`, rev: 'rev' },
+          { action: 'delete', cid: '' },
+          23,
+        ),
+      ).toBe('refused');
+      expect(
+        recordVerifiedDeferredLoveAuthority(db, authorization, { action: 'delete', cid: 'delete-cid-is-invalid' }, 24),
+      ).toBe('refused');
+      const conflictedAuthorization = { uri: `at://${DID}/com.example.atmusic.love/conflicted`, rev: '3lbcdefghijku' };
+      expect(
+        recordVerifiedDeferredLoveAuthority(
+          db,
+          conflictedAuthorization,
+          { action: 'update', cid: 'babcdefgh', conflicted: true },
+          25,
+        ),
+      ).toBe('conflicted');
+      expect(
+        db.one(
+          'SELECT action,cid,state,due_seq FROM forward_deferred_love_authorities WHERE authorization_uri=?',
+          conflictedAuthorization.uri,
+        ),
+      ).toMatchObject({ action: 'update', cid: 'babcdefgh', state: 'conflicted' });
+      expect(db.one('SELECT count(*) AS n FROM forward_deferred_love_authorities')).toEqual({ n: 2 });
+    });
+  });
+
   it('records a disabled-link unlove and emits it once after history coverage resumes', async () => {
     await withMigratedDb((db) => {
       addLink(db, 'deferred-link', 'lastfm', false);
@@ -315,7 +361,7 @@ describe('deferred love coverage', () => {
           rkey: 'update-rkey',
           source: 'jetstream',
           hintRev: rev,
-          live: { operation: 'update', cid: 'trusted-update-cid' },
+          live: { operation: 'update', cid: 'babcdefgh' },
           receiptMs: 600,
         },
       ]);
@@ -338,7 +384,7 @@ describe('deferred love coverage', () => {
           uri,
           rev,
         ),
-      ).toEqual({ action: 'update', cid: 'trusted-update-cid', state: 'active' });
+      ).toEqual({ action: 'update', cid: 'babcdefgh', state: 'active' });
       expect(
         db.one(
           'SELECT kind,authorization_uri,authorization_rev FROM forward_deferred_love_intents WHERE operation_id=?',

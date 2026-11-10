@@ -1,6 +1,8 @@
+import { isTid, parseRecordUri } from '@atmusic/core/syntax';
 import type { Db } from '../do/db';
 
 export type LoveAuthorityAction = 'create' | 'update' | 'delete';
+const CID_SYNTAX = /^b[a-z2-7]{8,256}$/;
 export interface LoveAuthorization {
   uri: string;
   rev: string;
@@ -58,6 +60,59 @@ function readFact(db: Db, uri: string, rev: string): Fact | null {
   return { action: evidence.up_action, cid: evidence.up_cid, conflict_rev: evidence.conflict_rev };
 }
 
+/**
+ * Retain one already-verified A2 comparison before its source row is cleaned up.
+ * This is deliberately internal: callers must first obtain the fact from the
+ * trusted A2 event/evidence path. Invalid or mismatched facts fail closed and
+ * never replace an existing authority.
+ */
+export function recordVerifiedDeferredLoveAuthority(
+  db: Db,
+  authorization: LoveAuthorization,
+  fact: { action: LoveAuthorityAction; cid: string; conflicted?: boolean },
+  now: number,
+): 'active' | 'conflicted' | 'refused' {
+  if (
+    !Number.isSafeInteger(now) ||
+    now < 0 ||
+    parseRecordUri(authorization.uri) === null ||
+    !isTid(authorization.rev) ||
+    (fact.action === 'delete' ? fact.cid !== '' : fact.action === 'update' ? !CID_SYNTAX.test(fact.cid) : true)
+  )
+    return 'refused';
+
+  const current = db.one<{ action: 'update' | 'delete'; cid: string; state: 'active' | 'conflicted' }>(
+    'SELECT action,cid,state FROM forward_deferred_love_authorities WHERE authorization_uri=? AND authorization_rev=?',
+    authorization.uri,
+    authorization.rev,
+  );
+  if (current !== null) {
+    const differs =
+      current.state === 'conflicted' ||
+      fact.conflicted === true ||
+      current.action !== fact.action ||
+      current.cid !== fact.cid;
+    if (differs) conflictDeferredLoveAuthority(db, authorization.uri, authorization.rev);
+    return differs ? 'conflicted' : 'active';
+  }
+  const authoritySeq = allocateDeferredAuthoritySequence(db);
+  const conflicted = fact.conflicted === true;
+  const dueSeq = conflicted ? allocateDeferredAuthoritySequence(db) : null;
+  db.run(
+    `INSERT INTO forward_deferred_love_authorities(authorization_uri,authorization_rev,authority_seq,action,cid,state,due_seq,created_at_ms)
+     VALUES(?,?,?,?,?,?,?,?)`,
+    authorization.uri,
+    authorization.rev,
+    authoritySeq,
+    fact.action,
+    fact.cid,
+    conflicted ? 'conflicted' : 'active',
+    dueSeq,
+    now,
+  );
+  return conflicted ? 'conflicted' : 'active';
+}
+
 /** Materialize a live producer's A2 fact before it can create a deferred authority. */
 export function materializeLoveAuthority(
   db: Db,
@@ -83,21 +138,18 @@ export function materializeLoveAuthority(
   }
   const fact = readFact(db, authorization.uri, authorization.rev);
   if (fact === null) return 'missing';
-  const conflicted =
-    (fact.conflicted ?? 0) === 1 || fact.conflict_rev === authorization.rev || fact.action === 'create';
-  if (conflicted) return 'conflicted';
-  const authoritySeq = allocateDeferredAuthoritySequence(db);
-  db.run(
-    `INSERT INTO forward_deferred_love_authorities(authorization_uri,authorization_rev,authority_seq,action,cid,state,created_at_ms)
-     VALUES(?,?,?,?,?,'active',?)`,
-    authorization.uri,
-    authorization.rev,
-    authoritySeq,
-    fact.action,
-    fact.cid,
+  if (fact.action === 'create') return 'conflicted';
+  const retained = recordVerifiedDeferredLoveAuthority(
+    db,
+    authorization,
+    {
+      action: fact.action,
+      cid: fact.cid,
+      conflicted: fact.conflicted === 1 || fact.conflict_rev === authorization.rev,
+    },
     now,
   );
-  return 'active';
+  return retained === 'refused' ? 'missing' : retained;
 }
 
 export function compareDeferredLoveAuthority(
