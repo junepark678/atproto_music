@@ -119,6 +119,56 @@ it.each([1, 8])('enforces combined invocation budget count=%i', async (n) =>
     expect(acknowledgements).toBe(n);
   }),
 );
+it('charges complete eight-decision and eight-orphan maintenance across shared invocation limits', async () =>
+  withMigratedDb((db) => {
+    seed(db, 8);
+    db.run(
+      `INSERT INTO live_pending_removal_events(uri,rev,action,cid,created_at_ms,expires_at_ms)
+       SELECT authorization_uri,authorization_rev,action,cid,1,10000 FROM love_api_comparison_facts`,
+    );
+    for (let i = 1; i <= 8; i++)
+      db.run(
+        `INSERT INTO love_api_bindings(did,operation_id,api_origin,uri,incarnation_key,binding_seq,created_at_ms)
+        VALUES(?,?,'web',?,?,?,1)`,
+        DID,
+        `orphan-${i}`,
+        `at://${DID}/com.example.atmusic.love/orphan${i}`,
+        `orphan-inc-${i}`,
+        8 + i,
+      );
+    const observations: Array<{ writes: number; visits: number; reads: number; decisions: number; reclaim: number }> =
+      [];
+    let acknowledgements = 0;
+    for (let invocation = 0; invocation < 20; invocation++) {
+      const before = total(db);
+      const result = runLoveApiMaintenance(db, 100 + invocation, seededRandom(5), 'audit');
+      const writes = total(db) - before;
+      expect(result.writes).toBe(writes);
+      expect(writes).toBeLessThanOrEqual(96);
+      expect(result.visits).toBeLessThanOrEqual(16);
+      expect(
+        result.lanes.filter((unit) => unit.lane === 'decision').every((unit) => unit.work <= 28 && unit.reads <= 128),
+      ).toBe(true);
+      acknowledgements += result.decisions.queued + result.decisions.deferred + result.decisions.replay;
+      observations.push({
+        writes,
+        visits: result.visits,
+        reads: result.reads,
+        decisions:
+          result.decisions.queued + result.decisions.deferred + result.decisions.replay + result.decisions.refused,
+        reclaim: result.reclaimUnits,
+      });
+      if (
+        db.one('SELECT 1 FROM love_api_unlove_decisions LIMIT 1') === null &&
+        db.one("SELECT 1 FROM love_api_bindings WHERE operation_id LIKE 'orphan-%' LIMIT 1") === null
+      )
+        break;
+    }
+    console.log('L2_EIGHT_DECISION_ORPHAN_BOUNDARY', JSON.stringify(observations));
+    expect(db.one('SELECT 1 FROM love_api_unlove_decisions LIMIT 1')).toBeNull();
+    expect(db.one("SELECT 1 FROM love_api_bindings WHERE operation_id LIKE 'orphan-%' LIMIT 1")).toBeNull();
+    expect(acknowledgements).toBe(8);
+  }));
 it('expires pending decision before awaiting its member', async () =>
   withMigratedDb((db) => {
     seed(db, 1, 1);

@@ -422,6 +422,13 @@ whole-L2 acceptance or readiness. The audit and repair direction are
    invocations. Current measured fixtures show cold one-decision invocation
    25 changed rows/1 visit (including singleton initialization), warm
    one-decision 24/2, and eight acknowledgements across bounded invocations.
+   The follow-up eight-decision/eight-orphan production-scheduler boundary
+   charges every reclaim row as a visit (previously reclaim reported zero
+   visits to the shared budget). Across seven actual invocations it
+   acknowledges all eight decisions and removes all eight orphan bindings;
+   each invocation stays at or below 96 changed rows and 16 visits, with one
+   invocation using the full 16-visit allowance. Transaction traces list
+   decision, sweep, reclaim, and lane-turn phases separately.
    Full cold/partial-delete/replay/refusal/completion/cleanup decision matrix
    and one negative control for every whole-invocation bound remain required.
 2. Direct and delayed local re-love checks now recognize only the exact bound

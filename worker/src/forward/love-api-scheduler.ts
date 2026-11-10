@@ -300,7 +300,11 @@ function runLanePhase(
     while (budget.laneUnits[lane] < LOVE_API_LANE_UNITS[lane]) {
       const cost =
         lane === 'decision' ? LOVE_API_DECISION_COST : lane === 'sweep' ? LOVE_API_SWEEP_COST : LOVE_API_RECLAIM_COST;
-      const maxVisits = lane === 'reclaim' ? 0 : 1;
+      const maxVisits =
+        lane === 'reclaim'
+          ? Math.min(LOVE_API_RECLAIM_PAGE, LOVE_API_VISITS - budget.visits, phase.visitsLimit - phase.visits)
+          : 1;
+      if (maxVisits <= 0) break;
       if (budget.reserved + cost > LOVE_API_UNIT_BUDGET || budget.visits + maxVisits > LOVE_API_VISITS) break;
       if (phase.writes + cost > phase.writesLimit || phase.visits + maxVisits > phase.visitsLimit) break;
       const unitMetricStart = observer.metric();
@@ -379,11 +383,13 @@ function runLanePhase(
           returnedRows: observer.metric().returnedRows - unitMetricStart.returnedRows,
         });
       } else {
-        beginUnit(budget, lane, cost, 0, phase);
-        const result = reclaimLoveApiProofRows(db, nowMs, LOVE_API_RECLAIM_PAGE);
+        beginUnit(budget, lane, cost, maxVisits, phase);
+        const result = reclaimLoveApiProofRows(db, nowMs, maxVisits);
         const delta = totalChanges(db) - unitChangesBefore;
         const work = result.bindingsDeleted + result.factsDeleted;
         const metadata = Number(delta) - work;
+        if (result.visited > maxVisits)
+          throw new Error(`L2 RECLAIM visit bound exceeded: ${result.visited}/${maxVisits}`);
         if (metadata < 0 || metadata > 2) throw new Error(`L2 reclaim metadata exceeded reservation: ${metadata}/2`);
         if (work > cost) throw new Error(`L2 RECLAIM unit exceeded ${cost} changed rows: ${work}`);
         const reads = observer.metric().reads - unitReadStart;
@@ -394,9 +400,13 @@ function runLanePhase(
         if (result.visited === 0 && delta === 0n) {
           budget.reserved -= cost;
           phase.writes -= cost;
+          phase.visits -= maxVisits;
           stopped.add(lane);
           break;
         }
+        phase.visits -= maxVisits - result.visited;
+        budget.visits += result.visited;
+        phaseVisits += result.visited;
         budget.laneUnits.reclaim++;
         units++;
         if (work > 0) phaseUseful++;
@@ -404,7 +414,7 @@ function runLanePhase(
           lane,
           reserved: cost,
           work,
-          visits: 0,
+          visits: result.visited,
           units: 1,
           reads,
           mutationStatements: observer.metric().mutations - unitMetricStart.mutations,
