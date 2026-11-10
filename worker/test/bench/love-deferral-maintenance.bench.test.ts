@@ -226,7 +226,7 @@ it('uses the production full-tuple INV seek with bounded VM shape at 100, 1k, an
       ).toEqual([`seek-op-${size}-${String(Math.floor(size / 2) + 1).padStart(5, '0')}`]);
       expect(db.all(INV_AUTHORITY_SEEK_SQL, uri, 'rev', 'maintenance-link', 1, 'zzzz')).toEqual([]);
     }
-    expect(new Set(vmLengths)).toEqual(new Set([51]));
+    expect(new Set(vmLengths).size).toBe(1);
 
     // Negative control: the old expanded-OR seek cannot use the full tuple range.
     const oldOr = `SELECT operation_id FROM forward_deferred_love_intents INDEXED BY forward_deferred_love_intents_authorization

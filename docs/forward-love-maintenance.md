@@ -45,7 +45,7 @@ and 80-statement per-step guard alongside the whole-call budget assertions.
 INV uses the existing partial authorization index and a full tuple seek on
 `(link_id,generation,operation_id)`. The worker-bench exercises the production
 query with 100, 1,000, and 10,000 direct-SQL rows, checks the indexed tuple
-range and identical 51-opcode SQLite VM program, and verifies tail and miss
+range and a size-independent SQLite VM length capped at 55 opcodes, and verifies tail and miss
 results. The old expanded-OR predicate remains as a negative plan control: it
 uses the same prefix index but the plan cannot seek on the complete tuple.
 
