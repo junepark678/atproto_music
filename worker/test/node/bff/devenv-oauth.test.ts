@@ -6,7 +6,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { ResolvedIdentity } from '@atmusic/atproto/identity/types';
 import type { Transport } from '@atmusic/atproto/transport';
-import { TestPds, TestPlc } from '@atproto/dev-env';
+import type { TestPds, TestPlc } from '@atproto/dev-env';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   type ClientMetadataDocument,
@@ -17,6 +17,7 @@ import {
 } from '../../../src/bff/client-metadata';
 import type { OAuthKeyset } from '../../../src/bff/keyset';
 import { createPolicyFetch } from '../../../src/node/policy-fetch';
+import { createOwnedTestPds, createOwnedTestPlc } from '../support/dev-env-startup';
 import { withMigratedDb } from '../support/node-db';
 import { createWorld, freezeDate } from './oauth-world';
 
@@ -111,11 +112,12 @@ describe('the confidential OAuth client against @atproto/dev-env', () => {
     freezeDate();
     await withMigratedDb(async (db) => {
       const app = await createWorld(db);
-      const plc = await TestPlc.create({});
+      let plc: TestPlc | undefined;
       let pds: TestPds | undefined;
       const originalFetch = globalThis.fetch;
       let stage = 'PDS setup';
       try {
+        plc = await createOwnedTestPlc({});
         globalThis.fetch = async (input, init) => {
           const request = input instanceof Request ? input : new Request(input, init);
           const url = new URL(request.url);
@@ -132,7 +134,7 @@ describe('the confidential OAuth client against @atproto/dev-env', () => {
           }
           throw new Error('dev-env OAuth test refused a non-fixture network request');
         };
-        const devPds = await TestPds.create({ didPlcUrl: plc.url, hostname: PDS_HOST });
+        const devPds = await createOwnedTestPds({ didPlcUrl: plc.url, hostname: PDS_HOST });
         pds = devPds;
 
         const handle = 'n6-oauth.test';
@@ -269,7 +271,7 @@ describe('the confidential OAuth client against @atproto/dev-env', () => {
         // when an assertion or provider operation fails.
         globalThis.fetch = originalFetch;
         await pds?.close();
-        await plc.close();
+        await plc?.close();
       }
     });
   }, 60_000);
