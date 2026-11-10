@@ -3,6 +3,13 @@ import type { Db } from '../do/db';
 export type LinkGapReason = 'disabled' | 'revoked' | 'legacy';
 export type CoverageLink = { id: string; generation: number };
 
+export const ADMISSION_HIGH_WATER_SQL = 'SELECT coalesce(max(admission_seq),0) AS boundary FROM forward_admissions';
+export const NEWEST_OPEN_LINK_GAP_SQL =
+  'SELECT from_seq FROM forward_link_gaps WHERE link_id=? AND generation=? AND to_seq IS NULL ORDER BY from_seq DESC LIMIT 1';
+export const GAP_ADMISSION_OWNER_SQL = `SELECT 1 AS found FROM forward_link_gaps
+     WHERE link_id=? AND generation=? AND from_seq<? AND (to_seq IS NULL OR to_seq>=?)
+     ORDER BY from_seq DESC LIMIT 1`;
+
 /** Low-cardinality diagnostics for receipt and gap reconciliation. */
 export function countLinkCoverage(db: Db, label: string, amount = 1): void {
   if (!Number.isSafeInteger(amount) || amount < 0) throw new RangeError('coverage counter amount must be non-negative');
@@ -16,10 +23,16 @@ export function countLinkCoverage(db: Db, label: string, amount = 1): void {
 }
 
 export function admissionHighWater(db: Db): number {
-  return db.one<{ boundary: number }>('SELECT coalesce(max(admission_seq),0) AS boundary FROM forward_admissions')?.boundary ?? 0;
+  return db.one<{ boundary: number }>(ADMISSION_HIGH_WATER_SQL)?.boundary ?? 0;
 }
 
-export function openLinkGap(db: Db, link: CoverageLink, reason: LinkGapReason, now: number, fromSeq = admissionHighWater(db)): void {
+export function openLinkGap(
+  db: Db,
+  link: CoverageLink,
+  reason: LinkGapReason,
+  now: number,
+  fromSeq = admissionHighWater(db),
+): void {
   db.run(
     `INSERT OR IGNORE INTO forward_link_gaps(link_id,generation,from_seq,reason,opened_at_ms)
      VALUES(?,?,?,?,?)`,
@@ -32,11 +45,7 @@ export function openLinkGap(db: Db, link: CoverageLink, reason: LinkGapReason, n
 }
 
 export function closeOpenLinkGap(db: Db, link: CoverageLink, toSeq: number, now: number): boolean {
-  const open = db.one<{ from_seq: number }>(
-    'SELECT from_seq FROM forward_link_gaps WHERE link_id=? AND generation=? AND to_seq IS NULL ORDER BY from_seq DESC LIMIT 1',
-    link.id,
-    link.generation,
-  );
+  const open = db.one<{ from_seq: number }>(NEWEST_OPEN_LINK_GAP_SQL, link.id, link.generation);
   if (open === null) return false;
   if (toSeq <= open.from_seq) {
     db.run(
@@ -60,13 +69,7 @@ export function closeOpenLinkGap(db: Db, link: CoverageLink, toSeq: number, now:
 }
 
 export function ownsAdmissionInGap(db: Db, link: CoverageLink, admissionSeq: number): boolean {
-  return db.one<{ found: number }>(
-    `SELECT 1 AS found FROM forward_link_gaps
-     WHERE link_id=? AND generation=? AND from_seq<? AND (to_seq IS NULL OR to_seq>=?)
-     ORDER BY from_seq DESC LIMIT 1`,
-    link.id,
-    link.generation,
-    admissionSeq,
-    admissionSeq,
-  ) !== null;
+  return (
+    db.one<{ found: number }>(GAP_ADMISSION_OWNER_SQL, link.id, link.generation, admissionSeq, admissionSeq) !== null
+  );
 }
