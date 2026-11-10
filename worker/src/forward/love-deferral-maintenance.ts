@@ -1,11 +1,8 @@
 import type { Db } from '../do/db';
 import { countLinkCoverage } from './coverage';
-import {
-  allocateDeferredAuthoritySequence,
-  deferredAuthorityValid,
-  hasAuthorityDependency,
-} from './love-coverage-authority';
+import { allocateDeferredAuthoritySequence, hasAuthorityDependency } from './love-coverage-authority';
 import { allocateDeferredSequence, armLoveCoverage } from './love-deferral-storage';
+import { deferredIntentBarrier, deferredIntentValid } from './love-intent-policy';
 
 export const LOVE_MAINTENANCE_WRITES = 128;
 export const LOVE_MAINTENANCE_METADATA_RESERVE = 18;
@@ -110,26 +107,8 @@ function readSingleton(db: Db): Singleton {
   return row;
 }
 
-function operationCancelled(db: Db, operationId: string): boolean {
-  return db.one<{ state: string }>('SELECT state FROM operations WHERE id=?', operationId)?.state === 'cancelled';
-}
-
 function intentInvalid(db: Db, row: Intent): boolean {
-  if (row.origin_class === 'unclassified') return true;
-  if (row.origin_class === 'authorized')
-    return (
-      row.authorization_uri === null ||
-      row.authorization_rev === null ||
-      !deferredAuthorityValid(db, { uri: row.authorization_uri, rev: row.authorization_rev })
-    );
-  return operationCancelled(db, row.operation_id);
-}
-
-function liveLoveSucceeded(db: Db, row: Intent): boolean {
-  return (
-    row.origin_class === 'live_love' &&
-    db.one<{ state: string }>('SELECT state FROM operations WHERE id=?', row.operation_id)?.state === 'succeeded'
-  );
+  return !deferredIntentValid(db, row);
 }
 
 function currentGeneration(db: Db, linkId: string): number | null {
@@ -404,7 +383,7 @@ function runDue(db: Db): LaneResult {
   for (const row of top) {
     if (intentInvalid(db, row)) continue;
     newest ??= row;
-    if (liveLoveSucceeded(db, row)) barrier ??= row;
+    if (deferredIntentBarrier(db, row)) barrier ??= row;
   }
   let floor = current.live_from_seq;
   if (barrier !== null) floor = Math.max(floor, barrier.intent_seq);
@@ -517,7 +496,7 @@ function runRr(db: Db, now: number): LaneResult {
       useful = true;
     }
     const validRows = rows.filter((item) => !intentInvalid(db, item));
-    const barrier = validRows.find((item) => liveLoveSucceeded(db, item));
+    const barrier = validRows.find((item) => deferredIntentBarrier(db, item));
     const floor = barrier === undefined ? head.live_from_seq : Math.max(head.live_from_seq, barrier.intent_seq);
     const first = validRows[0];
     const top = newestIntents(db, head, 'intent_seq>=?', [floor], TOP_LIMIT);

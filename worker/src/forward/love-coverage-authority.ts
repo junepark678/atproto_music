@@ -62,12 +62,10 @@ function readFact(db: Db, uri: string, rev: string): Fact | null {
 export function materializeLoveAuthority(
   db: Db,
   authorization: LoveAuthorization,
-  action: LoveAuthorityAction,
-  cid: string,
   now: number,
 ): 'active' | 'conflicted' | 'missing' {
-  const current = db.one<{ state: 'active' | 'conflicted' }>(
-    'SELECT state FROM forward_deferred_love_authorities WHERE authorization_uri=? AND authorization_rev=?',
+  const current = db.one<{ state: 'active' | 'conflicted'; action: 'update' | 'delete'; cid: string }>(
+    'SELECT state,action,cid FROM forward_deferred_love_authorities WHERE authorization_uri=? AND authorization_rev=?',
     authorization.uri,
     authorization.rev,
   );
@@ -77,18 +75,16 @@ export function materializeLoveAuthority(
       fact !== null &&
       ((fact.conflicted ?? 0) === 1 ||
         fact.conflict_rev === authorization.rev ||
-        fact.action !== action ||
-        fact.cid !== cid);
+        fact.action === 'create' ||
+        fact.action !== current.action ||
+        fact.cid !== current.cid);
     if (differs) conflictDeferredLoveAuthority(db, authorization.uri, authorization.rev);
     return differs || current.state === 'conflicted' ? 'conflicted' : 'active';
   }
   const fact = readFact(db, authorization.uri, authorization.rev);
   if (fact === null) return 'missing';
   const conflicted =
-    (fact.conflicted ?? 0) === 1 ||
-    fact.conflict_rev === authorization.rev ||
-    fact.action !== action ||
-    fact.cid !== cid;
+    (fact.conflicted ?? 0) === 1 || fact.conflict_rev === authorization.rev || fact.action === 'create';
   if (conflicted) return 'conflicted';
   const authoritySeq = allocateDeferredAuthoritySequence(db);
   db.run(
@@ -97,8 +93,8 @@ export function materializeLoveAuthority(
     authorization.uri,
     authorization.rev,
     authoritySeq,
-    action === 'create' ? 'update' : action,
-    action === 'delete' ? '' : cid,
+    fact.action,
+    fact.cid,
     now,
   );
   return 'active';
@@ -116,7 +112,7 @@ export function compareDeferredLoveAuthority(
   if (authority === null) return false;
   const differs =
     authority.state === 'conflicted' ||
-    authority.action !== (event.action === 'create' ? 'update' : event.action) ||
+    authority.action !== event.action ||
     (event.action !== 'delete' && authority.cid !== event.cid);
   if (differs) conflictDeferredLoveAuthority(db, event.uri, event.rev);
   return differs;
@@ -164,7 +160,8 @@ export function deferredAuthorityStatus(db: Db, authorization: LoveAuthorization
   const valid =
     (fact.conflicted ?? 0) !== 1 &&
     fact.conflict_rev !== authorization.rev &&
-    authority.action === (fact.action === 'create' ? 'update' : fact.action) &&
+    fact.action !== 'create' &&
+    authority.action === fact.action &&
     (fact.action === 'delete' || authority.cid === fact.cid);
   return valid ? 'active' : 'conflicted';
 }

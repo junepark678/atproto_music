@@ -23,6 +23,7 @@ import type { ForwardOutboxRow } from '../../../src/app/rows';
 import { ensureAccount } from '../../../src/credentials/accounts';
 import type { SqlParam } from '../../../src/do/db';
 import { migrate } from '../../../src/do/migrate';
+import { MIGRATIONS } from '../../../src/do/schema';
 import { runLinkBackfill } from '../../../src/forward/backfill';
 import { runDeleteSlice } from '../../../src/forward/delete-forwarder';
 import {
@@ -85,7 +86,7 @@ interface World {
   run(): ReturnType<typeof runForward>;
 }
 
-async function world(): Promise<World> {
+async function world(migrations?: readonly (typeof MIGRATIONS)[number][]): Promise<World> {
   const clock = fixedClock();
   const lb = new FakeListenBrainz({ clock, rateLimit: 10_000 });
   const lastfm = new FakeLastfm({ clock, apiKey: API_KEY, secret: SECRET });
@@ -99,6 +100,7 @@ async function world(): Promise<World> {
     return next === undefined ? lb.fetch(req) : next(req);
   };
   const app = await startApp({
+    migrations,
     clock,
     secrets: parseSecrets({ ...testSecretsDocument(), lastfm: { apiKey: API_KEY, sharedSecret: SECRET } }),
     transport: routerTransport({ hosts: { 'listenbrainz.test': lbEndpoint, 'lastfm.test': lastfm } }),
@@ -188,6 +190,59 @@ function queueDelete(w: World, linkId: string, id: string, listenedAt: number, a
 }
 
 describe('ListenBrainz forwarding', () => {
+  it('dispatches a genuinely accepted schema-55 authorized unlove after upgrading the same live database to 56', async () => {
+    const w = await world(MIGRATIONS.slice(0, 55));
+    const linkId = w.link();
+    const operationId = 'legacy55-unlove';
+    const uri = `at://${ALICE}/com.example.atmusic.love/legacy55-rkey`;
+    const rev = '3lbcdefghij55';
+    const [artistKey, trackKeyValue] = trackKey('Legacy Artist', 'Legacy Track');
+    w.app.db.run(
+      `INSERT INTO live_pending_removal_events(uri,rev,action,cid,conflicted,created_at_ms,expires_at_ms)
+       VALUES(?,?,'delete','',0,?,?)`,
+      uri,
+      rev,
+      w.clock.nowMs(),
+      w.clock.nowMs() + DAY,
+    );
+    w.app.db.run(
+      `INSERT INTO forward_outbox(id,link_id,generation,did,kind,dedupe_key,payload_json,state,attempts,due_at,
+         created_at_ms,updated_at_ms,love_artist_key,love_track_key,authorization_uri,authorization_rev)
+       VALUES(?,?,1,?,'unlove',?,?,'queued',0,?,?,?, ?,?,?,?)`,
+      'legacy55-effect',
+      linkId,
+      ALICE,
+      operationId,
+      JSON.stringify({ artist: 'Legacy Artist', track: 'Legacy Track', recordingMbid: MBID }),
+      w.clock.nowMs(),
+      w.clock.nowMs(),
+      w.clock.nowMs(),
+      artistKey,
+      trackKeyValue,
+      uri,
+      rev,
+    );
+    w.app.db.run(
+      `INSERT INTO forward_receipts(link_id,generation,kind,dedupe_key,created_at_ms)
+       VALUES(?,1,'unlove',?,?)`,
+      linkId,
+      operationId,
+      w.clock.nowMs(),
+    );
+    expect(migrate(w.app.db).status).toBe('ready');
+    expect(w.app.db.one('SELECT count(*) AS n FROM forward_deferred_love_witnesses')).toEqual({ n: 0 });
+    await w.run();
+    expect(w.lb.feedback.map((entry) => entry.json)).toEqual([{ recording_mbid: MBID, score: 0 }]);
+    expect(w.rows().find((row) => row.id === 'legacy55-effect')?.state).toBe('sent');
+    expect(
+      w.app.db.one(
+        "SELECT retired_at_ms FROM forward_receipts WHERE link_id=? AND kind='unlove' AND dedupe_key=?",
+        linkId,
+        operationId,
+      ),
+    ).toEqual({ retired_at_ms: null });
+  });
+
   it('pins every love lane, kind and expiry query to its bounded index plan', async () => {
     const w = await world();
     const linkId = w.link();
@@ -415,7 +470,7 @@ describe('ListenBrainz forwarding', () => {
     if (!relove.ok) return;
     expect(w.app.db.all('SELECT kind,origin_class FROM forward_deferred_love_intents ORDER BY intent_seq')).toEqual([
       { kind: 'unlove', origin_class: 'operation' },
-      { kind: 'love', origin_class: 'live_love' },
+      { kind: 'love', origin_class: 'operation' },
     ]);
     runDeferredLoveMaintenance(w.app.db, w.clock.nowMs());
     expect(w.app.db.all('SELECT live_from_seq FROM forward_deferred_love_heads')).toEqual([{ live_from_seq: 1 }]);

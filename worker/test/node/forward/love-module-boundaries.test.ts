@@ -15,6 +15,7 @@ const entries = [
   './worker/src/outbox/forward-enqueue.ts',
   './worker/src/outbox/forward-key.ts',
   './worker/src/outbox/forward-receipts.ts',
+  './worker/src/outbox/operation-certainty.ts',
   './worker/src/forward/backfill.ts',
   './worker/src/forward/forwarder.ts',
   './worker/src/musicbrainz/revive-loves.ts',
@@ -69,6 +70,7 @@ describe('B2 module boundaries', () => {
       'worker/src/forward/love-coverage.ts': ['hints', 'live-pending-removals'],
       'worker/src/forward/love-delivery.ts': ['forward-enqueue', 'backfill', 'love-coverage', 'forward-key'],
       'worker/src/outbox/forward-identity.ts': [],
+      'worker/src/outbox/operation-certainty.ts': [],
     };
     for (const [file, names] of Object.entries(forbidden)) {
       const imports = [...runtimeImports(file)].map((match) => match[1] ?? '');

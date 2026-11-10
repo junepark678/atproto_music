@@ -52,6 +52,11 @@ describe('deferred love coverage', () => {
         now: 20,
         random: seededRandom(21),
       };
+      db.run(
+        `INSERT INTO operations(id,did,kind,origin,priority,collection,state,due_at,created_at_ms,updated_at_ms,send_state)
+         VALUES('deferred-unlove',?,'love.delete','web',0,'com.example.atmusic.love','queued',20,20,20,'unsent')`,
+        DID,
+      );
       expect(enqueueForwards(db, args)).toBe(0);
       expect(db.one('SELECT kind,operation_id,payload_json FROM forward_deferred_love_intents')).toEqual({
         kind: 'unlove',
@@ -81,7 +86,7 @@ describe('deferred love coverage', () => {
         intent_at_ms: 20,
       });
       expect(db.all('SELECT did,artist_key,track_key FROM loves')).toEqual([]);
-      expect(db.one('SELECT state FROM operations WHERE id=?', 'deferred-unlove')).toBeNull();
+      expect(db.one('SELECT state FROM operations WHERE id=?', 'deferred-unlove')).toEqual({ state: 'queued' });
       const intent = db.one('SELECT * FROM forward_deferred_love_intents')!;
       expect(
         desiredLoved(
@@ -295,6 +300,176 @@ describe('deferred love coverage', () => {
           rev,
         ),
       ).not.toBeNull();
+    });
+  });
+
+  it('records the exact trusted A2 update CID as deferred unlove authority', async () => {
+    await withMigratedDb((db) => {
+      addLink(db, 'update-authority-link', 'lastfm', false);
+      const uri = `at://${DID}/com.example.atmusic.love/update-rkey`;
+      const rev = '3lbcdefghijmu';
+      enqueueHints(db, [
+        {
+          did: DID,
+          collection: 'com.example.atmusic.love',
+          rkey: 'update-rkey',
+          source: 'jetstream',
+          hintRev: rev,
+          live: { operation: 'update', cid: 'trusted-update-cid' },
+          receiptMs: 600,
+        },
+      ]);
+      enqueueForwards(db, {
+        did: DID,
+        items: [
+          {
+            kind: 'unlove',
+            operationId: 'trusted-update-unlove',
+            payload: { artist: 'Artist', track: 'Update Track' },
+            authorization: { uri, rev },
+          },
+        ],
+        now: 601,
+        random: seededRandom(601),
+      });
+      expect(
+        db.one(
+          'SELECT action,cid,state FROM forward_deferred_love_authorities WHERE authorization_uri=? AND authorization_rev=?',
+          uri,
+          rev,
+        ),
+      ).toEqual({ action: 'update', cid: 'trusted-update-cid', state: 'active' });
+      expect(
+        db.one(
+          'SELECT kind,authorization_uri,authorization_rev FROM forward_deferred_love_intents WHERE operation_id=?',
+          'trusted-update-unlove',
+        ),
+      ).toEqual({ kind: 'unlove', authorization_uri: uri, authorization_rev: rev });
+    });
+  });
+
+  it('uses witnessed chain order before API slots and lets cancelled slots fall through to the projection', async () => {
+    await withMigratedDb((db) => {
+      addLink(db, 'desired-link', 'lastfm', false);
+      db.run("INSERT INTO users(did,joined_at) VALUES(?,'2026-01-15T12:00:00Z')", DID);
+      const link = db.one('SELECT * FROM linked_accounts WHERE id=?', 'desired-link')!;
+      let nextHead = 1;
+      const addChain = (
+        artist: string,
+        track: string,
+        operationId: string,
+        kind: 'love' | 'unlove',
+        origin: 'operation' | 'live_love' | 'authorized',
+        at: number,
+      ) => {
+        const [artistKey, trackKeyValue] = trackKey(artist, track);
+        db.run(
+          `INSERT INTO forward_deferred_love_heads(link_id,generation,love_artist_key,love_track_key,head_seq,created_at_ms)
+           VALUES('desired-link',1,?,?,?,?)`,
+          artistKey,
+          trackKeyValue,
+          nextHead++,
+          at,
+        );
+        db.run(
+          `INSERT INTO forward_deferred_love_intents(link_id,generation,love_artist_key,love_track_key,intent_seq,kind,
+             operation_id,origin_class,payload_json,authorization_uri,authorization_rev,intent_at_ms)
+           VALUES('desired-link',1,?,?,1,?,?,?,'{}',?,?,?)`,
+          artistKey,
+          trackKeyValue,
+          kind,
+          operationId,
+          origin,
+          origin === 'authorized' ? `at://${DID}/com.example.atmusic.love/${operationId}` : null,
+          origin === 'authorized' ? '3lbcdefghijkd' : null,
+          at,
+        );
+        return {
+          artistKey,
+          trackKeyValue,
+          intent: db.one('SELECT * FROM forward_deferred_love_intents WHERE operation_id=?', operationId)!,
+        };
+      };
+      const addProjection = (artist: string, track: string, artistKey: string, trackKeyValue: string) =>
+        db.run(
+          `INSERT INTO loves(uri,did,rkey,cid,artist,track,artist_key,track_key,created_at,indexed_at)
+           VALUES(?,?,'rkey','cid',?,?,?,?,'2026-01-15T12:00:00.000000000Z','2026-01-15T12:00:00.000000000Z')`,
+          `at://${DID}/com.example.atmusic.love/${artist.replaceAll(' ', '-')}`,
+          DID,
+          artist,
+          track,
+          artistKey,
+          trackKeyValue,
+        );
+
+      const equal = addChain('Equal Artist', 'Equal Track', 'witnessed-love', 'love', 'operation', 100);
+      db.run(
+        `INSERT INTO forward_deferred_love_witnesses(link_id,generation,operation_id,group_seq,kind,love_artist_key,
+           love_track_key,created_at_ms) VALUES('desired-link',1,'witnessed-love',1,'love',?,?,100)`,
+        equal.artistKey,
+        equal.trackKeyValue,
+      );
+      db.run(
+        'INSERT INTO linked_love_intents(did,love_key,intent,operation_id,updated_at_ms) VALUES(?,?,?,?,?)',
+        DID,
+        `${equal.artistKey}\0${equal.trackKeyValue}`,
+        'unlove',
+        'same-time-api-unlove',
+        100,
+      );
+      expect(desiredLoved(db, link as never, equal.intent as never, equal.artistKey, equal.trackKeyValue)).toBe(true);
+
+      const missingSlot = addChain(
+        'Missing Slot Artist',
+        'Missing Slot Track',
+        'api-unlove',
+        'unlove',
+        'operation',
+        200,
+      );
+      addProjection('Missing Slot Artist', 'Missing Slot Track', missingSlot.artistKey, missingSlot.trackKeyValue);
+      expect(
+        desiredLoved(db, link as never, missingSlot.intent as never, missingSlot.artistKey, missingSlot.trackKeyValue),
+      ).toBe(false);
+
+      const cancelled = addChain(
+        'Cancelled Artist',
+        'Cancelled Track',
+        'authorized-unlove',
+        'unlove',
+        'authorized',
+        300,
+      );
+      addProjection('Cancelled Artist', 'Cancelled Track', cancelled.artistKey, cancelled.trackKeyValue);
+      db.run(
+        `INSERT INTO operations(id,did,kind,origin,priority,collection,state,due_at,created_at_ms,updated_at_ms)
+         VALUES('cancelled-new-love',?,'love.put','web',0,'com.example.atmusic.love','cancelled',1,1,1)`,
+        DID,
+      );
+      db.run(
+        'INSERT INTO linked_love_intents(did,love_key,intent,operation_id,updated_at_ms) VALUES(?,?,?,?,?)',
+        DID,
+        `${cancelled.artistKey}\0${cancelled.trackKeyValue}`,
+        'love',
+        'cancelled-new-love',
+        301,
+      );
+      expect(
+        desiredLoved(db, link as never, cancelled.intent as never, cancelled.artistKey, cancelled.trackKeyValue),
+      ).toBe(true);
+
+      const override = addChain('Override Artist', 'Override Track', 'older-chain-love', 'love', 'operation', 400);
+      db.run(
+        'INSERT INTO linked_love_intents(did,love_key,intent,operation_id,updated_at_ms) VALUES(?,?,?,?,?)',
+        DID,
+        `${override.artistKey}\0${override.trackKeyValue}`,
+        'unlove',
+        'new-unwitnessed-unlove',
+        401,
+      );
+      expect(
+        desiredLoved(db, link as never, override.intent as never, override.artistKey, override.trackKeyValue),
+      ).toBe(false);
     });
   });
 

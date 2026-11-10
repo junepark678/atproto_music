@@ -4,9 +4,10 @@ import type { Db } from '../do/db';
 import type { ForwardItem } from '../outbox/forward-enqueue';
 import { enqueueForwards } from '../outbox/forward-enqueue';
 import { countLinkCoverage } from './coverage';
-import { armLoveCoverage, validDeferredAuthorization } from './love-deferral-storage';
+import { armLoveCoverage } from './love-deferral-storage';
 import { remoteLoveState } from './love-delivery';
 import { latestExplicitLoveIntentRecord } from './love-intent';
+import { deferredIntentBarrier, deferredIntentValid, liveLoveSettled } from './love-intent-policy';
 
 const TOP_WINDOW = 17;
 
@@ -21,17 +22,6 @@ interface DeferredIntent {
   intent_at_ms: number;
 }
 
-function operationCancelled(db: Db, operationId: string): boolean {
-  return db.one<{ state: string }>('SELECT state FROM operations WHERE id=?', operationId)?.state === 'cancelled';
-}
-
-function liveLoveSucceeded(db: Db, row: DeferredIntent): boolean {
-  return (
-    row.origin_class === 'live_love' &&
-    db.one<{ state: string }>('SELECT state FROM operations WHERE id=?', row.operation_id)?.state === 'succeeded'
-  );
-}
-
 export function desiredLoved(
   db: Db,
   link: LinkedAccountRow,
@@ -40,12 +30,25 @@ export function desiredLoved(
   trackKey: string,
 ): boolean {
   const explicit = latestExplicitLoveIntentRecord(db, link.did, artistKey, trackKey);
-  if (explicit !== null && explicit.updatedAtMs >= intent.intent_at_ms) {
-    if (!operationCancelled(db, explicit.operationId)) return explicit.intent === 'love';
-    // A cancelled newer API intent must not hide this surviving ordered
-    // deferral. The projection can still reflect the earlier remote love.
-    return intent.kind === 'love';
+  const explicitWitness =
+    explicit === null
+      ? null
+      : db.one(
+          'SELECT 1 AS present FROM forward_deferred_love_witnesses WHERE link_id=? AND generation=? AND operation_id=?',
+          link.id,
+          link.generation,
+          explicit.operationId,
+        );
+  if (
+    explicit !== null &&
+    explicit.updatedAtMs > intent.intent_at_ms &&
+    explicitWitness === null &&
+    !db.one("SELECT 1 AS present FROM operations WHERE id=? AND state='cancelled'", explicit.operationId)
+  ) {
+    return explicit.intent === 'love';
   }
+  if (intent.kind === 'love') return true;
+  if (intent.origin_class === 'operation' && intent.kind === 'unlove') return false;
   return (
     db.one(
       'SELECT 1 AS present FROM loves WHERE did=? AND artist_key=? AND track_key=? LIMIT 1',
@@ -57,34 +60,12 @@ export function desiredLoved(
 }
 
 function valid(db: Db, row: DeferredIntent): boolean {
-  if (row.origin_class === 'authorized') {
-    return (
-      row.authorization_uri !== null &&
-      row.authorization_rev !== null &&
-      validDeferredAuthorization(db, row.authorization_uri, row.authorization_rev)
-    );
-  }
-  if (row.origin_class === 'unclassified') return false;
-  return !operationCancelled(db, row.operation_id);
-}
-
-function setRunningIfCompleted(db: Db, link: LinkedAccountRow): void {
-  db.run(
-    `UPDATE linked_accounts SET backfill_state='pending',backfill_cursor=NULL,backfill_total=0,backfill_done=0,
-       backfill_failures=0,backfill_next_attempt_ms=NULL,backfill_run_revision=backfill_run_revision+1,
-       backfill_discovery_cursor=NULL,backfill_discovery_done=0,backfill_last_error=NULL
-     WHERE id=? AND generation=? AND backfill_run_revision=? AND backfill_state='done'
-       AND status='active' AND forward_scrobbles=1`,
-    link.id,
-    link.generation,
-    link.backfill_run_revision,
-  );
+  return deferredIntentValid(db, row);
 }
 
 /** Arms a current head and reopens a completed history run when necessary. */
 export function armLoveCoverageForHead(db: Db, link: LinkedAccountRow, artistKey: string, trackKey: string): boolean {
   const armed = armLoveCoverage(db, link, artistKey, trackKey);
-  if (armed) setRunningIfCompleted(db, link);
   return armed;
 }
 
@@ -147,10 +128,8 @@ export function runLoveCoverageChunk(
       let barrier: DeferredIntent | null = null;
       for (const row of rows) {
         if (!valid(db, row)) continue;
-        if (row.origin_class === 'live_love') {
-          barrier ??= row;
-          newest ??= row;
-        } else newest ??= row;
+        if (deferredIntentBarrier(db, row)) barrier ??= row;
+        newest ??= row;
       }
       const next = db.one<{ next_seq: number; live_from_seq: number }>(
         `SELECT next_seq,live_from_seq FROM forward_deferred_love_heads
@@ -164,7 +143,7 @@ export function runLoveCoverageChunk(
       let floor = next.live_from_seq;
       if (newest === null) {
         if (rows.length < TOP_WINDOW) floor = next.next_seq;
-      } else if (liveLoveSucceeded(db, newest)) floor = next.next_seq;
+      } else if (liveLoveSettled(db, newest)) floor = next.next_seq;
       else if (barrier !== null) floor = Math.max(floor, barrier.intent_seq);
 
       if (

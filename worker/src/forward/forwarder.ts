@@ -1032,20 +1032,31 @@ function allowAuthorizedUnlove(rt: ForwardRuntime, job: Job, now: number): boole
     authorization_uri: string | null;
     authorization_rev: string | null;
   }>("SELECT authorization_uri,authorization_rev FROM forward_outbox WHERE id=? AND state='queued'", row.id);
-  if (current === null || current.authorization_uri === null || current.authorization_rev === null) return true;
-  const authority = deferredAuthorityStatus(rt.db, { uri: current.authorization_uri, rev: current.authorization_rev });
-  if (authority !== 'active') {
-    settleRows(
-      rt.db,
-      [row.id],
-      'ignored',
-      now,
-      authority === 'conflicted' ? 'authorization_conflicted' : 'authorization_unavailable',
-      false,
-      job.link.generation,
-    );
+  if (current === null) return true;
+  const operationId = canonicalForwardDedupeKey(row.generation, row.dedupe_key);
+  if (operationId === null) return false;
+  const witness = rt.db.one<{
+    kind: string;
+    authorization_uri: string | null;
+    authorization_rev: string | null;
+  }>(
+    `SELECT kind,authorization_uri,authorization_rev FROM forward_deferred_love_witnesses
+     WHERE link_id=? AND generation=? AND operation_id=?`,
+    row.link_id,
+    row.generation,
+    operationId,
+  );
+  const owned = witness !== null;
+  const witnessMatches =
+    witness === null ||
+    (witness.kind === 'unlove' &&
+      witness.authorization_uri === current.authorization_uri &&
+      witness.authorization_rev === current.authorization_rev);
+  if (!witnessMatches) {
+    settleRows(rt.db, [row.id], 'ignored', now, 'authorization_conflicted', false, job.link.generation);
     return false;
   }
+  if (current.authorization_uri === null || current.authorization_rev === null) return true;
   const conflict =
     rt.db.one(
       'SELECT 1 FROM live_pending_removal_events WHERE uri=? AND rev=? AND conflicted=1 LIMIT 1',
@@ -1057,14 +1068,22 @@ function allowAuthorizedUnlove(rt: ForwardRuntime, job: Job, now: number): boole
       current.authorization_uri,
       current.authorization_rev,
     ) !== null;
-  if (!conflict) return true;
-  rt.db.tx(() => {
-    rt.db.run(
-      "UPDATE forward_outbox SET state='ignored',last_error='authorization_conflicted',updated_at_ms=? WHERE id=? AND state='queued'",
-      now,
-      row.id,
-    );
-  });
+  if (conflict) {
+    settleRows(rt.db, [row.id], 'ignored', now, 'authorization_conflicted', false, job.link.generation);
+    return false;
+  }
+  if (!owned) return true; // Accepted pre-56 effects retain their A2 contract.
+  const authority = deferredAuthorityStatus(rt.db, { uri: current.authorization_uri, rev: current.authorization_rev });
+  if (authority === 'active') return true;
+  settleRows(
+    rt.db,
+    [row.id],
+    'ignored',
+    now,
+    authority === 'conflicted' ? 'authorization_conflicted' : 'authorization_unavailable',
+    false,
+    job.link.generation,
+  );
   return false;
 }
 

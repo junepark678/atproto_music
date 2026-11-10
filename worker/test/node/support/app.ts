@@ -44,6 +44,7 @@ import type { Db } from '../../../src/do/db';
 import type { ConnectJetstream } from '../../../src/do/ingest/jetstream-socket';
 import { JetstreamConnectError } from '../../../src/do/ingest/jetstream-socket';
 import { migrate } from '../../../src/do/migrate';
+import type { Migration } from '../../../src/do/schema';
 import type { RouteDef } from '../../../src/http/types';
 import type { HostTimers, TimerHandle } from '../../../src/node/alarm';
 import { type ComposedApp, compose, type Feature } from '../../../src/node/compose';
@@ -194,6 +195,8 @@ export interface StartAppOptions {
   env?: Readonly<Record<string, string | undefined>>;
   /** Default: testSecrets(). */
   secrets?: Secrets;
+  /** Optional historical schema prefix for real upgrade and restore fixtures. */
+  migrations?: readonly Migration[];
   /** Wraps the database handed to compose (fault injection through the Db interface). */
   wrapDb?: (db: SqliteDb) => Db;
   /** Default: never low. */
@@ -264,7 +267,7 @@ export async function startApp(options: StartAppOptions = {}): Promise<TestApp> 
     const config = parseNodeConfig(env, { fixtureOrigins: true, allowFixturePrefix: true, releaseRoot: dir });
     mkdirSync(dirname(config.dbPath), { recursive: true });
     db = openSqliteDb(config.dbPath, { busyTimeoutMs: TEST_BUSY_TIMEOUT_MS, create: true });
-    const migration = migrate(db);
+    const migration = migrate(db, options.migrations);
     if (migration.status !== 'ready') throw new Error(`test database did not migrate: ${JSON.stringify(migration)}`);
 
     const secrets = options.secrets ?? testSecrets();

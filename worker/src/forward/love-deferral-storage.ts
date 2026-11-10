@@ -10,6 +10,7 @@ import {
   materializeLoveAuthority,
 } from './love-coverage-authority';
 import { remoteLoveState } from './love-delivery';
+import { classifyDeferredOrigin } from './love-intent-policy';
 
 type Link = LinkGeneration & {
   service: 'lastfm' | 'listenbrainz';
@@ -164,6 +165,15 @@ function existingHead(
 }
 
 export function armLoveCoverage(db: Db, link: LinkGeneration, artistKey: string, trackKeyValue: string): boolean {
+  const currentHead = db.one<{ armed_seq: string | null }>(
+    `SELECT CAST(armed_seq AS TEXT) AS armed_seq FROM forward_deferred_love_heads
+     WHERE link_id=? AND generation=? AND love_artist_key=? AND love_track_key=?`,
+    link.id,
+    link.generation,
+    artistKey,
+    trackKeyValue,
+  );
+  if (currentHead === null) return false;
   const resumable = db.one<{ revision: string }>(
     `SELECT CAST(l.backfill_run_revision AS TEXT) AS revision FROM linked_accounts l
      JOIN forward_deferred_love_heads h ON h.link_id=l.id AND h.generation=l.generation
@@ -175,9 +185,11 @@ export function armLoveCoverage(db: Db, link: LinkGeneration, artistKey: string,
     trackKeyValue,
   );
   const revision = resumable === null ? null : safeSeq(resumable.revision, 'backfill run revision', 0) + 1;
+  const queuedSeq = currentHead.armed_seq === null ? allocateDeferredSequence(db, 'next_head_seq') : null;
   const armed = db.run(
-    `UPDATE forward_deferred_love_heads SET armed_seq=coalesce(armed_seq,head_seq)
+    `UPDATE forward_deferred_love_heads SET armed_seq=coalesce(armed_seq,?)
      WHERE link_id=? AND generation=? AND love_artist_key=? AND love_track_key=?`,
+    queuedSeq,
     link.id,
     link.generation,
     artistKey,
@@ -186,9 +198,7 @@ export function armLoveCoverage(db: Db, link: LinkGeneration, artistKey: string,
   if (armed === 0) return false;
   if (revision !== null)
     db.run(
-      `UPDATE linked_accounts SET backfill_state='pending',backfill_cursor=NULL,backfill_total=0,backfill_done=0,
-       backfill_failures=0,backfill_next_attempt_ms=NULL,backfill_run_revision=?,
-       backfill_discovery_cursor=NULL,backfill_discovery_done=0,backfill_last_error=NULL
+      `UPDATE linked_accounts SET backfill_state='running',backfill_next_attempt_ms=NULL,backfill_run_revision=?
      WHERE id=? AND generation=? AND status='active' AND forward_scrobbles=1 AND backfill_state='done'`,
       revision,
       link.id,
@@ -205,12 +215,7 @@ function addIntent(
   now: number,
 ): boolean {
   const authorization = item.kind === 'unlove' ? item.authorization : undefined;
-  const originClass =
-    authorization !== undefined
-      ? 'authorized'
-      : item.kind === 'love' && track.origin === 'web'
-        ? 'live_love'
-        : 'operation';
+  const originClass = classifyDeferredOrigin(db, item.kind, item.operationId, authorization !== undefined);
   if (originClass === 'authorized') {
     if (!deferredAuthorityValid(db, authorization!)) return false;
   }
@@ -251,13 +256,15 @@ function addIntent(
     now,
   );
   const shouldArm = link.status !== 'active' || link.forward_scrobbles !== 1;
+  const queueSeq = shouldArm && head.armed_seq === null ? allocateDeferredSequence(db, 'next_head_seq') : null;
   db.run(
     `UPDATE forward_deferred_love_heads SET next_seq=?,
-       armed_seq=CASE WHEN ? THEN coalesce(armed_seq,head_seq) ELSE armed_seq END,
+       armed_seq=CASE WHEN ? THEN coalesce(armed_seq,?) ELSE armed_seq END,
        maintenance_seq=CASE WHEN ? THEN coalesce(maintenance_seq,head_seq) ELSE maintenance_seq END
      WHERE link_id=? AND generation=? AND love_artist_key=? AND love_track_key=? AND next_seq=?`,
     seq + 1,
     shouldArm ? 1 : 0,
+    queueSeq,
     originClass === 'live_love' ? 1 : 0,
     link.id,
     link.generation,
@@ -294,7 +301,7 @@ export function recordDeferredLoveIntents(
       const authorization = item.kind === 'unlove' ? item.authorization : undefined;
       let authorityUsable = true;
       if (authorization !== undefined) {
-        const authority = materializeLoveAuthority(db, authorization, 'delete', '', args.now);
+        const authority = materializeLoveAuthority(db, authorization, args.now);
         authorityUsable = authority === 'active' && deferredAuthorityValid(db, authorization);
         if (authority === 'missing') countLinkCoverage(db, 'deferred_authority_unmaterialized');
       }

@@ -47,6 +47,9 @@ import { bumpStatsVersion } from '../do/write/account-state';
 import { indexLoveOperationTarget } from '../forward/love-recording-targets';
 import { releaseForwardAdmission } from '../forward/projection';
 import { deleteQueuedForwardIdentity } from './forward-key';
+import { explicitlyUnsent, explicitlyUnsentSql, isUnsent } from './operation-certainty';
+
+export { explicitlyUnsent, explicitlyUnsentSql, isUnsent } from './operation-certainty';
 
 export { MAX_ATTEMPTS };
 
@@ -366,33 +369,6 @@ export function unblockOperations(db: Db, did: string, now: number): number {
     now,
     did,
   ).rowsWritten;
-}
-
-/**
- * Explicit certainty that no request for this row was ever started: its
- * insertion receipt (`unsent`), no attempt, no send timestamp, and no mark
- * of the unreleased two-read absence rule. Attempt counts alone prove
- * nothing: a migrated or refunded row can show 0 after a committed send.
- */
-export function explicitlyUnsent(
-  op: Pick<OperationRow, 'send_state' | 'attempts' | 'send_started_at_ms' | 'legacy_absent_at_ms'>,
-): boolean {
-  return (
-    op.send_state === 'unsent' && op.attempts === 0 && op.send_started_at_ms === null && op.legacy_absent_at_ms === null
-  );
-}
-
-/** `explicitlyUnsent` as SQL over the operations alias `o`. */
-export function explicitlyUnsentSql(o = 'o'): string {
-  if (!/^[a-z_]+$/.test(o)) throw new RangeError('invalid alias');
-  return `(${o}.send_state = 'unsent' AND ${o}.attempts = 0 AND ${o}.send_started_at_ms IS NULL AND ${o}.legacy_absent_at_ms IS NULL)`;
-}
-
-/** An unsent operation: queued or blocked and explicitly never sent. */
-export function isUnsent(
-  op: Pick<OperationRow, 'state' | 'attempts' | 'send_state' | 'send_started_at_ms' | 'legacy_absent_at_ms'>,
-): boolean {
-  return (op.state === 'queued' || op.state === 'blocked') && explicitlyUnsent(op);
 }
 
 /**
