@@ -523,3 +523,35 @@ deletes the operation and reopens the real Node database before handoff. It
 fails before the correction and passes afterward. This is stage-one envelope/
 reopen evidence, not real L2 table reconstruction or CLI restore acceptance.
 Fresh independent acceptance and all stage-two gates remain required.
+
+## Producer-derived CLI restore progress
+
+A new restore integration case now produces the live L2 rows through the real
+`enqueueLove` API admission, `runOutbox` PDS executor and fake PDS, actual
+ListenBrainz and Last.fm transport clients, verified present and delete proofs,
+the pending-removal owner producer, and direct-absence fact/decision producer.
+It leaves a second actual API operation PDS-SENT with its B2 recipient member
+still pending. Before restore it deletes the selected operation row and both
+selected SENT love outbox rows; the binding's persisted `api_origin` and
+aggregate's exact SENT operation ID remain. No L2 table rows are directly
+seeded in this case.
+The existing populated-row test remains separate restore coverage.
+
+The real restore CLI merges the readable schema-57 live DB into a fresh server
+composition. The restored production backfill timer runs until both decisions
+are handed off, and real fake Last.fm/ListenBrainz clients dispatch the queued
+effects; a second dispatch run sends nothing. Foreign keys are checked after
+shutdown. The scoped producer-derived restore case passes. This extends the
+restore evidence beyond the prior direct-SQL fixture but does not yet cover
+schema-56 producer-generated L2 state, accept-loss of all eight tables,
+failure-stage atomicity, fresh alias-session rescan after rollback, or the
+complete paused/revoked-to-same-remote resume matrix.
+
+The verified direct-absence path retains the existing broad live-delete effect
+and the new narrow API-recipient effect under their separate operation
+identities. This fixture therefore observes two unlove effects per remote
+service (one broad, one API-recipient) for the same deletion. The narrow
+recipient identity itself dispatches once and rerun sends zero; the broad path
+remains existing behavior. This coexistence is disclosed for Sol's
+reconciliation before treating the restored end-to-end case as per-remote
+exactly-once acceptance evidence. No broad producer behavior changed here.

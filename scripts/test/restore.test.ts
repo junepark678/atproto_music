@@ -37,6 +37,7 @@ import { dirname, join, resolve } from 'node:path';
 import * as sqlite from 'node:sqlite';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { fixtureKeys } from '@atmusic/atproto/test-support/keys';
+import { createFixtureKit } from '@atmusic/atproto/test-support/read-models';
 import { type FixtureTransport, routerTransport } from '@atmusic/atproto/test-support/router-transport';
 import { SignedRepo } from '@atmusic/atproto/test-support/signed-repo';
 import { verifyRecordProof } from '@atmusic/atproto/verify/record-proof';
@@ -50,12 +51,19 @@ import type { ExtensionContext } from '../../worker/src/app/host.ts';
 import { FileRevocations, revocationLogPath } from '../../worker/src/app/revocations.ts';
 import { OAuthSessionStore } from '../../worker/src/bff/oauth-stores.ts';
 import { createWebSessions } from '../../worker/src/bff/sessions.ts';
+import { parseConfig } from '../../worker/src/config.ts';
 import { ensureAccount, renameAccount } from '../../worker/src/credentials/accounts.ts';
 import { createAppPassword, revokeAppPassword, verifyAppPassword } from '../../worker/src/credentials/app-passwords.ts';
 import { type Box, createBox } from '../../worker/src/crypto/box.ts';
 import type { ModuleDeps } from '../../worker/src/do/contracts.ts';
 import { enqueueHints } from '../../worker/src/do/ingest/hints';
-import { executeAuthorizedRemovals, nextPendingRemovalDue } from '../../worker/src/do/ingest/live-pending-removals';
+import { cachedIdentityResolver } from '../../worker/src/do/ingest/identity-cache';
+import { recordLiveEvidence } from '../../worker/src/do/ingest/live-evidence';
+import {
+  executeAuthorizedRemovals,
+  nextPendingRemovalDue,
+  recordPendingRemovals,
+} from '../../worker/src/do/ingest/live-pending-removals';
 import { migrate } from '../../worker/src/do/migrate.ts';
 import { MIGRATIONS, SCHEMA_VERSION, TABLE_CLASS } from '../../worker/src/do/schema.ts';
 import { applyRecordProof } from '../../worker/src/do/write/apply-record.ts';
@@ -66,6 +74,7 @@ import {
   type ForwardRuntime,
   runForward,
 } from '../../worker/src/forward/forwarder.ts';
+import { LastfmClient } from '../../worker/src/forward/lastfm-client.ts';
 import {
   deleteLink,
   getLinkById,
@@ -82,6 +91,7 @@ import { admitForwardIdentity } from '../../worker/src/forward/projection.ts';
 import { UpstreamPacing } from '../../worker/src/forward/upstream-pacing.ts';
 import { enqueueCoverArt, putCoverArt } from '../../worker/src/musicbrainz/cover-art-store.ts';
 import { createBackups } from '../../worker/src/node/backup.ts';
+import { bindPolicyFetch, createPolicyFetch } from '../../worker/src/node/policy-fetch.ts';
 import { type ExitCode, type RunningServer, run } from '../../worker/src/node/run.ts';
 import { parseSecrets, type Secrets } from '../../worker/src/node/secrets.ts';
 import { openSqliteDb, type SqliteDb } from '../../worker/src/node/sqlite-db.ts';
@@ -89,6 +99,8 @@ import { enqueueForwards } from '../../worker/src/outbox/forward-enqueue.ts';
 import { acceptListens } from '../../worker/src/outbox/ingress.ts';
 import { enqueueLove } from '../../worker/src/outbox/love-ops.ts';
 import { cancelUnsent } from '../../worker/src/outbox/operations.ts';
+import { PDS_WRITER_CAPS } from '../../worker/src/outbox/pds-writer.ts';
+import { type OutboxDeps, runOutbox } from '../../worker/src/outbox/runner.ts';
 import {
   captureLog,
   manualTimers,
@@ -105,6 +117,7 @@ const DID_A = 'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa';
 const DID_B = 'did:plc:bbbbbbbbbbbbbbbbbbbbbbbb';
 const DID_C = 'did:plc:cccccccccccccccccccccccc';
 const PREFIX = 'com.example.atmusic';
+const LOVE_COLLECTION = `${PREFIX}.love`;
 const LASTFM_SK = 'lastfm-session-key-of-alice-0123456789';
 const ORIGINAL_FETCH = globalThis.fetch;
 
@@ -687,6 +700,130 @@ async function dispatchListenbrainz(
     listenbrainz,
   } as unknown as ForwardRuntime;
   return { report: await runForward(runtime, now), feedbacks };
+}
+
+async function produceApiLoveWithRealPds(db: SqliteDb, clock: FixedClock, label: string) {
+  const kit = await createFixtureKit({ clock });
+  expect(kit.users.Alice.did).toBe(DID_A);
+  const random = seededRandom(label === 'Live' ? 0x71 : 0x70);
+  const box = createBox(parseSecrets(testSecretsDocument()).encryptionKeys, random);
+  const transport = kit.transport;
+  const policyFetch = bindPolicyFetch(createPolicyFetch({ transport }), PDS_WRITER_CAPS);
+  const writers: OutboxDeps['writers'] = {
+    async writerFor(did) {
+      const user = kit.user(did);
+      return {
+        did,
+        scope: 'transition:generic',
+        fetchHandler(pathname, init) {
+          const headers = new Headers(init?.headers);
+          headers.set('authorization', `Bearer ${user.token}`);
+          return policyFetch(new URL(pathname, user.origin), { ...init, headers });
+        },
+      };
+    },
+  };
+  const config = {
+    ...parseConfig(
+      {
+        PUBLIC_ORIGIN: 'https://music.example.test',
+        LEXICON_PREFIX: PREFIX,
+        NAMESPACE_OWNERSHIP_REF: '',
+        NAMESPACE_PUBLICATION_REF: '',
+        INGEST_MODE: 'off',
+        JETSTREAM_URLS: '',
+        JETSTREAM_LOOKBACK_HOURS: '24',
+        RELAY_URL: 'https://relay.example.test',
+      } as Parameters<typeof parseConfig>[0],
+      { allowFixturePrefix: true },
+    ),
+    publication: true,
+    batchPublication: true,
+  };
+  const m: OutboxDeps = {
+    db,
+    clock,
+    random,
+    transport,
+    identity: cachedIdentityResolver(db, { transport, clock }),
+    config,
+    log: captureLog().logger,
+    writers,
+  };
+  const listenbrainzLink = saveLink(
+    { db, clock, random, box },
+    {
+      did: DID_A,
+      service: 'listenbrainz',
+      remoteUser: `restore-${label.toLowerCase()}`,
+      credential: `fixture-${label}-token`,
+    },
+  ).link.id;
+  db.run("UPDATE operations SET state='cancelled' WHERE id IN ('op1','op2')");
+  const created = await enqueueLove(m, {
+    did: DID_A,
+    input: {
+      artist: `Producer restore ${label}`,
+      track: 'SENT love',
+      album: 'Actual producer album',
+      recordingMbid: '12345678-1234-1234-1234-123456789abc',
+    },
+    origin: 'lastfm',
+  });
+  if (!created.ok) throw new Error(`restore producer API love rejected: ${created.reason.code}`);
+  for (let attempt = 0; attempt < 4; attempt++) {
+    await runOutbox(m, clock.nowMs());
+    const state = db.one<{ state: string }>('SELECT state FROM operations WHERE id=?', created.operation.id)?.state;
+    if (state === 'succeeded') break;
+    if (state === 'failed') throw new Error('restore producer PDS love failed');
+  }
+  const operation = db.one<{ state: string; rkey: string; result_uri: string | null }>(
+    'SELECT state,rkey,result_uri FROM operations WHERE id=?',
+    created.operation.id,
+  );
+  if (operation?.state !== 'succeeded' || operation.result_uri === null)
+    throw new Error('restore producer PDS love did not reach SENT success');
+  return {
+    kit,
+    m,
+    operationId: created.operation.id,
+    uri: operation.result_uri,
+    rkey: operation.rkey,
+    listenbrainzLink,
+  };
+}
+
+async function dispatchRestoreLoveTransports(db: SqliteDb, now: number) {
+  const listenbrainzRequests: unknown[] = [];
+  const lastfmRequests: string[] = [];
+  const clock = { nowMs: () => now };
+  const listenbrainz = new ListenbrainzClient({
+    apiRoot: 'https://listenbrainz.invalid/',
+    fetch: async (_url, init) => {
+      listenbrainzRequests.push(JSON.parse(String(init?.body)));
+      return new Response(JSON.stringify({ status: 'ok' }), { status: 200 });
+    },
+  });
+  const lastfm = new LastfmClient({
+    apiRoot: 'https://lastfm.invalid/2.0/',
+    apiKey: 'fixture-key',
+    sharedSecret: 'fixture-secret',
+    fetch: async (_url, init) => {
+      lastfmRequests.push(new URLSearchParams(String(init?.body)).get('method') ?? 'unknown');
+      return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+    },
+  });
+  const runtime = {
+    db,
+    clock,
+    random: seededRandom(0x72),
+    log: { log: () => undefined },
+    box: { openText: () => 'fixture-token' },
+    pacing: new UpstreamPacing(clock),
+    lastfm,
+    listenbrainz,
+  } as unknown as ForwardRuntime;
+  return { report: await runForward(runtime, now), listenbrainzRequests, lastfmRequests };
 }
 
 /** Overwrites the live database with bytes that are not SQLite (a failed disk). */
@@ -1427,15 +1564,24 @@ describe('restore.ts', () => {
     expect(l2Timer).toBeTypeOf('function');
     const scheduled: number[] = [];
     const timerNow = world.clock.nowMs() + 2_000;
-    await l2Timer!(timerNow, {
+    const timerContext = {
       schedule: (_name: 'link-backfill', at: number) => {
         scheduled.push(at);
         return at;
       },
       kick: () => null,
-    } as unknown as ExtensionContext);
-    expect(scheduled).toHaveLength(1);
-    expect(db.one('SELECT min(due_at_ms) AS due FROM love_api_unlove_decisions')).toEqual({ due: timerNow + 1_000 });
+    } as unknown as ExtensionContext;
+    let finalTimerNow = timerNow;
+    for (let turn = 0; turn < 8; turn++) {
+      finalTimerNow = timerNow + turn * 1_000;
+      await l2Timer!(finalTimerNow, timerContext);
+      const due = db.one<{ due: number }>('SELECT min(due_at_ms) AS due FROM love_api_unlove_decisions')?.due;
+      if (due !== undefined && due > finalTimerNow) break;
+    }
+    expect(scheduled.length).toBeGreaterThan(0);
+    expect(db.one<{ due: number }>('SELECT min(due_at_ms) AS due FROM love_api_unlove_decisions')!.due).toBeGreaterThan(
+      timerNow,
+    );
     expect(reclaimLoveApiProofRows(db, world.clock.nowMs())).toMatchObject({ visited: 2, bindingsDeleted: 0 });
     expect(db.one('SELECT api_origin FROM love_api_bindings WHERE operation_id=?', 'live-api-put')).toEqual({
       api_origin: 'lastfm',
@@ -1444,6 +1590,232 @@ describe('restore.ts', () => {
     systemd.server = null;
     expect(query(world.dbPath, 'PRAGMA foreign_key_check')).toEqual([]);
     expect(query(world.backupPath, 'PRAGMA foreign_key_check')).toEqual([]);
+  }, 30_000);
+
+  it('restores producer-derived API love proof after real PDS SENT, verified absence, and both remote deliveries', async () => {
+    const world = await buildWorld();
+    const db = openSqliteDb(world.dbPath, { busyTimeoutMs: BUSY_MS });
+    let source: Awaited<ReturnType<typeof produceApiLoveWithRealPds>> | null = null;
+    let absenceRev = '';
+    try {
+      source = await produceApiLoveWithRealPds(db, world.clock, 'Live');
+      const firstDelivery = await dispatchRestoreLoveTransports(db, world.clock.nowMs());
+      expect(firstDelivery.report.requests).toBe(2);
+      expect(firstDelivery.lastfmRequests).toEqual(['track.love']);
+      expect(firstDelivery.listenbrainzRequests).toEqual([
+        { recording_mbid: '12345678-1234-1234-1234-123456789abc', score: 1 },
+      ]);
+      const apiOperation = db.one<{ state: string; result_uri: string | null; rkey: string }>(
+        'SELECT state,result_uri,rkey FROM operations WHERE id=?',
+        source.operationId,
+      );
+      expect(apiOperation).toMatchObject({ state: 'succeeded', result_uri: source.uri });
+      expect(
+        db.one('SELECT api_origin FROM love_api_bindings WHERE did=? AND operation_id=?', DID_A, source.operationId),
+      ).toEqual({ api_origin: 'lastfm' });
+      const presentProof = await verifyRecordProof(
+        await source.kit.repos.Alice.getRecordCar(LOVE_COLLECTION, source.rkey),
+        {
+          did: DID_A,
+          collection: LOVE_COLLECTION,
+          rkey: source.rkey,
+          signingKey: source.kit.users.Alice.key.didKey,
+        },
+      );
+      expect(presentProof.state).toBe('present');
+      if (presentProof.state !== 'present') throw new Error('expected actual PDS present proof');
+      const proofNow = fromMs(world.clock.nowMs());
+      db.tx(() =>
+        applyRecordProof(db, presentProof, {
+          prefix: PREFIX,
+          nowNs: proofNow,
+          receiptNs: proofNow,
+          live: authorizedLiveOptions(db, presentProof, seededRandom(0x73)).live,
+        }),
+      );
+      const incarnation = db.one<{ incarnation_key: string }>(
+        "SELECT incarnation_key FROM love_incarnations WHERE uri=? AND state='present'",
+        source.uri,
+      )!;
+      const loveRow = db.one<{
+        uri: string;
+        cid: string;
+        artist_key: string;
+        track_key: string;
+        artist: string;
+        track: string;
+        recording_mbid: string | null;
+      }>('SELECT uri,cid,artist_key,track_key,artist,track,recording_mbid FROM loves WHERE uri=?', source.uri)!;
+      const laterLove = await enqueueLove(source.m, {
+        did: DID_A,
+        input: { artist: 'Producer restore pending', track: 'Member survives restore' },
+        origin: 'web',
+      });
+      if (!laterLove.ok) throw new Error(`pending restore API love rejected: ${laterLove.reason.code}`);
+      await runOutbox(source.m, world.clock.nowMs());
+      expect(db.one('SELECT state FROM operations WHERE id=?', laterLove.operation.id)).toEqual({ state: 'succeeded' });
+      expect(db.one('SELECT count(*) AS n FROM love_api_recipient_members')).toEqual({ n: 2 });
+
+      const deleteCommit = await source.kit.externalDelete('Alice', LOVE_COLLECTION, source.rkey);
+      const absentProof = await verifyRecordProof(
+        await source.kit.repos.Alice.getRecordCar(LOVE_COLLECTION, source.rkey),
+        {
+          did: DID_A,
+          collection: LOVE_COLLECTION,
+          rkey: source.rkey,
+          signingKey: source.kit.users.Alice.key.didKey,
+        },
+      );
+      expect(absentProof.state).toBe('absent');
+      if (absentProof.state !== 'absent') throw new Error('expected actual PDS absence proof');
+      absenceRev = absentProof.commit.rev;
+      recordPendingRemovals(db, [
+        {
+          did: DID_A,
+          uri: source.uri,
+          kind: 'love',
+          row: {
+            uri: loveRow.uri,
+            cid: loveRow.cid,
+            listened_at: new Date(world.clock.nowMs()).toISOString(),
+            artist_key: loveRow.artist_key,
+            track_key: loveRow.track_key,
+            artist: loveRow.artist,
+            track: loveRow.track,
+            recording_mbid: loveRow.recording_mbid,
+            record_uri: null,
+            listen_id: null,
+          },
+          identityKey: incarnation.incarnation_key,
+          windowLo: presentProof.commit.rev,
+          windowHi: deleteCommit.rev,
+          replacedByCid: null,
+          nowMs: world.clock.nowMs(),
+        },
+      ]);
+      recordLiveEvidence(
+        db,
+        {
+          uri: source.uri,
+          did: DID_A,
+          collection: LOVE_COLLECTION,
+          rkey: source.rkey,
+          rev: absenceRev,
+          action: 'delete',
+        },
+        world.clock.nowMs(),
+      );
+      db.tx(() =>
+        applyRecordProof(db, absentProof, {
+          prefix: PREFIX,
+          nowNs: fromMs(world.clock.nowMs()),
+          receiptNs: fromMs(world.clock.nowMs()),
+          live: authorizedLiveOptions(db, absentProof, seededRandom(0x74)).live,
+        }),
+      );
+      expect(db.one('SELECT count(*) AS n FROM love_api_window_owners')).toEqual({ n: 2 });
+      expect(db.one('SELECT count(*) AS n FROM love_api_unlove_decisions')).toEqual({ n: 2 });
+      expect(
+        db.one('SELECT count(*) AS n FROM love_api_comparison_facts WHERE authorization_rev=?', absenceRev),
+      ).toEqual({
+        n: 1,
+      });
+      const sentRows = db.all<{ id: string }>(
+        "SELECT id FROM forward_outbox WHERE kind='love' AND dedupe_key=? AND state='sent'",
+        source.operationId,
+      );
+      expect(sentRows).toHaveLength(2);
+      db.run('DELETE FROM operations WHERE id=?', source.operationId);
+      for (const row of sentRows) db.run('DELETE FROM forward_outbox WHERE id=?', row.id);
+      expect(db.one('SELECT 1 FROM operations WHERE id=?', source.operationId)).toBeNull();
+      expect(db.one("SELECT 1 FROM forward_outbox WHERE kind='love' AND dedupe_key=?", source.operationId)).toBeNull();
+      expect(db.one('SELECT api_origin FROM love_api_bindings WHERE operation_id=?', source.operationId)).toEqual({
+        api_origin: 'lastfm',
+      });
+    } finally {
+      db.close();
+    }
+
+    const servicePort = await freePort();
+    const systemd = new FakeSystemd(world, { servicePort });
+    await systemd.boot();
+    const priorServer = systemd.server;
+    const result = await restoreCli(world, systemd, [...baseArgs(world), '--listen', `127.0.0.1:${servicePort}`]);
+    expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(systemd.server).not.toBe(priorServer);
+    const restored = systemd.server!.server.db;
+    expect(restored.one('SELECT max(version) AS version FROM schema_migrations')).toEqual({ version: 57 });
+    for (const table of LOVE_API_TABLES) expect(restored.one(`SELECT 1 FROM ${table} LIMIT 1`), table).not.toBeNull();
+    expect(restored.one('SELECT api_origin FROM love_api_bindings WHERE operation_id=?', source!.operationId)).toEqual({
+      api_origin: 'lastfm',
+    });
+    expect(restored.one('SELECT 1 FROM operations WHERE id=?', source!.operationId)).toBeNull();
+    expect(
+      restored.one("SELECT 1 FROM forward_outbox WHERE kind='love' AND dedupe_key=?", source!.operationId),
+    ).toBeNull();
+    expect(restored.one('SELECT count(*) AS n FROM love_api_unlove_decisions')).toEqual({ n: 2 });
+    const timer = systemd
+      .server!.server.features.features.flatMap((feature) => feature.extensions ?? [])
+      .find((extension) => extension.name === 'link-backfill')?.timers?.['link-backfill'];
+    expect(timer).toBeTypeOf('function');
+    const scheduled: number[] = [];
+    const timerNow = world.clock.nowMs() + 2_000;
+    const timerContext = {
+      schedule: (_name: 'link-backfill', at: number) => {
+        scheduled.push(at);
+        return at;
+      },
+      kick: () => null,
+    } as unknown as ExtensionContext;
+    for (let turn = 0; turn < 4; turn++) {
+      await timer!(timerNow + turn * 1_000, timerContext);
+      if (restored.one<{ n: number }>('SELECT count(*) AS n FROM love_api_unlove_decisions')?.n === 0) break;
+    }
+    expect(scheduled.length).toBeGreaterThan(0);
+    expect(restored.one('SELECT count(*) AS n FROM love_api_unlove_decisions')).toEqual({ n: 0 });
+    const queuedUnloves = restored.all<{ service: string; state: string }>(
+      `SELECT l.service,o.state FROM forward_outbox o JOIN linked_accounts l ON l.id=o.link_id
+       WHERE o.kind='unlove' AND o.authorization_uri=?`,
+      source!.uri,
+    );
+    expect(queuedUnloves).toHaveLength(4);
+    expect(queuedUnloves.filter((row) => row.service === 'lastfm')).toHaveLength(2);
+    expect(queuedUnloves.filter((row) => row.service === 'listenbrainz')).toHaveLength(2);
+    expect(
+      restored.one(
+        `SELECT count(*) AS n FROM forward_outbox WHERE kind='unlove' AND authorization_uri=?
+         AND dedupe_key LIKE '%:api-recipient'`,
+        source!.uri,
+      ),
+    ).toEqual({ n: 2 });
+    const dispatchedLastfm: string[] = [];
+    const dispatchedListenbrainz: unknown[] = [];
+    let requestCount = 0;
+    for (let turn = 0; turn < 8; turn++) {
+      const dispatch = await dispatchRestoreLoveTransports(restored, timerNow + 1_000 + turn * 10_000);
+      requestCount += dispatch.report.requests;
+      dispatchedLastfm.push(...dispatch.lastfmRequests);
+      dispatchedListenbrainz.push(...dispatch.listenbrainzRequests);
+      const sent = restored.one<{ n: number }>(
+        `SELECT count(*) AS n FROM forward_outbox WHERE kind='unlove' AND authorization_uri=? AND state='sent'`,
+        source!.uri,
+      )?.n;
+      if (sent === 4) break;
+    }
+    expect(requestCount).toBeGreaterThanOrEqual(4);
+    expect(dispatchedLastfm.filter((method) => method === 'track.unlove')).toHaveLength(2);
+    expect(dispatchedListenbrainz).toContainEqual({
+      recording_mbid: '12345678-1234-1234-1234-123456789abc',
+      score: 0,
+    });
+    expect(dispatchedListenbrainz.filter((request) => (request as { score?: number }).score === 0)).toHaveLength(2);
+    const secondDispatch = await dispatchRestoreLoveTransports(restored, timerNow + 90_000);
+    expect(secondDispatch.report.requests).toBe(0);
+    expect(restored.one('SELECT 1 FROM love_api_bindings WHERE operation_id=?', source!.operationId)).not.toBeNull();
+    await stopServer(systemd.server!.server);
+    systemd.server = null;
+    expect(query(world.dbPath, 'PRAGMA foreign_key_check')).toEqual([]);
+    expect(absenceRev).not.toBe('');
   }, 30_000);
 
   it('merges populated schema-56 love state from the readable live DB and reopens it in a fresh server composition', async () => {
