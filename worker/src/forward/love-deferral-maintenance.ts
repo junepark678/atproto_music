@@ -599,7 +599,7 @@ function runAuth(db: Db, state = readSingleton(db)): LaneResult {
 
 export const LOVE_MAINTENANCE_UNIT_COSTS: Readonly<Record<LoveMaintenanceLane, number>> = {
   inv: 10,
-  due: 19,
+  due: 21,
   rr: 21,
   wit: 16,
   auth: 8,
@@ -646,10 +646,26 @@ function laneStep(db: Db, lane: Lane, state: Singleton): LaneResult {
 
 interface SchedulerBudget {
   unitWrites: number;
+  actualUnitWrites: number;
   visits: number;
   witSteps: number;
   laneUnits: Record<Lane, number>;
   metadataWrites: number;
+}
+
+function executeMetadata(db: Db, budget: SchedulerBudget, label: string, write: () => void): void {
+  // Reserve this statement independently of unused lane work. Measure before
+  // its transaction commits, including trigger/facade-induced SQLite changes.
+  if (budget.metadataWrites + 1 > LOVE_MAINTENANCE_METADATA_RESERVE)
+    throw new Error('deferred love metadata reserve exceeded');
+  if (budget.actualUnitWrites + budget.metadataWrites + 1 > LOVE_MAINTENANCE_WRITES)
+    throw new Error('deferred love total write budget exceeded');
+  budget.metadataWrites++;
+  const before = totalChanges(db);
+  write();
+  const delta = totalChanges(db) - before;
+  if (delta < 0n || delta > 1n) throw new Error(`deferred love ${label} metadata exceeded reserved cost 1: ${delta}`);
+  budget.metadataWrites -= 1 - Number(delta);
 }
 
 function executeLanePhase(
@@ -665,6 +681,7 @@ function executeLanePhase(
   let useful = false;
   let phaseCost = 0;
   const metadataBefore = budget.metadataWrites;
+  const actualUnitsBefore = budget.actualUnitWrites;
   const beforePhase = totalChanges(db);
   db.tx(() => {
     const cursor = readSingleton(db);
@@ -689,6 +706,9 @@ function executeLanePhase(
       if (delta < 0n || delta > BigInt(reservation))
         throw new Error(`deferred love ${lane} unit exceeded reserved cost ${reservation}: ${delta}`);
       const actual = Number(delta);
+      budget.actualUnitWrites += actual;
+      if (budget.actualUnitWrites + budget.metadataWrites > LOVE_MAINTENANCE_WRITES)
+        throw new Error('deferred love total write budget exceeded');
       const work = Math.max(actual, result.work ?? 0);
       if (work > reservation)
         throw new Error(`deferred love ${lane} unit exceeded reserved work ${reservation}: ${work}`);
@@ -713,24 +733,27 @@ function executeLanePhase(
     if (cursorSignature(cursor) !== cursorSignature(readSingleton(db))) {
       const assignments = CURSOR_COLUMNS.map((column) => `${column}=?`).join(',');
       const params = CURSOR_COLUMNS.map((column) => cursor[column]);
-      const changed = db.run(
-        `UPDATE forward_deferred_love_maintenance SET ${assignments},updated_at_ms=? WHERE singleton=1`,
-        ...params,
-        now,
-      ).rowsWritten;
-      budget.metadataWrites += changed;
+      executeMetadata(db, budget, `${lane} cursor`, () => {
+        db.run(
+          `UPDATE forward_deferred_love_maintenance SET ${assignments},updated_at_ms=? WHERE singleton=1`,
+          ...params,
+          now,
+        );
+      });
     }
     // One lane counter per lane transaction. No-op phases do not create rows.
     if (useful) {
-      countLinkCoverage(db, `deferred_maintenance_${lane}`);
-      budget.metadataWrites++;
+      executeMetadata(db, budget, `${lane} counter`, () => {
+        countLinkCoverage(db, `deferred_maintenance_${lane}`);
+      });
     }
     if (budget.metadataWrites > LOVE_MAINTENANCE_METADATA_RESERVE)
       throw new Error('deferred love metadata reserve exceeded');
     const totalDelta = totalChanges(db) - beforePhase;
     const metadataAdded = budget.metadataWrites - metadataBefore;
-    if (totalDelta < 0n || totalDelta > BigInt(allowance + metadataAdded))
-      throw new Error(`deferred love ${lane} phase exceeded allowance ${allowance}: ${totalDelta}`);
+    const actualUnits = budget.actualUnitWrites - actualUnitsBefore;
+    if (phaseCost > allowance || totalDelta !== BigInt(actualUnits + metadataAdded))
+      throw new Error(`deferred love ${lane} phase write accounting mismatch: ${totalDelta}`);
   });
   const actualWrites = Number(totalChanges(db) - beforePhase);
   if (actualWrites < 0 || !Number.isSafeInteger(actualWrites))
@@ -752,9 +775,13 @@ export interface LoveMaintenanceResult {
 export function runDeferredLoveMaintenance(db: Db, now: number): LoveMaintenanceResult {
   if (!Number.isSafeInteger(now) || now < 0) throw new RangeError('maintenance time must be safe epoch milliseconds');
   const beforeChanges = totalChanges(db);
-  const inserted = db.tx(
-    () => db.run('INSERT OR IGNORE INTO forward_deferred_love_maintenance(singleton) VALUES(1)').rowsWritten,
-  );
+  const inserted = db.tx(() => {
+    const changed = db.run('INSERT OR IGNORE INTO forward_deferred_love_maintenance(singleton) VALUES(1)').rowsWritten;
+    const delta = totalChanges(db) - beforeChanges;
+    if (delta < 0n || delta > 1n || delta !== BigInt(changed))
+      throw new Error(`deferred love initialization metadata exceeded reserved cost ${changed}: ${delta}`);
+    return changed;
+  });
   if (inserted > 0)
     return {
       useful: false,
@@ -768,6 +795,7 @@ export function runDeferredLoveMaintenance(db: Db, now: number): LoveMaintenance
   const before = readSingleton(db);
   const budget: SchedulerBudget = {
     unitWrites: 0,
+    actualUnitWrites: 0,
     visits: 0,
     witSteps: 0,
     laneUnits: { inv: 0, due: 0, rr: 0, wit: 0, auth: 0 },
@@ -792,17 +820,19 @@ export function runDeferredLoveMaintenance(db: Db, now: number): LoveMaintenance
   }
   if (useful)
     db.tx(() => {
-      const writes = db.run(
-        'UPDATE forward_deferred_love_maintenance SET lane_turn=?,updated_at_ms=? WHERE singleton=1',
-        (before.lane_turn + 1) % LANES.length,
-        now,
-      ).rowsWritten;
-      budget.metadataWrites += writes;
-      if (budget.metadataWrites > 18) throw new Error('deferred love metadata reserve exceeded');
+      executeMetadata(db, budget, 'lane turn', () => {
+        db.run(
+          'UPDATE forward_deferred_love_maintenance SET lane_turn=?,updated_at_ms=? WHERE singleton=1',
+          (before.lane_turn + 1) % LANES.length,
+          now,
+        );
+      });
     });
   const writeDelta = totalChanges(db) - beforeChanges;
   if (writeDelta < 0n || writeDelta > BigInt(Number.MAX_SAFE_INTEGER))
     throw new RangeError('deferred love write count is unsafe');
+  if (writeDelta !== BigInt(budget.actualUnitWrites + budget.metadataWrites))
+    throw new Error('deferred love total write accounting mismatch');
   const writes = Number(writeDelta);
   return {
     useful,

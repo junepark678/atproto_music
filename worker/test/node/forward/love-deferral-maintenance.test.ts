@@ -28,7 +28,7 @@ function link(db: Parameters<typeof runDeferredLoveMaintenance>[0], generation =
 
 describe('deferred love maintenance', () => {
   it('keeps the audited conservative per-unit mutation and scan-work reservations', () => {
-    expect(LOVE_MAINTENANCE_UNIT_COSTS).toEqual({ inv: 10, due: 19, rr: 21, wit: 16, auth: 8 });
+    expect(LOVE_MAINTENANCE_UNIT_COSTS).toEqual({ inv: 10, due: 21, rr: 21, wit: 16, auth: 8 });
   });
 
   it('uses the one-time singleton write, then stays completely quiet on an empty initialized store', async () => {
@@ -61,7 +61,7 @@ describe('deferred love maintenance', () => {
         },
         tx: (fn) => raw.tx(fn),
       };
-      expect(() => runDeferredLoveMaintenance(db, 10)).toThrow(/unit exceeded reserved cost 19/);
+      expect(() => runDeferredLoveMaintenance(db, 10)).toThrow(/unit exceeded reserved cost 21/);
       expect(db.one('SELECT count(*) AS n FROM forward_deferred_love_heads')).toEqual({ n: 1 });
       expect(db.one("SELECT updated_at_ms FROM linked_accounts WHERE id='maintenance-link'")).toEqual({
         updated_at_ms: 1,
