@@ -31,6 +31,7 @@ import { FakeListenBrainz } from '../node/support/fake-listenbrainz';
 const API_KEY = '0123456789abcdef0123456789abcdef';
 const SECRET = 'owner-shared-secret-for-tests';
 const ALICE = 'did:plc:alicealicealicealicealic';
+const BOB = 'did:plc:bobbobbobbobbobbob';
 const TOKEN = '5c7f3a3e-2f1d-4c1b-9a77-0d1e2f3a4b5c';
 const MBID = '8f3471b5-7e6a-48da-86a9-c1c07a0f47ae';
 
@@ -214,22 +215,24 @@ it('bounds love-head row work across a 2,000-row unresolved backlog while forwar
   expect(report?.nextDueMs).not.toBeNull();
 });
 
-it('bounds unlove candidate rows across unrelated queued love backlogs of 1k and 10k', async () => {
-  const measure = async (count: number) => {
+it('bounds exercised unlove target and history reads across initialized unrelated 1k/10k backlogs', async () => {
+  const measure = async (count: number, injectBacklogPrefetch = false) => {
     const w = await benchWorld();
+    const db = w.app.db;
     const now = w.clock.nowMs();
-    w.app.db.tx(() => {
+    db.tx(() => {
       for (let i = 0; i < count; i++) {
         const artist = `Band ${i}`;
         const track = `Song ${i}`;
-        w.app.db.run(
-          `INSERT INTO forward_outbox(id,link_id,generation,did,kind,dedupe_key,payload_json,state,attempts,due_at,created_at_ms,updated_at_ms,love_artist_key,love_track_key)
-           VALUES(?,?,?,?,'love',?,?,'queued',0,?,?,?,?,?)`,
-          `prior-${count}-${i}`,
+        db.run(
+          `INSERT INTO forward_outbox(id,link_id,generation,did,kind,dedupe_key,payload_json,state,attempts,due_at,
+           created_at_ms,updated_at_ms,love_artist_key,love_track_key,love_lane)
+           VALUES(?,?,?,?,'love',?,?,'queued',0,?,?,?,?,?,1)`,
+          `prior-${i}`,
           w.linkId,
           w.generation,
           ALICE,
-          `prior-${count}-${i}`,
+          `prior-${i}`,
           JSON.stringify({ artist, track, recordingMbid: MBID }),
           now + 3_600_000,
           now,
@@ -238,47 +241,88 @@ it('bounds unlove candidate rows across unrelated queued love backlogs of 1k and
           track.toLowerCase(),
         );
       }
+      // Mirror completed production framing and retained-target initialization.
+      db.run(`INSERT INTO forward_love_lanes(link_id,generation,love_artist_key,love_track_key,priority,due_at,head_created_at_ms)
+        SELECT link_id,generation,love_artist_key,love_track_key,priority,due_at,created_at_ms FROM forward_outbox`);
+      db.run(`INSERT INTO forward_love_recording_targets(forward_rowid,link_id,generation,artist_key,track_key,created_at_ms,recording_mbid)
+        SELECT rowid,link_id,generation,love_artist_key,love_track_key,created_at_ms,json_extract(payload_json,'$.recordingMbid') FROM forward_outbox`);
+      db.run(
+        "INSERT INTO mb_tracks(artist_key,track_key,album_key,status,created_at_ms) VALUES('not prior','not prior','','unmatched',?)",
+        now,
+      );
     });
     w.clock.advance(1);
-    enqueueForwards(w.app.db, {
+    enqueueForwards(db, {
       did: ALICE,
       now: w.clock.nowMs(),
       random: seededRandom(93),
       items: [
-        {
-          kind: 'unlove',
-          operationId: `independent-unlove-${count}`,
-          payload: { artist: 'Not prior', track: 'Not prior' },
-        },
+        { kind: 'unlove', operationId: 'independent-unlove', payload: { artist: 'Not prior', track: 'Not prior' } },
       ],
     });
-    const all = w.app.db.all.bind(w.app.db);
-    const one = w.app.db.one.bind(w.app.db);
-    let fetched = 0;
-    w.app.db.all = ((sql: string, ...args: SqlParam[]) => {
+    db.run(`INSERT INTO forward_love_recording_targets_state(singleton,cursor_rowid,complete)
+      SELECT 1,max(rowid),1 FROM forward_outbox`);
+    db.run('INSERT INTO forward_love_operation_targets_state(singleton,cursor_rowid,complete) VALUES(1,0,1)');
+    const population = {
+      loves: db.one<{ n: number }>("SELECT count(*) AS n FROM forward_outbox WHERE kind='love'")!.n,
+      targets: db.one<{ n: number }>('SELECT count(*) AS n FROM forward_love_recording_targets')!.n,
+      lanes: db.one<{ n: number }>('SELECT count(*) AS n FROM forward_love_lanes')!.n,
+    };
+    const all = db.all.bind(db);
+    const one = db.one.bind(db);
+    const work = { targetCalls: 0, historyCalls: 0, candidateRows: 0, initializationRows: 0, laneRows: 0 };
+    db.all = ((sql: string, ...args: SqlParam[]) => {
       const rows = all(sql, ...args);
-      if (sql.includes('SELECT payload_json FROM forward_outbox')) fetched += rows.length;
+      if (sql === LOVE_RECORDING_HISTORY_LOOKUP_SQL || sql === LOVE_RECORDING_HISTORY_PAGE_SQL) {
+        work.historyCalls++;
+        work.candidateRows += rows.length;
+      }
+      if (sql.includes('WHERE rowid>? ORDER BY rowid LIMIT 128')) work.initializationRows += rows.length;
+      if (sql === LANE_PICK_SQL) work.laneRows += rows.length;
       return rows;
-    }) as typeof w.app.db.all;
-    w.app.db.one = ((sql: string, ...args: SqlParam[]) => {
+    }) as typeof db.all;
+    db.one = ((sql: string, ...args: SqlParam[]) => {
+      if (sql === FORWARD_LOVE_RECORDING_LOOKUP_SQL) {
+        work.targetCalls++;
+        // Negative control: reintroduce a backlog-wide payload prefetch at the
+        // actual lookup boundary; identical behavior must fail the work bound.
+        if (injectBacklogPrefetch)
+          work.candidateRows += all(
+            "SELECT payload_json FROM forward_outbox WHERE link_id=? AND generation=? AND kind='love'",
+            w.linkId,
+            w.generation,
+          ).length;
+      }
       const row = one(sql, ...args);
-      if (sql.includes('SELECT payload_json FROM forward_outbox') && row !== null) fetched++;
+      if (sql === FORWARD_LOVE_RECORDING_LOOKUP_SQL && row !== null) work.candidateRows++;
       return row;
-    }) as typeof w.app.db.one;
+    }) as typeof db.one;
     try {
       await runForward(w.rt, w.clock.nowMs());
-      return { count, fetched };
     } finally {
-      w.app.db.all = all;
-      w.app.db.one = one;
+      db.all = all;
+      db.one = one;
     }
+    expect(db.one("SELECT state,last_error FROM forward_outbox WHERE kind='unlove'")).toEqual({
+      state: 'ignored',
+      last_error: 'no_recording_mbid',
+    });
+    expect(w.lb.feedback).toHaveLength(0);
+    expect(population).toEqual({ loves: count, targets: count, lanes: count + 1 });
+    expect(work.targetCalls).toBe(1);
+    expect(work.historyCalls).toBe(1);
+    expect(work.initializationRows).toBe(0);
+    return work;
   };
   const oneK = await measure(1_000);
   const tenK = await measure(10_000);
-  expect(oneK.count).toBe(1_000);
-  expect(tenK.count).toBe(10_000);
-  expect(oneK.fetched).toBeLessThanOrEqual(32);
-  expect(tenK.fetched).toBeLessThanOrEqual(32);
+  expect(tenK).toEqual(oneK);
+  expect(tenK.candidateRows).toBeLessThanOrEqual(32);
+  expect(tenK.laneRows).toBeGreaterThan(0);
+  expect(tenK.laneRows).toBeLessThanOrEqual(MAX_LOCAL_WORK_PER_RUN);
+  const negativeControl = await measure(1_000, true);
+  expect(negativeControl.candidateRows).toBe(1_000);
+  expect(negativeControl.candidateRows).toBeGreaterThan(32);
 });
 
 it('keeps retained love lookups indexed at 10k same-key history rows', async () => {
@@ -472,4 +516,77 @@ it('caps expiry transitions and blocks forwarding until a 10k mixed expired back
   } finally {
     w.app.db.all = all;
   }
+});
+
+it('gives two links separate 32-row budgets while reaching both 2,000-key tails', async () => {
+  const w = await benchWorld();
+  const firstLink = w.linkId;
+  const bobToken = '6d8e4f2b-1a9c-4f2d-8b7e-3c5d1f9a2b6c';
+  w.lb.addToken('bob_lb', bobToken);
+  ensureAccount({ db: w.app.db, clock: w.clock }, { did: BOB, verifiedHandle: null });
+  const secondLink = saveLink(
+    { db: w.app.db, clock: w.clock, random: w.rt.random, box: w.rt.box },
+    { did: BOB, service: 'listenbrainz', remoteUser: 'bob_lb', credential: bobToken },
+  ).link.id;
+  const linkIds = [firstLink, secondLink];
+  w.app.db.tx(() => {
+    for (const [linkIndex, linkId] of linkIds.entries()) {
+      const generation = w.app.db.one<{ generation: number }>(
+        'SELECT generation FROM linked_accounts WHERE id=?',
+        linkId,
+      )!.generation;
+      for (let i = 0; i < 2_000; i++) {
+        const ready = i === 1_999;
+        const artist = ready ? `Ready Artist ${linkIndex}` : `Busy Artist ${linkIndex}-${i}`;
+        const track = ready ? `Ready Song ${linkIndex}` : `Busy Track ${linkIndex}-${i}`;
+        const [artistKey, trackKeyValue] = trackKey(artist, track);
+        w.app.db.run(
+          `INSERT INTO forward_outbox(id,link_id,generation,did,kind,dedupe_key,payload_json,state,attempts,due_at,created_at_ms,updated_at_ms,love_artist_key,love_track_key)
+           VALUES(?,?,?,?,'love',?,?,'queued',0,?,?,?, ?,?)`,
+          `link-${linkIndex}-love-${i}`,
+          linkId,
+          generation,
+          linkIndex === 0 ? ALICE : BOB,
+          `link-${linkIndex}-love-${i}`,
+          JSON.stringify({ artist, track, ...(ready ? { recordingMbid: MBID } : {}) }),
+          w.clock.nowMs(),
+          w.clock.nowMs(),
+          w.clock.nowMs(),
+          artistKey,
+          trackKeyValue,
+        );
+      }
+    }
+  });
+  const all = w.app.db.all.bind(w.app.db);
+  const maxFetched = new Map(linkIds.map((id) => [id, 0]));
+  const fetchedThisRun = new Map<string, number>();
+  w.app.db.all = ((sql: string, ...params: SqlParam[]) => {
+    const rows = all(sql, ...params);
+    if (sql === LANE_PICK_SQL) {
+      const id = String(params[0]);
+      fetchedThisRun.set(id, (fetchedThisRun.get(id) ?? 0) + rows.length);
+    }
+    return rows;
+  }) as typeof w.app.db.all;
+  try {
+    for (let run = 0; run < 70 && w.lb.feedback.length < 2; run++) {
+      fetchedThisRun.clear();
+      await runForward(w.rt, w.clock.nowMs());
+      for (const id of linkIds) {
+        const fetched = fetchedThisRun.get(id) ?? 0;
+        expect(fetched).toBeLessThanOrEqual(MAX_LOCAL_WORK_PER_RUN);
+        maxFetched.set(id, Math.max(maxFetched.get(id) ?? 0, fetched));
+      }
+      w.clock.advance(1_000);
+    }
+  } finally {
+    w.app.db.all = all;
+  }
+  expect(linkIds.map((id) => maxFetched.get(id))).toEqual([MAX_LOCAL_WORK_PER_RUN, MAX_LOCAL_WORK_PER_RUN]);
+  expect(w.lb.feedback).toHaveLength(2);
+  expect(w.lb.feedback.map((feedback) => feedback.json)).toEqual([
+    { recording_mbid: MBID, score: 1 },
+    { recording_mbid: MBID, score: 1 },
+  ]);
 });

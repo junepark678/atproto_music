@@ -17,7 +17,13 @@ import { MemoryRevocations } from '../../../src/app/revocations';
 import type { ForwardOutboxRow } from '../../../src/app/rows';
 import { ensureAccount } from '../../../src/credentials/accounts';
 import type { SqlParam } from '../../../src/do/db';
-import { type ForwardRuntime, runForward } from '../../../src/forward/forwarder';
+import {
+  FORWARD_LOVE_RECORDING_LOOKUP_SQL,
+  type ForwardRuntime,
+  LOVE_RECORDING_HISTORY_LOOKUP_SQL,
+  LOVE_RECORDING_HISTORY_PAGE_SQL,
+  runForward,
+} from '../../../src/forward/forwarder';
 import { saveLink } from '../../../src/forward/links';
 import { type LinksService, linksFeature } from '../../../src/http/links';
 import { parseSecrets } from '../../../src/node/secrets';
@@ -137,6 +143,12 @@ describe('fresh independent boundary tests', () => {
         payload: { artist: `Band ${i}`, track: `Song ${i}`, recordingMbid: MBID },
       })),
     );
+    w.app.db.run("UPDATE forward_outbox SET due_at=? WHERE kind='love'", w.clock.nowMs() + 3_600_000);
+    w.app.db.run('UPDATE forward_love_lanes SET due_at=?', w.clock.nowMs() + 3_600_000);
+    w.app.db.run(
+      "INSERT INTO mb_tracks(artist_key,track_key,album_key,status,created_at_ms) VALUES('not prior','not prior','','unmatched',?)",
+      w.clock.nowMs(),
+    );
     w.clock.advance(1);
     w.enqueue([
       { kind: 'unlove', operationId: 'independent-unlove', payload: { artist: 'Not prior', track: 'Not prior' } },
@@ -144,14 +156,22 @@ describe('fresh independent boundary tests', () => {
     const all = w.app.db.all.bind(w.app.db);
     const one = w.app.db.one.bind(w.app.db);
     let fetched = 0;
+    let targetCalls = 0;
+    let historyCalls = 0;
     w.app.db.all = ((sql: string, ...args: SqlParam[]) => {
       const rows = all(sql, ...args);
-      if (sql.includes('SELECT payload_json FROM forward_outbox')) fetched += rows.length;
+      if (sql === LOVE_RECORDING_HISTORY_LOOKUP_SQL || sql === LOVE_RECORDING_HISTORY_PAGE_SQL) {
+        historyCalls++;
+        fetched += rows.length;
+      }
       return rows;
     }) as typeof all;
     w.app.db.one = ((sql: string, ...args: SqlParam[]) => {
       const row = one(sql, ...args);
-      if (sql.includes('SELECT payload_json FROM forward_outbox') && row !== null) fetched++;
+      if (sql === FORWARD_LOVE_RECORDING_LOOKUP_SQL) {
+        targetCalls++;
+        if (row !== null) fetched++;
+      }
       return row;
     }) as typeof one;
     try {
@@ -160,7 +180,14 @@ describe('fresh independent boundary tests', () => {
       w.app.db.all = all;
       w.app.db.one = one;
     }
-    expect(fetched).toBeLessThanOrEqual(32);
+    expect(targetCalls).toBe(1);
+    expect(historyCalls).toBe(1);
+    expect(fetched).toBe(0);
+    expect(w.rows().find((row) => row.kind === 'unlove')).toMatchObject({
+      state: 'ignored',
+      last_error: 'no_recording_mbid',
+    });
+    expect(w.lb.feedback).toHaveLength(0);
   });
   it('bounds fetched lane rows when multiple successful picks fit in a run', async () => {
     const w = await world();
