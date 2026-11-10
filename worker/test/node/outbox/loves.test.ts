@@ -9,6 +9,11 @@ import { expect, it } from 'vitest';
 import type { Db, SqlParam } from '../../../src/do/db';
 import { cachedIdentityResolver } from '../../../src/do/ingest/identity-cache';
 import { recordLiveEvidence } from '../../../src/do/ingest/live-evidence';
+import {
+  authorizePendingRemovals,
+  executeAuthorizedRemovals,
+  recordPendingRemoval,
+} from '../../../src/do/ingest/live-pending-removals';
 import { applyRecordProof } from '../../../src/do/write/apply-record';
 import { settleRows } from '../../../src/forward/forward-outbox';
 import { materializeLoveApiRecipientDecisions } from '../../../src/forward/love-api-materializer';
@@ -894,6 +899,124 @@ it('reconstructs API source and trusted authority from retained L2 after operati
     ).toMatchObject({ kind: 'unlove', dedupe_key: recipientOperationId, state: 'queued' });
     expect(h.db.one('SELECT 1 FROM love_api_unlove_decisions')).toBeNull();
     expect(h.db.one('SELECT state FROM love_api_recipients')).toEqual({ state: 'released' });
+  });
+});
+
+it('delayed signed absence seals the exact pending API member and waits for its SENT settlement', async () => {
+  await withHarness(async (h) => {
+    h.seedUser(h.alice);
+    h.link(h.alice, 'lastfm');
+    const created = await enqueueLove(h.m, {
+      did: h.alice,
+      input: { artist: 'Delayed exact API', track: 'Wait for SENT' },
+      origin: 'web',
+    });
+    if (!created.ok) throw new Error(JSON.stringify(created.reason));
+    await h.runUntilIdle();
+    const operation = h.op(created.operation.id);
+    if (operation.rkey === null) throw new Error('API love has no accepted rkey');
+    const presentCar = await h.kit.repos.Alice.getRecordCar(LOVE, operation.rkey);
+    const presentProof = await verifyRecordProof(presentCar, {
+      did: h.alice,
+      collection: LOVE,
+      rkey: operation.rkey,
+      signingKey: h.kit.users.Alice.key.didKey,
+    });
+    expect(presentProof.state).toBe('present');
+    if (presentProof.state !== 'present') throw new Error('expected signed present proof');
+    expect((await projectLove(h, operation.rkey, true)).outcome).toBe('applied');
+    const uri = `at://${h.alice}/${LOVE}/${operation.rkey}`;
+    const incarnation = h.db.one<{ incarnation_key: string }>(
+      "SELECT incarnation_key FROM love_incarnations WHERE uri=? AND state='present'",
+      uri,
+    )!;
+    const loveRow = h.db.one<{
+      uri: string;
+      cid: string;
+      artist_key: string;
+      track_key: string;
+      artist: string;
+      track: string;
+      recording_mbid: string | null;
+    }>('SELECT uri,cid,artist_key,track_key,artist,track,recording_mbid FROM loves WHERE uri=?', uri)!;
+    const effect = h.db.one<{ id: string; generation: number; link_id: string }>(
+      "SELECT id,generation,link_id FROM forward_outbox WHERE kind='love' AND dedupe_key=?",
+      operation.id,
+    )!;
+    expect(h.db.one('SELECT operation_id FROM love_api_recipient_members WHERE link_id=?', effect.link_id)).toEqual({
+      operation_id: operation.id,
+    });
+    const removal = await h.kit.externalDelete('Alice', LOVE, operation.rkey);
+    const absentCar = await h.kit.repos.Alice.getRecordCar(LOVE, operation.rkey);
+    const absentProof = await verifyRecordProof(absentCar, {
+      did: h.alice,
+      collection: LOVE,
+      rkey: operation.rkey,
+      signingKey: h.kit.users.Alice.key.didKey,
+    });
+    expect(absentProof.state).toBe('absent');
+    if (absentProof.state !== 'absent') throw new Error('expected signed absent proof');
+    expect(removal.rev).toBe(absentProof.commit.rev);
+    expect((await projectLove(h, operation.rkey, false)).outcome).toBe('absent');
+    recordPendingRemoval(h.db, {
+      did: h.alice,
+      uri,
+      kind: 'love',
+      row: {
+        uri: loveRow.uri,
+        record_uri: null,
+        listen_id: null,
+        cid: loveRow.cid,
+        listened_at: '',
+        artist_key: loveRow.artist_key,
+        track_key: loveRow.track_key,
+        artist: loveRow.artist,
+        track: loveRow.track,
+        recording_mbid: loveRow.recording_mbid,
+      },
+      identityKey: incarnation.incarnation_key,
+      windowLo: presentProof.commit.rev,
+      windowHi: absentProof.commit.rev,
+      replacedByCid: null,
+      nowMs: h.m.clock.nowMs(),
+    });
+    recordLiveEvidence(
+      h.db,
+      { uri, did: h.alice, collection: LOVE, rkey: operation.rkey, rev: absentProof.commit.rev, action: 'delete' },
+      h.m.clock.nowMs(),
+    );
+    authorizePendingRemovals(h.db, { uri, rev: absentProof.commit.rev, action: 'delete' }, h.m.clock.nowMs());
+    const executed = executeAuthorizedRemovals(h.db, { uri, nowMs: h.m.clock.nowMs(), random: h.m.random, limit: 1 });
+    expect(executed.groups).toBe(1);
+    expect(h.db.one('SELECT state,sent_operation_id FROM love_api_recipients WHERE uri=?', uri)).toEqual({
+      state: 'sealed',
+      sent_operation_id: null,
+    });
+    expect(h.db.one('SELECT 1 FROM love_api_unlove_decisions WHERE uri=?', uri)).not.toBeNull();
+    expect(h.db.all("SELECT id FROM forward_outbox WHERE kind='unlove' AND authorization_uri=?", uri)).toEqual([]);
+    expect(
+      materializeLoveApiRecipientDecisions(h.db, h.m.clock.nowMs(), h.m.random, 'delayed-before-sent'),
+    ).toMatchObject({
+      awaiting: 1,
+      queued: 0,
+      deferred: 0,
+    });
+    settleRows(h.db, [effect.id], 'sent', h.m.clock.nowMs(), null, true, effect.generation);
+    const afterSent = materializeLoveApiRecipientDecisions(
+      h.db,
+      h.m.clock.nowMs() + 1_000,
+      h.m.random,
+      'delayed-after-sent',
+    );
+    expect(afterSent).toMatchObject({
+      awaiting: 0,
+      deferred: 0,
+      queued: 1,
+    });
+    expect(h.db.one("SELECT kind,state FROM forward_outbox WHERE kind='unlove' AND authorization_uri=?", uri)).toEqual({
+      kind: 'unlove',
+      state: 'queued',
+    });
   });
 });
 

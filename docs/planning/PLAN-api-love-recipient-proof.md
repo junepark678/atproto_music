@@ -441,8 +441,11 @@ whole-L2 acceptance or readiness. The audit and repair direction are
    absence; in the latter order the sealed decision first returns awaiting
    with no unlove effect, then queues after the exact SENT settlement. The
    delayed producer test likewise checks zero effect before SENT and queued
-   handoff afterward. This does not authorize arbitrary unbound or alias
-   intent.
+   handoff afterward. The delayed-window case now applies actual signed
+   present/absence proofs, executes `recordPendingRemoval` plus the production
+   authorization/executor path, asserts awaiting with zero unlove before SENT,
+   then observes one queued recipient effect after exact SENT. This does not
+   authorize arbitrary unbound or alias intent.
 3. Materialization now connects the validated persisted comparison fact to
    `recordVerifiedDeferredLoveAuthority` inside the same handoff transaction,
    before the adapter. Missing, corrupt, conflict, and expired facts still
@@ -504,7 +507,7 @@ committed `rr` frontier transaction survives the L2 failure. The full restore
 file passes 25/25, including producer-derived proof, schema57 CLI restore,
 revoked Last.fm plus disabled ListenBrainz zero-egress, same-remote/same-
 generation resume, one unlove per remote, and zero-request rerun. Seven
-relevant worker-node files pass 112/112; `loves.test.ts` now passes 27/27 with
+relevant worker-node files pass 112/112; `loves.test.ts` now passes 28/28 with
 the fact-owner 2/3/2 and complete partial-delete source trace explicitly
 separated. A broader eight-file run passed
 138/139; the unchanged Last.fm key-rejection scenario failed its existing
