@@ -9,10 +9,10 @@ import type { Db } from '../do/db';
 import { LOVE_IMPORT_SOURCE_CLASS_SQL } from '../do/schema';
 import { matchedRecordingMbid } from '../musicbrainz/store';
 import { enqueueForwards } from '../outbox/forward-enqueue';
+import { closeOpenLinkGap, ownsAdmissionInGap } from './coverage';
 import type { ForwardRuntime } from './forwarder';
 import { ensureLegacyLoveIncarnation } from './love-incarnation';
 import { latestExplicitLoveIntent } from './love-intent';
-import { closeOpenLinkGap, ownsAdmissionInGap } from './coverage';
 import { resolveLoveRecording } from './love-recording';
 import { projectionListenKey } from './projection';
 

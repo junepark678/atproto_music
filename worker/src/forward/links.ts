@@ -32,8 +32,8 @@ import { type Box, linkedAad, linkedPurpose } from '../crypto/box';
 import { constantTimeEqual } from '../crypto/constant-time';
 import { bytesToHex, hashToken } from '../crypto/tokens';
 import type { Db } from '../do/db';
-import { resumeHeldRows } from './forward-outbox';
 import { admissionHighWater, closeOpenLinkGap, openLinkGap } from './coverage';
+import { resumeHeldRows } from './forward-outbox';
 
 /** How long a Last.fm link state is valid (ADR §12.1). */
 export const LINK_STATE_TTL_MS = 600_000;
@@ -513,17 +513,18 @@ export function revokeLink(
 ): boolean {
   const safeError = /^[a-z0-9_]{1,64}$/.test(error) ? error : 'credential_revoked';
   return db.tx(() => {
-    const revoked = db.run(
-      `UPDATE linked_accounts SET status='revoked',last_error=?,last_failure_ms=?,
+    const revoked =
+      db.run(
+        `UPDATE linked_accounts SET status='revoked',last_error=?,last_failure_ms=?,
          consecutive_failures=consecutive_failures+1,updated_at_ms=?
        WHERE id = ? AND generation = ? AND status = 'active' AND credential_ciphertext = ?`,
-      safeError,
-      now,
-      now,
-      link.id,
-      link.generation,
-      toBlob(blobBytes(link.credential_ciphertext)),
-    ).rowsWritten === 1;
+        safeError,
+        now,
+        now,
+        link.id,
+        link.generation,
+        toBlob(blobBytes(link.credential_ciphertext)),
+      ).rowsWritten === 1;
     if (revoked) openLinkGap(db, link, 'revoked', now);
     return revoked;
   });

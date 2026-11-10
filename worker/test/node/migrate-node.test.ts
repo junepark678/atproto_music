@@ -169,7 +169,11 @@ describe('migrate over node:sqlite', () => {
     );
     db.run("UPDATE linked_accounts SET forward_scrobbles=0 WHERE id='disabled'");
     db.run("UPDATE linked_accounts SET status='revoked' WHERE id='revoked'");
-    for (const [id, linkId] of [['f-active', 'active'], ['f-disabled', 'disabled'], ['f-revoked', 'revoked']] as const) {
+    for (const [id, linkId] of [
+      ['f-active', 'active'],
+      ['f-disabled', 'disabled'],
+      ['f-revoked', 'revoked'],
+    ] as const) {
       db.run(
         `INSERT INTO forward_outbox(id,link_id,did,kind,dedupe_key,payload_json,state,attempts,due_at,created_at_ms,updated_at_ms)
          VALUES(?,?,?,'scrobble',?,'{}','sent',0,1,1,1)`,
@@ -179,9 +183,15 @@ describe('migrate over node:sqlite', () => {
         id,
       );
     }
-    const before = db.all('SELECT id,link_id,generation,kind,dedupe_key,payload_json,state,created_at_ms FROM forward_outbox ORDER BY id');
+    const before = db.all(
+      'SELECT id,link_id,generation,kind,dedupe_key,payload_json,state,created_at_ms FROM forward_outbox ORDER BY id',
+    );
     expect(migrate(db)).toEqual({ status: 'ready', version: 55 });
-    expect(db.all('SELECT id,link_id,generation,kind,dedupe_key,payload_json,state,created_at_ms FROM forward_outbox ORDER BY id')).toEqual(before);
+    expect(
+      db.all(
+        'SELECT id,link_id,generation,kind,dedupe_key,payload_json,state,created_at_ms FROM forward_outbox ORDER BY id',
+      ),
+    ).toEqual(before);
     expect(db.all('SELECT * FROM forward_receipts')).toEqual([]);
     expect(db.all('SELECT * FROM forward_link_gaps')).toEqual([]);
   });

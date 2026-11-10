@@ -23,8 +23,8 @@ import type { Clock } from '@atmusic/core/deps';
 import type { Revocations } from '../app/revocations';
 import type { Logger } from '../do/contracts';
 import type { Db } from '../do/db';
-import type { NodeConfig } from '../node/config';
 import { openLinkGap } from '../forward/coverage';
+import type { NodeConfig } from '../node/config';
 import type { OAuthService } from './oauth-client';
 
 export type SignInPolicy = Pick<NodeConfig, 'signinPolicy' | 'signinDids'>;
