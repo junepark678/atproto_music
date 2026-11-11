@@ -501,6 +501,52 @@ interface BackupInfo {
   timeMs: number;
   version: number;
   rows: Record<string, number>;
+  loveApiLoss: Record<string, number>;
+}
+
+const LOVE_API_LOSS_TABLES = [
+  'love_api_bindings',
+  'love_api_recipients',
+  'love_api_recipient_members',
+  'love_api_window_owners',
+  'love_api_unlove_decisions',
+  'love_api_comparison_facts',
+  'love_api_intent_epochs',
+  'love_api_proof_state',
+] as const;
+
+function loveApiLossCounts(db: NodeDatabase | ReturnType<typeof openSqliteDb>): Record<string, number> {
+  const tables = new Set(
+    'prepare' in db
+      ? userTables(db)
+      : db
+          .exec<{ name: string }>(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+          )
+          .map(({ name }) => name),
+  );
+  const counts: Record<string, number> = {};
+  for (const table of LOVE_API_LOSS_TABLES) {
+    if (!tables.has(table)) {
+      counts[table] = 0;
+    } else if ('prepare' in db) {
+      counts[table] = countRows(db, table);
+    } else {
+      counts[table] = db.exec<{ n: number }>(`SELECT count(*) AS n FROM ${quoteIdent(table)}`)[0]?.n ?? 0;
+    }
+  }
+  return counts;
+}
+
+function lossNotice(counts: Record<string, number>, phase: 'planned' | 'discarded'): string {
+  return [
+    phase === 'planned'
+      ? 'Planned loss of L2 pending unlove proof state from the backup (table row counts):'
+      : 'Discarded L2 pending unlove proof state from the backup (table row counts):',
+    `  - pending unlove decisions: ${counts.love_api_unlove_decisions ?? 0}`,
+    `  - window owners: ${counts.love_api_window_owners ?? 0}`,
+    `  - pending recipient members: ${counts.love_api_recipient_members ?? 0}`,
+  ].join('\n');
 }
 
 function backupTime(path: string): number {
@@ -532,7 +578,7 @@ function verifyBackup(path: string): BackupInfo {
     const tables = new Set(userTables(db));
     const rows: Record<string, number> = {};
     for (const t of NON_DERIVED) if (tables.has(t)) rows[t] = countRows(db, t);
-    return { timeMs: backupTime(path), version, rows };
+    return { timeMs: backupTime(path), version, rows, loveApiLoss: loveApiLossCounts(db) };
   } catch (error) {
     if (error instanceof RestoreAbort) throw error;
     throw new RestoreAbort(`the backup cannot be read (${errorLabel(error)})`);
@@ -881,6 +927,7 @@ export async function restore(options: RestoreOptions, deps: RestoreDeps): Promi
             .map(([t, n]) => `${t}=${n}`)
             .join(', ') || 'none'
         }.`,
+        lossNotice(backup.loveApiLoss, 'planned'),
       ];
       if (!options.acceptLoss) {
         fail(report.join('\n'));
@@ -957,8 +1004,34 @@ export async function restore(options: RestoreOptions, deps: RestoreDeps): Promi
         if (backup.version < SCHEMA_VERSION)
           say(`migrated the copy from version ${backup.version} to ${SCHEMA_VERSION}`);
         if (live.kind !== 'readable') {
-          const sessions = facade.run('DELETE FROM web_sessions').rowsWritten;
-          const replay = replayRevocations(facade, journal);
+          const stagedLossCounts = loveApiLossCounts(facade);
+          for (const table of LOVE_API_LOSS_TABLES) {
+            if (stagedLossCounts[table] !== backup.loveApiLoss[table]) {
+              throw new RestoreAbort(`the staged copy's ${table} count differs from the backup preview`);
+            }
+          }
+          const { sessions, replay } = facade.tx(() => {
+            const sessions = facade.run('DELETE FROM web_sessions').rowsWritten;
+            const replay = replayRevocations(facade, journal);
+            // The restored backup is the only authority available after losing
+            // the live database. Discard every L2 proof row before it can cause
+            // an unlove based on evidence from the lost live state.
+            facade.run('DELETE FROM love_api_window_owners');
+            facade.run('DELETE FROM love_api_recipient_members');
+            facade.run('DELETE FROM love_api_unlove_decisions');
+            facade.run('DELETE FROM love_api_recipients');
+            facade.run('DELETE FROM love_api_bindings');
+            facade.run('DELETE FROM love_api_comparison_facts');
+            facade.run('DELETE FROM love_api_intent_epochs');
+            facade.run('DELETE FROM love_api_proof_state');
+            return { sessions, replay };
+          });
+          const remainingLossCounts = loveApiLossCounts(facade);
+          for (const table of LOVE_API_LOSS_TABLES) {
+            if (remainingLossCounts[table] !== 0) {
+              throw new RestoreAbort(`the staged copy still has rows in ${table} after accept-loss clearing`);
+            }
+          }
           const deleted = Object.entries(replay.deleted)
             .filter(([, n]) => n > 0)
             .map(([t, n]) => `${t}=${n}`)
@@ -966,6 +1039,7 @@ export async function restore(options: RestoreOptions, deps: RestoreDeps): Promi
           say(
             `deleted ${sessions} web sessions; replayed ${replay.entries} revocations (deleted: ${deleted || 'none'})`,
           );
+          say(lossNotice(stagedLossCounts, 'discarded'));
         }
       } finally {
         facade.close();

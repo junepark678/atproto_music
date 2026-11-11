@@ -16,7 +16,8 @@
 // it with SIGKILL at each swap step. No real systemctl, network or
 // 127.2.0.1:8888 is involved.
 
-import { execFileSync, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import {
   chmodSync,
@@ -28,7 +29,6 @@ import {
   openSync,
   readFileSync,
   rmSync,
-  symlinkSync,
   writeFileSync,
   writeSync,
 } from 'node:fs';
@@ -115,7 +115,6 @@ import { authorizedLiveOptions } from '../../worker/test/write/support.ts';
 import { type CommandResult, main, type RestoreStep } from '../admin/restore.ts';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
-const PR209_SOURCE = '5d573706bf07bb50e0c8b79cf1d34a3f6c56a975';
 const BUSY_MS = 200;
 const DID_A = 'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa';
 const DID_B = 'did:plc:bbbbbbbbbbbbbbbbbbbbbbbb';
@@ -1189,101 +1188,6 @@ function downgradeFixtureTo56(path: string): void {
   }
 }
 
-/** Build a real schema-56 producer file using the exact pre-L2 source archive. */
-function produceSchema56FromParentArchive(outputPath: string): void {
-  const archiveDir = mkdtempSync(join(tmpdir(), 'atmusic-pr209-source-'));
-  dirs.push(archiveDir);
-  const archive = execFileSync('git', ['archive', '--format=tar', PR209_SOURCE], {
-    cwd: REPO,
-    maxBuffer: 64 * 1024 * 1024,
-  });
-  execFileSync('tar', ['-xf', '-', '-C', archiveDir], { input: archive, maxBuffer: 8 * 1024 * 1024 });
-  symlinkSync(join(REPO, 'node_modules'), join(archiveDir, 'node_modules'), 'dir');
-  const testPath = join(archiveDir, 'worker/test/node/outbox/schema56-producer-restore.test.ts');
-  writeFileSync(
-    testPath,
-    [
-      "import { copyFileSync, writeFileSync } from 'node:fs';",
-      "import { DatabaseSync } from 'node:sqlite';",
-      "import { expect, it } from 'vitest';",
-      "import { verifyRecordProof } from '@atmusic/atproto/verify/record-proof';",
-      "import { seededRandom } from '@atmusic/core/test-support/random';",
-      "import { fromMs } from '@atmusic/core/timestamp';",
-      "import { applyRecordProof } from '../../../src/do/write/apply-record';",
-      "import { admitForwardIdentity } from '../../../src/forward/projection';",
-      "import { enqueueLove } from '../../../src/outbox/love-ops';",
-      "import { authorizedLiveOptions } from '../../write/support';",
-      "import { LOVE, withHarness } from './support';",
-      "const DID = 'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa';",
-      "it('exports an exact-parent schema-56 API/PDS/SENT reused projection', async () => {",
-      '  await withHarness(async (h) => {',
-      '    h.seedUser(h.alice);',
-      "    const api = await enqueueLove(h.m, { did: h.alice, input: { artist: 'Legacy API producer', track: 'Legacy actual SENT' }, origin: 'web' });",
-      "    if (!api.ok) throw new Error('parent API admission refused: ' + api.reason.code);",
-      '    await h.runUntilIdle();',
-      "    expect(h.op(api.operation.id).state).toBe('succeeded');",
-      "    expect(h.writers.sent.some((row) => row.nsid === 'com.atproto.repo.createRecord' && row.status === 200)).toBe(true);",
-      '    const sentRkey = h.op(api.operation.id).rkey!;',
-      '    const sentCar = await h.kit.repos.Alice.getRecordCar(LOVE, sentRkey);',
-      '    const sentProof = await verifyRecordProof(sentCar, { did: DID, collection: LOVE, rkey: sentRkey, signingKey: h.kit.users.Alice.key.didKey });',
-      "    expect(sentProof.state).toBe('present');",
-      '    const now = fromMs(h.kit.clock.nowMs());',
-      "    h.db.tx(() => applyRecordProof(h.db, sentProof, { prefix: 'com.example.atmusic', nowNs: now, receiptNs: now, live: authorizedLiveOptions(h.db, sentProof, seededRandom(27)).live }));",
-      "    const reuseRkey = '3kimportlive001';",
-      "    await h.kit.externalPut('Alice', LOVE, reuseRkey, { $type: LOVE, artist: 'Producer restore Live', track: 'SENT love', album: 'Actual producer album', recordingMbid: '12345678-1234-1234-1234-123456789abc', createdAt: new Date(h.kit.clock.nowMs()).toISOString() });",
-      "    expect(admitForwardIdentity(h.db, { did: DID, identityKey: 'love-uri:' + DID + ':' + LOVE + ':' + reuseRkey, path: 'import', sourceService: 'lastfm', now: h.kit.clock.nowMs() })).toBe(true);",
-      '    const reuseCar = await h.kit.repos.Alice.getRecordCar(LOVE, reuseRkey);',
-      '    const reuseProof = await verifyRecordProof(reuseCar, { did: DID, collection: LOVE, rkey: reuseRkey, signingKey: h.kit.users.Alice.key.didKey });',
-      '    const reuseNow = fromMs(h.kit.clock.nowMs());',
-      "    h.db.tx(() => applyRecordProof(h.db, reuseProof, { prefix: 'com.example.atmusic', nowNs: reuseNow, receiptNs: reuseNow, live: authorizedLiveOptions(h.db, reuseProof, seededRandom(28)).live }));",
-      "    const positiveUri = 'at://' + DID + '/' + LOVE + '/' + reuseRkey;",
-      "    const legacyReuseRkey = '3kimportoldreuse1';",
-      "    await h.kit.externalPut('Alice', LOVE, legacyReuseRkey, { $type: LOVE, artist: 'Legacy API reuse target', track: 'Legacy reused track', createdAt: new Date(h.kit.clock.nowMs()).toISOString() });",
-      "    expect(admitForwardIdentity(h.db, { did: DID, identityKey: 'love-uri:' + DID + ':' + LOVE + ':' + legacyReuseRkey, path: 'import', sourceService: 'listenbrainz', now: h.kit.clock.nowMs() })).toBe(true);",
-      '    const legacyReuseCar = await h.kit.repos.Alice.getRecordCar(LOVE, legacyReuseRkey);',
-      '    const legacyReuseProof = await verifyRecordProof(legacyReuseCar, { did: DID, collection: LOVE, rkey: legacyReuseRkey, signingKey: h.kit.users.Alice.key.didKey });',
-      '    const legacyReuseNow = fromMs(h.kit.clock.nowMs());',
-      "    h.db.tx(() => applyRecordProof(h.db, legacyReuseProof, { prefix: 'com.example.atmusic', nowNs: legacyReuseNow, receiptNs: legacyReuseNow, live: authorizedLiveOptions(h.db, legacyReuseProof, seededRandom(29)).live }));",
-      "    const uri = 'at://' + DID + '/' + LOVE + '/' + legacyReuseRkey;",
-      '    const pdsCalls = h.writers.sent.length;',
-      "    const reused = await enqueueLove(h.m, { did: h.alice, input: { artist: 'Legacy API reuse target', track: 'Legacy reused track' }, origin: 'web' });",
-      "    if (!reused.ok) throw new Error('parent reuse admission refused: ' + reused.reason.code);",
-      '    await h.runUntilIdle();',
-      '    expect(h.op(reused.operation.id).result_uri).toBe(uri);',
-      '    expect(h.writers.sent.length).toBe(pdsCalls);',
-      "    expect(h.db.one('SELECT max(version) AS version FROM schema_migrations')).toEqual({ version: 56 });",
-      "    expect(h.db.one(\"SELECT 1 FROM sqlite_master WHERE type='table' AND name='love_api_bindings'\")).toBeNull();",
-      '    const historicalUri = h.op(api.operation.id).result_uri;',
-      '    h.ctx.current.close();',
-      '    const checkpoint = new DatabaseSync(h.ctx.path);',
-      "    checkpoint.exec('PRAGMA wal_checkpoint(TRUNCATE)');",
-      '    checkpoint.close();',
-      '    copyFileSync(h.ctx.path, process.env.ATMUSIC_SCHEMA56_OUTPUT!);',
-      "    writeFileSync(process.env.ATMUSIC_SCHEMA56_OUTPUT! + '.json', JSON.stringify({ apiId: api.operation.id, reuseId: reused.operation.id, uri, rkey: legacyReuseRkey, historicalUri, positiveUri, positiveRkey: reuseRkey }));",
-      '  });',
-      '});',
-    ].join('\n'),
-  );
-  execFileSync(
-    process.execPath,
-    [
-      join(REPO, 'node_modules/.bin/vitest'),
-      'run',
-      '--config',
-      'vitest.node.config.ts',
-      'test/node/outbox/schema56-producer-restore.test.ts',
-      '--maxWorkers',
-      '1',
-    ],
-    {
-      cwd: join(archiveDir, 'worker'),
-      env: { ...process.env, ATMUSIC_SCHEMA56_OUTPUT: outputPath },
-      encoding: 'utf8',
-      maxBuffer: 8 * 1024 * 1024,
-    },
-  );
-}
-
 function downgradeFixtureTo55(path: string): void {
   downgradeFixtureTo56(path);
   const db = openSqliteDb(path, { busyTimeoutMs: BUSY_MS });
@@ -1305,6 +1209,72 @@ function downgradeFixtureTo55(path: string): void {
   } finally {
     db.close();
   }
+}
+
+function sha256(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+function canonicalSchema(db: sqlite.DatabaseSync | SqliteDb): string {
+  const sql = "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name";
+  const rows = 'prepare' in db ? db.prepare(sql).all() : db.exec(sql);
+  return rows
+    .map((row) => {
+      const value = row as { type: string; name: string; tbl_name: string; sql: string };
+      return `${value.type}\t${value.name}\t${value.tbl_name}\t${value.sql.replace(/\\s+/g, ' ').trim()}`;
+    })
+    .join('\n');
+}
+
+interface Schema56Manifest extends Record<string, string | number> {
+  schemaVersion: number;
+}
+
+function verifySchema56Fixture(sql: string, metadataText: string, manifest: Schema56Manifest, schema: string): void {
+  if (manifest.sourceCommit !== '5d573706bf07bb50e0c8b79cf1d34a3f6c56a975')
+    throw new Error('fixture source pin mismatch');
+  if (manifest.sqlSha256 !== sha256(sql)) throw new Error('schema-56 SQL fixture checksum mismatch');
+  if (manifest.metadataSha256 !== sha256(metadataText)) throw new Error('schema-56 metadata checksum mismatch');
+  if (manifest.canonicalMigration1To56DdlSha256 !== sha256(schema))
+    throw new Error('schema-56 canonical DDL checksum mismatch');
+}
+
+/** Load the one-time old-producer SQL export; CI does not need historical Git objects. */
+function loadSchema56Fixture(outputPath: string): Record<string, string> {
+  const sql = readFileSync(new URL('./fixtures/schema56-parent-producer.sql', import.meta.url), 'utf8');
+  const metadataText = readFileSync(new URL('./fixtures/schema56-parent-producer.json', import.meta.url), 'utf8');
+  const manifest = JSON.parse(
+    readFileSync(new URL('./fixtures/schema56-parent-producer.manifest.json', import.meta.url), 'utf8'),
+  ) as Schema56Manifest;
+  const metadata = JSON.parse(metadataText) as Record<string, string>;
+  const db = new sqlite.DatabaseSync(outputPath);
+  try {
+    db.exec(sql);
+    db.exec('PRAGMA foreign_keys = ON');
+    expect(db.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+    expect(db.prepare('PRAGMA integrity_check').get()).toEqual({ integrity_check: 'ok' });
+    const schema = canonicalSchema(db);
+    const scratchDir = mkdtempSync(join(tmpdir(), 'atmusic-schema56-ddl-'));
+    dirs.push(scratchDir);
+    const scratch = openSqliteDb(join(scratchDir, 'schema56.db'), { create: true, busyTimeoutMs: BUSY_MS });
+    try {
+      expect(migrate(scratch, MIGRATIONS.slice(0, 56))).toEqual({ status: 'ready', version: 56 });
+      verifySchema56Fixture(sql, metadataText, manifest, schema);
+      expect(schema).toBe(canonicalSchema(scratch));
+      expect(manifest.schemaVersion).toBe(56);
+      expect(() => verifySchema56Fixture(`${sql}\n-- altered`, metadataText, manifest, schema)).toThrow(
+        'schema-56 SQL fixture checksum mismatch',
+      );
+      expect(() => verifySchema56Fixture(sql, metadataText, manifest, `${schema}\nALTERED`)).toThrow(
+        'schema-56 canonical DDL checksum mismatch',
+      );
+    } finally {
+      scratch.close();
+    }
+  } finally {
+    db.close();
+  }
+  return metadata;
 }
 
 function boxOf(doc: Record<string, unknown>): { box: Box; secrets: Secrets } {
@@ -1659,8 +1629,7 @@ describe('restore.ts', () => {
   it('restores an exact-parent schema-56 API/PDS reused projection without historical proof, then proves a new post-upgrade SENT', async () => {
     const world = await buildWorld();
     const parentDb = join(world.dir, 'schema-56-parent-producer.db');
-    produceSchema56FromParentArchive(parentDb);
-    const parent = JSON.parse(readFileSync(`${parentDb}.json`, 'utf8')) as {
+    const parent = loadSchema56Fixture(parentDb) as {
       apiId: string;
       reuseId: string;
       uri: string;
@@ -3378,7 +3347,25 @@ describe('restore.ts', () => {
   }, 60_000);
 
   it('with an unreadable live database restore prints what will be lost and refuses without --accept-loss', async () => {
-    const world = await buildWorld();
+    let backupLossCounts: number[] = [];
+    const world = await buildWorld({
+      beforeBackup: ({ db, clock, linkId }) => {
+        populateLoveApiProofState(db, clock, linkId, 'Backup');
+        const survivor = saveLink(
+          {
+            db,
+            clock,
+            random: seededRandom(91),
+            box: createBox(parseSecrets(testSecretsDocument()).encryptionKeys, seededRandom(92)),
+          },
+          { did: DID_B, service: 'listenbrainz', remoteUser: 'survivor', credential: 'fake-survivor-token' },
+        ).link;
+        populateLoveApiProofState(db, clock, survivor.id, 'Survivor');
+        backupLossCounts = ['love_api_unlove_decisions', 'love_api_window_owners', 'love_api_recipient_members'].map(
+          (table) => db.one<{ n: number }>(`SELECT count(*) AS n FROM ${table}`)!.n,
+        );
+      },
+    });
     const garbage = corruptLive(world);
     const systemd = new FakeSystemd(world, { servicePort: null });
     await systemd.boot();
@@ -3394,7 +3381,11 @@ describe('restore.ts', () => {
     // What the backup carries, per non-derived table.
     expect(result.stderr).toContain('accounts=2');
     expect(result.stderr).toContain('web_sessions=1');
-    expect(result.stderr).toContain('operations=1');
+    expect(result.stderr).toContain('operations=5');
+    expect(result.stderr).toContain(`pending unlove decisions: ${backupLossCounts[0]}`);
+    expect(result.stderr).toContain(`window owners: ${backupLossCounts[1]}`);
+    expect(result.stderr).toContain(`pending recipient members: ${backupLossCounts[2]}`);
+    expect(result.stderr).not.toContain('did:');
     // revocations.log: the logout and the app-password revocation after the backup.
     expect(result.stderr).toContain(`from revocations.log (2 entries, 2 after the backup)`);
     expect(result.stderr).toContain('refusing without --accept-loss; nothing was changed');
@@ -3655,10 +3646,24 @@ describe('restore.ts', () => {
   }, 30_000);
 
   it('with --accept-loss on an unreadable live db, every web session is gone and each credential, link and OAuth session in revocations.log is deleted from the restored copy', async () => {
+    let backupLossCounts: number[] = [];
     const world = await buildWorld({
       journalLinkAndOauth: true,
       beforeBackup: ({ db, clock, linkId }) => {
         populateLoveApiProofState(db, clock, linkId, 'Backup');
+        const survivor = saveLink(
+          {
+            db,
+            clock,
+            random: seededRandom(91),
+            box: createBox(parseSecrets(testSecretsDocument()).encryptionKeys, seededRandom(92)),
+          },
+          { did: DID_B, service: 'listenbrainz', remoteUser: 'survivor', credential: 'fake-survivor-token' },
+        ).link;
+        populateLoveApiProofState(db, clock, survivor.id, 'Survivor');
+        backupLossCounts = ['love_api_unlove_decisions', 'love_api_window_owners', 'love_api_recipient_members'].map(
+          (table) => db.one<{ n: number }>(`SELECT count(*) AS n FROM ${table}`)!.n,
+        );
       },
     });
     const journal = readFileSync(revocationLogPath(world.state), 'utf8')
@@ -3668,7 +3673,7 @@ describe('restore.ts', () => {
     expect(journal.map((e) => e.kind)).toEqual(['web_session', 'app_password', 'linked_account', 'oauth_session']);
     // The backup still has all of them.
     expect(query(world.backupPath, 'SELECT count(*) AS n FROM web_sessions')).toEqual([{ n: 1 }]);
-    expect(query(world.backupPath, 'SELECT count(*) AS n FROM linked_accounts')).toEqual([{ n: 1 }]);
+    expect(query(world.backupPath, 'SELECT count(*) AS n FROM linked_accounts')).toEqual([{ n: 2 }]);
     expect(query(world.backupPath, 'SELECT did FROM oauth_sessions ORDER BY did')).toEqual([
       { did: DID_A },
       { did: DID_B },
@@ -3728,16 +3733,17 @@ describe('restore.ts', () => {
     expect(rows('SELECT count(*) AS n FROM web_sessions')).toEqual([{ n: 0 }]);
     expect(rows('SELECT count(*) AS n FROM app_passwords WHERE id = ?', world.ids.p1Id as string)).toEqual([{ n: 0 }]);
     expect(rows('SELECT count(*) AS n FROM app_passwords')).toEqual([{ n: 1 }]); // bob's P3, never revoked
-    expect(rows('SELECT count(*) AS n FROM linked_accounts')).toEqual([{ n: 0 }]);
-    expect(rows('SELECT count(*) AS n FROM forward_outbox')).toEqual([{ n: 0 }]);
-    expect(rows('SELECT count(*) AS n FROM forward_receipts')).toEqual([{ n: 0 }]);
-    expect(rows('SELECT count(*) AS n FROM forward_link_gaps')).toEqual([{ n: 0 }]);
-    expect(rows('SELECT count(*) AS n FROM forward_love_recording_targets')).toEqual([{ n: 0 }]);
+    expect(rows('SELECT count(*) AS n FROM linked_accounts')).toEqual([{ n: 1 }]);
+    expect(rows('SELECT id FROM linked_accounts WHERE did=? AND service=?', DID_B, 'listenbrainz')).toHaveLength(1);
+    expect(rows('SELECT count(*) AS n FROM forward_outbox WHERE kind=?', 'unlove')).toEqual([{ n: 0 }]);
+    expect(rows('SELECT count(*) AS n FROM forward_receipts')).toEqual([{ n: 1 }]);
+    expect(rows('SELECT count(*) AS n FROM forward_link_gaps')).toEqual([{ n: 1 }]);
+    expect(rows('SELECT count(*) AS n FROM forward_love_recording_targets')).toEqual([{ n: 1 }]);
     expect(rows('SELECT count(*) AS n FROM forward_unlove_lookup_progress')).toEqual([{ n: 0 }]);
-    expect(rows('SELECT count(*) AS n FROM forward_love_delivery')).toEqual([{ n: 0 }]);
-    expect(rows('SELECT count(*) AS n FROM forward_deferred_love_heads')).toEqual([{ n: 0 }]);
-    expect(rows('SELECT count(*) AS n FROM forward_deferred_love_intents')).toEqual([{ n: 0 }]);
-    expect(rows('SELECT count(*) AS n FROM forward_deferred_love_witnesses')).toEqual([{ n: 0 }]);
+    expect(rows('SELECT count(*) AS n FROM forward_love_delivery')).toEqual([{ n: 1 }]);
+    expect(rows('SELECT count(*) AS n FROM forward_deferred_love_heads')).toEqual([{ n: 1 }]);
+    expect(rows('SELECT count(*) AS n FROM forward_deferred_love_intents')).toEqual([{ n: 1 }]);
+    expect(rows('SELECT count(*) AS n FROM forward_deferred_love_witnesses')).toEqual([{ n: 1 }]);
     expect(rows('SELECT count(*) AS n FROM forward_deferred_love_authorities')).toEqual([{ n: 1 }]);
     expect(
       rows('SELECT next_head_seq,next_group_seq,next_authority_seq FROM forward_deferred_love_maintenance'),
@@ -3746,31 +3752,19 @@ describe('restore.ts', () => {
     expect(rows('SELECT count(*) AS n FROM love_api_recipient_members')).toEqual([{ n: 0 }]);
     expect(rows('SELECT count(*) AS n FROM love_api_window_owners')).toEqual([{ n: 0 }]);
     expect(rows('SELECT count(*) AS n FROM love_api_unlove_decisions')).toEqual([{ n: 0 }]);
-    expect(rows('SELECT count(*) AS n FROM love_api_bindings')).toEqual([{ n: 1 }]);
-    expect(rows('SELECT count(*) AS n FROM love_api_comparison_facts')).toEqual([{ n: 1 }]);
-    expect(rows('SELECT epoch FROM love_api_intent_epochs WHERE did=?', DID_A)).toEqual([{ epoch: 3 }]);
-    expect(rows('SELECT next_binding_seq,next_aggregate_seq,next_fact_seq FROM love_api_proof_state')).toEqual([
-      { next_binding_seq: 32, next_aggregate_seq: 33, next_fact_seq: 34 },
-    ]);
+    for (const table of LOVE_API_TABLES) expect(rows(`SELECT count(*) AS n FROM ${table}`), table).toEqual([{ n: 0 }]);
+    expect(rows('SELECT id FROM linked_accounts WHERE did=? AND service=?', DID_B, 'listenbrainz')).toHaveLength(1);
+    expect(rows('SELECT 1 FROM love_api_recipients WHERE did=?', DID_B)).toEqual([]);
+    expect(result.stdout).toContain('Planned loss of L2 pending unlove proof state from the backup');
+    expect(result.stdout).toContain('Discarded L2 pending unlove proof state from the backup');
+    expect(result.stdout).toContain(`pending unlove decisions: ${backupLossCounts[0]}`);
+    expect(result.stdout).toContain(`window owners: ${backupLossCounts[1]}`);
+    expect(result.stdout).toContain(`pending recipient members: ${backupLossCounts[2]}`);
+    expect(result.stdout).not.toContain('did:');
     const acceptedDb = openSqliteDb(world.dbPath, { busyTimeoutMs: BUSY_MS });
     try {
-      expect(reclaimLoveApiProofRows(acceptedDb, world.clock.nowMs(), 8)).toMatchObject({ bindingsDeleted: 1 });
-      expect(acceptedDb.one('SELECT 1 FROM love_api_bindings')).toBeNull();
-      // Unexpired comparison facts remain sticky; accept-loss revocation must
-      // not erase their verified negative while old consumers are cleaning up.
-      expect(acceptedDb.one('SELECT action,cid,conflicted FROM love_api_comparison_facts')).toEqual({
-        action: 'delete',
-        cid: '',
-        conflicted: 0,
-      });
-      expect(acceptedDb.one('SELECT epoch FROM love_api_intent_epochs WHERE did=?', DID_A)).toEqual({ epoch: 3 });
-      expect(
-        acceptedDb.one('SELECT next_binding_seq,next_aggregate_seq,next_fact_seq FROM love_api_proof_state'),
-      ).toEqual({
-        next_binding_seq: 32,
-        next_aggregate_seq: 33,
-        next_fact_seq: 34,
-      });
+      for (const table of LOVE_API_TABLES)
+        expect(acceptedDb.one(`SELECT count(*) AS n FROM ${table}`), table).toEqual({ n: 0 });
     } finally {
       acceptedDb.close();
     }
@@ -3783,12 +3777,53 @@ describe('restore.ts', () => {
       expect(
         restoredDb.one('SELECT next_head_seq,next_group_seq,next_authority_seq FROM forward_deferred_love_maintenance'),
       ).toEqual({ next_head_seq: 3, next_group_seq: 2, next_authority_seq: 3 });
+      const unloveRowsBefore = restoredDb.one<{ n: number }>(
+        "SELECT count(*) AS n FROM forward_outbox WHERE kind='unlove'",
+      )?.n;
+      runLoveApiMaintenance(restoredDb, world.clock.nowMs(), seededRandom(0x98), 'post-accept-loss-quiet');
+      expect(restoredDb.one("SELECT count(*) AS n FROM forward_outbox WHERE kind='unlove'")).toEqual({
+        n: unloveRowsBefore,
+      });
+      for (const table of LOVE_API_TABLES.filter((name) => name !== 'love_api_proof_state'))
+        expect(restoredDb.one(`SELECT count(*) AS n FROM ${table}`), table).toEqual({ n: 0 });
     } finally {
       restoredDb.close();
     }
     // The raw unreadable files are kept aside.
     expect(readFileSync(`${world.dbPath}.pre-restore`).equals(Buffer.alloc(8192, 0x5a))).toBe(true);
     expect(rows('PRAGMA integrity_check')).toEqual([{ integrity_check: 'ok' }]);
+  }, 30_000);
+
+  it('a failure after clearing L2 child rows leaves the unreadable live and pre-restore pair untouched', async () => {
+    const world = await buildWorld({
+      beforeBackup: ({ db, clock, linkId }) => {
+        populateLoveApiProofState(db, clock, linkId, 'Rollback');
+      },
+    });
+    const backup = new sqlite.DatabaseSync(world.backupPath);
+    try {
+      backup.exec(`
+        CREATE TRIGGER restore_fail_between_l2_child_and_parent
+        BEFORE DELETE ON love_api_recipients
+        WHEN (SELECT count(*) FROM love_api_recipient_members m
+          WHERE m.did=OLD.did AND m.uri=OLD.uri AND m.incarnation_key=OLD.incarnation_key
+            AND m.link_id=OLD.link_id AND m.generation=OLD.generation)=0
+        BEGIN SELECT RAISE(ABORT, 'injected between L2 child and parent clear'); END;
+      `);
+    } finally {
+      backup.close();
+    }
+    const garbage = corruptLive(world);
+    const systemd = new FakeSystemd(world, { servicePort: null });
+    await systemd.boot();
+    const result = await restoreCli(world, systemd, [...baseArgs(world), '--accept-loss', '--no-ready-check']);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain('failed');
+    expect(readFileSync(world.dbPath).equals(garbage)).toBe(true);
+    expect(readFileSync(`${world.dbPath}.pre-restore`).equals(garbage)).toBe(true);
+    expect(existsSync(`${world.dbPath}.restore.tmp`)).toBe(false);
+    expect(query(world.backupPath, 'SELECT count(*) AS n FROM love_api_recipient_members')).toEqual([{ n: 1 }]);
+    expect(query(world.backupPath, 'SELECT count(*) AS n FROM love_api_recipients')).toEqual([{ n: 1 }]);
   }, 30_000);
 
   it('a live database that opens but fails integrity_check in a non-derived table, with commits only in its WAL, is left byte-identical by the refusal, and --accept-loss keeps that original db and -wal as the pre-restore pair', async () => {

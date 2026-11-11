@@ -1,0 +1,9 @@
+{
+  "baselineCommit": "3d953a91d771a6003472161a5b18329a8ebe2d9c",
+  "waveStartCommit": "e309f52c0c8fba3cb0949edf7284d932b09edb4f",
+  "generationCommand": "node scripts/test/regenerate-history-baselines.mjs",
+  "format": "JSON map of repository-relative paths to exact historical UTF-8 source text",
+  "fixtureSha256": "8905d5787d0420fc115ac4e006dbde698896ad10d8174dc0db9d5b0d3617b2e3",
+  "baselineFileCount": 45,
+  "waveStartFileCount": 3
+}
