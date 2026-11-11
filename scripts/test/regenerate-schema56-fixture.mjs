@@ -3,7 +3,16 @@
 // dependencies already installed (`npm ci --ignore-scripts`); never fetches.
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -40,10 +49,10 @@ try {
   const outputDb = join(temp, 'schema56.db');
   const testPath = join(archiveDir, 'worker/test/node/outbox/schema56-producer-restore.test.ts');
   const tar = execFileSync('git', ['archive', '--format=tar', SOURCE], { cwd: ROOT, maxBuffer: 64 * 1024 * 1024 });
-  execFileSync('mkdir', ['-p', archiveDir]);
+  mkdirSync(archiveDir, { recursive: true });
   execFileSync('tar', ['-xf', '-', '-C', archiveDir], { input: tar, maxBuffer: 8 * 1024 * 1024 });
   symlinkSync(join(ROOT, 'node_modules'), join(archiveDir, 'node_modules'), 'dir');
-  execFileSync('mkdir', ['-p', dirname(testPath)]);
+  mkdirSync(dirname(testPath), { recursive: true });
   copyFileSync(TEST_SOURCE, testPath);
   execFileSync(
     process.execPath,

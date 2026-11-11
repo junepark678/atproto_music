@@ -7,8 +7,8 @@
 // - every kept id's describe and test titles are still declared, byte-identical,
 //   in its file, and every replacement id is declared in its file;
 // - every test title declared at 3d953a9 under worker/test/{harness, storage,
-//   ingest, read, write, http} (from the checked-in pinned source fixture) is in the inventory, and the
-//   kept ones are still declared in the same file.
+//   ingest, read, write, http} (from the checked-in pinned source fixture) is
+//   in the inventory, and the kept ones are still declared in the same file.
 //
 // "Declared" means the first argument of a `describe(`, `it(` or `test(` call
 // (with any `.skip`/`.only`/`.each(...)` chain) is a string literal with that

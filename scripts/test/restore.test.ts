@@ -3347,7 +3347,25 @@ describe('restore.ts', () => {
   }, 60_000);
 
   it('with an unreadable live database restore prints what will be lost and refuses without --accept-loss', async () => {
-    const world = await buildWorld();
+    let backupLossCounts: number[] = [];
+    const world = await buildWorld({
+      beforeBackup: ({ db, clock, linkId }) => {
+        populateLoveApiProofState(db, clock, linkId, 'Backup');
+        const survivor = saveLink(
+          {
+            db,
+            clock,
+            random: seededRandom(91),
+            box: createBox(parseSecrets(testSecretsDocument()).encryptionKeys, seededRandom(92)),
+          },
+          { did: DID_B, service: 'listenbrainz', remoteUser: 'survivor', credential: 'fake-survivor-token' },
+        ).link;
+        populateLoveApiProofState(db, clock, survivor.id, 'Survivor');
+        backupLossCounts = ['love_api_unlove_decisions', 'love_api_window_owners', 'love_api_recipient_members'].map(
+          (table) => db.one<{ n: number }>(`SELECT count(*) AS n FROM ${table}`)!.n,
+        );
+      },
+    });
     const garbage = corruptLive(world);
     const systemd = new FakeSystemd(world, { servicePort: null });
     await systemd.boot();
@@ -3363,7 +3381,11 @@ describe('restore.ts', () => {
     // What the backup carries, per non-derived table.
     expect(result.stderr).toContain('accounts=2');
     expect(result.stderr).toContain('web_sessions=1');
-    expect(result.stderr).toContain('operations=1');
+    expect(result.stderr).toContain('operations=5');
+    expect(result.stderr).toContain(`pending unlove decisions: ${backupLossCounts[0]}`);
+    expect(result.stderr).toContain(`window owners: ${backupLossCounts[1]}`);
+    expect(result.stderr).toContain(`pending recipient members: ${backupLossCounts[2]}`);
+    expect(result.stderr).not.toContain('did:');
     // revocations.log: the logout and the app-password revocation after the backup.
     expect(result.stderr).toContain(`from revocations.log (2 entries, 2 after the backup)`);
     expect(result.stderr).toContain('refusing without --accept-loss; nothing was changed');
@@ -3624,10 +3646,24 @@ describe('restore.ts', () => {
   }, 30_000);
 
   it('with --accept-loss on an unreadable live db, every web session is gone and each credential, link and OAuth session in revocations.log is deleted from the restored copy', async () => {
+    let backupLossCounts: number[] = [];
     const world = await buildWorld({
       journalLinkAndOauth: true,
       beforeBackup: ({ db, clock, linkId }) => {
         populateLoveApiProofState(db, clock, linkId, 'Backup');
+        const survivor = saveLink(
+          {
+            db,
+            clock,
+            random: seededRandom(91),
+            box: createBox(parseSecrets(testSecretsDocument()).encryptionKeys, seededRandom(92)),
+          },
+          { did: DID_B, service: 'listenbrainz', remoteUser: 'survivor', credential: 'fake-survivor-token' },
+        ).link;
+        populateLoveApiProofState(db, clock, survivor.id, 'Survivor');
+        backupLossCounts = ['love_api_unlove_decisions', 'love_api_window_owners', 'love_api_recipient_members'].map(
+          (table) => db.one<{ n: number }>(`SELECT count(*) AS n FROM ${table}`)!.n,
+        );
       },
     });
     const journal = readFileSync(revocationLogPath(world.state), 'utf8')
@@ -3637,7 +3673,7 @@ describe('restore.ts', () => {
     expect(journal.map((e) => e.kind)).toEqual(['web_session', 'app_password', 'linked_account', 'oauth_session']);
     // The backup still has all of them.
     expect(query(world.backupPath, 'SELECT count(*) AS n FROM web_sessions')).toEqual([{ n: 1 }]);
-    expect(query(world.backupPath, 'SELECT count(*) AS n FROM linked_accounts')).toEqual([{ n: 1 }]);
+    expect(query(world.backupPath, 'SELECT count(*) AS n FROM linked_accounts')).toEqual([{ n: 2 }]);
     expect(query(world.backupPath, 'SELECT did FROM oauth_sessions ORDER BY did')).toEqual([
       { did: DID_A },
       { did: DID_B },
@@ -3697,16 +3733,17 @@ describe('restore.ts', () => {
     expect(rows('SELECT count(*) AS n FROM web_sessions')).toEqual([{ n: 0 }]);
     expect(rows('SELECT count(*) AS n FROM app_passwords WHERE id = ?', world.ids.p1Id as string)).toEqual([{ n: 0 }]);
     expect(rows('SELECT count(*) AS n FROM app_passwords')).toEqual([{ n: 1 }]); // bob's P3, never revoked
-    expect(rows('SELECT count(*) AS n FROM linked_accounts')).toEqual([{ n: 0 }]);
-    expect(rows('SELECT count(*) AS n FROM forward_outbox')).toEqual([{ n: 0 }]);
-    expect(rows('SELECT count(*) AS n FROM forward_receipts')).toEqual([{ n: 0 }]);
-    expect(rows('SELECT count(*) AS n FROM forward_link_gaps')).toEqual([{ n: 0 }]);
-    expect(rows('SELECT count(*) AS n FROM forward_love_recording_targets')).toEqual([{ n: 0 }]);
+    expect(rows('SELECT count(*) AS n FROM linked_accounts')).toEqual([{ n: 1 }]);
+    expect(rows('SELECT id FROM linked_accounts WHERE did=? AND service=?', DID_B, 'listenbrainz')).toHaveLength(1);
+    expect(rows('SELECT count(*) AS n FROM forward_outbox WHERE kind=?', 'unlove')).toEqual([{ n: 0 }]);
+    expect(rows('SELECT count(*) AS n FROM forward_receipts')).toEqual([{ n: 1 }]);
+    expect(rows('SELECT count(*) AS n FROM forward_link_gaps')).toEqual([{ n: 1 }]);
+    expect(rows('SELECT count(*) AS n FROM forward_love_recording_targets')).toEqual([{ n: 1 }]);
     expect(rows('SELECT count(*) AS n FROM forward_unlove_lookup_progress')).toEqual([{ n: 0 }]);
-    expect(rows('SELECT count(*) AS n FROM forward_love_delivery')).toEqual([{ n: 0 }]);
-    expect(rows('SELECT count(*) AS n FROM forward_deferred_love_heads')).toEqual([{ n: 0 }]);
-    expect(rows('SELECT count(*) AS n FROM forward_deferred_love_intents')).toEqual([{ n: 0 }]);
-    expect(rows('SELECT count(*) AS n FROM forward_deferred_love_witnesses')).toEqual([{ n: 0 }]);
+    expect(rows('SELECT count(*) AS n FROM forward_love_delivery')).toEqual([{ n: 1 }]);
+    expect(rows('SELECT count(*) AS n FROM forward_deferred_love_heads')).toEqual([{ n: 1 }]);
+    expect(rows('SELECT count(*) AS n FROM forward_deferred_love_intents')).toEqual([{ n: 1 }]);
+    expect(rows('SELECT count(*) AS n FROM forward_deferred_love_witnesses')).toEqual([{ n: 1 }]);
     expect(rows('SELECT count(*) AS n FROM forward_deferred_love_authorities')).toEqual([{ n: 1 }]);
     expect(
       rows('SELECT next_head_seq,next_group_seq,next_authority_seq FROM forward_deferred_love_maintenance'),
@@ -3715,31 +3752,19 @@ describe('restore.ts', () => {
     expect(rows('SELECT count(*) AS n FROM love_api_recipient_members')).toEqual([{ n: 0 }]);
     expect(rows('SELECT count(*) AS n FROM love_api_window_owners')).toEqual([{ n: 0 }]);
     expect(rows('SELECT count(*) AS n FROM love_api_unlove_decisions')).toEqual([{ n: 0 }]);
-    expect(rows('SELECT count(*) AS n FROM love_api_bindings')).toEqual([{ n: 1 }]);
-    expect(rows('SELECT count(*) AS n FROM love_api_comparison_facts')).toEqual([{ n: 1 }]);
-    expect(rows('SELECT epoch FROM love_api_intent_epochs WHERE did=?', DID_A)).toEqual([{ epoch: 3 }]);
-    expect(rows('SELECT next_binding_seq,next_aggregate_seq,next_fact_seq FROM love_api_proof_state')).toEqual([
-      { next_binding_seq: 32, next_aggregate_seq: 33, next_fact_seq: 34 },
-    ]);
+    for (const table of LOVE_API_TABLES) expect(rows(`SELECT count(*) AS n FROM ${table}`), table).toEqual([{ n: 0 }]);
+    expect(rows('SELECT id FROM linked_accounts WHERE did=? AND service=?', DID_B, 'listenbrainz')).toHaveLength(1);
+    expect(rows('SELECT 1 FROM love_api_recipients WHERE did=?', DID_B)).toEqual([]);
+    expect(result.stdout).toContain('Planned loss of L2 pending unlove proof state from the backup');
+    expect(result.stdout).toContain('Discarded L2 pending unlove proof state from the backup');
+    expect(result.stdout).toContain(`pending unlove decisions: ${backupLossCounts[0]}`);
+    expect(result.stdout).toContain(`window owners: ${backupLossCounts[1]}`);
+    expect(result.stdout).toContain(`pending recipient members: ${backupLossCounts[2]}`);
+    expect(result.stdout).not.toContain('did:');
     const acceptedDb = openSqliteDb(world.dbPath, { busyTimeoutMs: BUSY_MS });
     try {
-      expect(reclaimLoveApiProofRows(acceptedDb, world.clock.nowMs(), 8)).toMatchObject({ bindingsDeleted: 1 });
-      expect(acceptedDb.one('SELECT 1 FROM love_api_bindings')).toBeNull();
-      // Unexpired comparison facts remain sticky; accept-loss revocation must
-      // not erase their verified negative while old consumers are cleaning up.
-      expect(acceptedDb.one('SELECT action,cid,conflicted FROM love_api_comparison_facts')).toEqual({
-        action: 'delete',
-        cid: '',
-        conflicted: 0,
-      });
-      expect(acceptedDb.one('SELECT epoch FROM love_api_intent_epochs WHERE did=?', DID_A)).toEqual({ epoch: 3 });
-      expect(
-        acceptedDb.one('SELECT next_binding_seq,next_aggregate_seq,next_fact_seq FROM love_api_proof_state'),
-      ).toEqual({
-        next_binding_seq: 32,
-        next_aggregate_seq: 33,
-        next_fact_seq: 34,
-      });
+      for (const table of LOVE_API_TABLES)
+        expect(acceptedDb.one(`SELECT count(*) AS n FROM ${table}`), table).toEqual({ n: 0 });
     } finally {
       acceptedDb.close();
     }
@@ -3752,12 +3777,53 @@ describe('restore.ts', () => {
       expect(
         restoredDb.one('SELECT next_head_seq,next_group_seq,next_authority_seq FROM forward_deferred_love_maintenance'),
       ).toEqual({ next_head_seq: 3, next_group_seq: 2, next_authority_seq: 3 });
+      const unloveRowsBefore = restoredDb.one<{ n: number }>(
+        "SELECT count(*) AS n FROM forward_outbox WHERE kind='unlove'",
+      )?.n;
+      runLoveApiMaintenance(restoredDb, world.clock.nowMs(), seededRandom(0x98), 'post-accept-loss-quiet');
+      expect(restoredDb.one("SELECT count(*) AS n FROM forward_outbox WHERE kind='unlove'")).toEqual({
+        n: unloveRowsBefore,
+      });
+      for (const table of LOVE_API_TABLES.filter((name) => name !== 'love_api_proof_state'))
+        expect(restoredDb.one(`SELECT count(*) AS n FROM ${table}`), table).toEqual({ n: 0 });
     } finally {
       restoredDb.close();
     }
     // The raw unreadable files are kept aside.
     expect(readFileSync(`${world.dbPath}.pre-restore`).equals(Buffer.alloc(8192, 0x5a))).toBe(true);
     expect(rows('PRAGMA integrity_check')).toEqual([{ integrity_check: 'ok' }]);
+  }, 30_000);
+
+  it('a failure after clearing L2 child rows leaves the unreadable live and pre-restore pair untouched', async () => {
+    const world = await buildWorld({
+      beforeBackup: ({ db, clock, linkId }) => {
+        populateLoveApiProofState(db, clock, linkId, 'Rollback');
+      },
+    });
+    const backup = new sqlite.DatabaseSync(world.backupPath);
+    try {
+      backup.exec(`
+        CREATE TRIGGER restore_fail_between_l2_child_and_parent
+        BEFORE DELETE ON love_api_recipients
+        WHEN (SELECT count(*) FROM love_api_recipient_members m
+          WHERE m.did=OLD.did AND m.uri=OLD.uri AND m.incarnation_key=OLD.incarnation_key
+            AND m.link_id=OLD.link_id AND m.generation=OLD.generation)=0
+        BEGIN SELECT RAISE(ABORT, 'injected between L2 child and parent clear'); END;
+      `);
+    } finally {
+      backup.close();
+    }
+    const garbage = corruptLive(world);
+    const systemd = new FakeSystemd(world, { servicePort: null });
+    await systemd.boot();
+    const result = await restoreCli(world, systemd, [...baseArgs(world), '--accept-loss', '--no-ready-check']);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain('failed');
+    expect(readFileSync(world.dbPath).equals(garbage)).toBe(true);
+    expect(readFileSync(`${world.dbPath}.pre-restore`).equals(garbage)).toBe(true);
+    expect(existsSync(`${world.dbPath}.restore.tmp`)).toBe(false);
+    expect(query(world.backupPath, 'SELECT count(*) AS n FROM love_api_recipient_members')).toEqual([{ n: 1 }]);
+    expect(query(world.backupPath, 'SELECT count(*) AS n FROM love_api_recipients')).toEqual([{ n: 1 }]);
   }, 30_000);
 
   it('a live database that opens but fails integrity_check in a non-derived table, with commits only in its WAL, is left byte-identical by the refusal, and --accept-loss keeps that original db and -wal as the pre-restore pair', async () => {

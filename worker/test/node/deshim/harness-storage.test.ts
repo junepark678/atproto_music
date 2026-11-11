@@ -13,8 +13,8 @@
 //   title in its file;
 // - worker/test/write/support.ts and worker/test/fixtures/jetstream-server.ts
 //   export the same names, with the same kinds and function arities, as at the
-//   start of wave 4 (commit e309f52, recorded below; when that commit is in the
-//   repository the record is checked against its sources too).
+//   start of wave 4 (commit e309f52); the exact historical source is checked
+//   in as an offline fixture.
 //
 // "Declared" means the first argument of a describe/it/test call is a string
 // literal with that value, found by a scanner that skips comments, strings and
