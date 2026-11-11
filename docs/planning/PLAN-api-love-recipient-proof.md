@@ -836,3 +836,39 @@ scenario/cost acceptance, over-128 production control, complete producer
 batching, and the broader CLI restore/rollback/accept-loss matrix remain
 pending. This is a scoped repair checkpoint, not readiness or whole-L2
 acceptance.
+
+## Whole-decision matrix checkpoint (test/doc only)
+
+This matrix was measured on pushed production source `8717d349e918edafd6f825383df9622ccabfb18e`; the local test/doc candidate adds no runtime or migration edits. Sol's direct-expiry fix `8a406a2bf7b6e20ed82b73ddf1ff5e570ffc1b9a` has narrow Astra acceptance: 7 tracked and 19 independent controls passed; two expected-null-argument mutation controls failed as intended. This is a scoped source acceptance receipt, not GitHub approval or whole-L2 review. The fix is to be merged forward normally before this checkpoint is pushed. The decision cap remains the provisional `96 + (25 - 13) + 20 = 128` read derivation. The 20 reads are integration slack, not a measured whole-path proof. Writes96, visits16, reserve12, per-decision changed rows28, and frozen migration57 remain unchanged.
+
+The production `l2-decision` transaction table below includes its own meter and finalization SQL. Each row is one scheduler-owned decision transaction; the cold singleton initialization is a separate transaction. Values are reads / mutation statements / changed rows / returned rows / visits / acknowledgement.
+
+| Scenario | Actual transaction path | Cost | Result and fixture provenance |
+| --- | --- | ---: | --- |
+| active queued | `runLoveApiMaintenance` | 64 / 13 / 12 / 27 / 1 | queued; semantic proof state arranged by direct SQL |
+| paused deferred, retained fact after A2 cleanup | `runLoveApiMaintenance` | 69 / 17 / 14 / 30 / 1 | deferred; event insert/delete is direct-SQL cleanup setup, not a claimed A2 caller run |
+| cold paused deferred | singleton init, then decision | 2 / 1 / 1 / 2 / 0; then 69 / 17 / 14 / 30 / 1 | deferred; actual cold initialization separately metered |
+| terminal replay | `runLoveApiMaintenance` | 34 / 3 / 3 / 22 / 1 | replay; adapter creates the exact effect and fixture marks it terminal |
+| malformed envelope refused | `runLoveApiMaintenance` | 14 / 3 / 3 / 14 / 1 | refused; direct-SQL corruption fixture |
+| expired fact | `runLoveApiMaintenance` | 13 / 3 / 3 / 13 / 1 | expired; direct-SQL expiry fixture |
+| conflicted fact refused | `runLoveApiMaintenance` | 13 / 3 / 3 / 13 / 1 | refused; direct-SQL conflict fixture |
+| stale generation refused | `runLoveApiMaintenance` | 13 / 3 / 3 / 13 / 1 | refused; direct-SQL generation fixture |
+| newer incarnation refused | `runLoveApiMaintenance` | 18 / 3 / 3 / 15 / 1 | refused; direct-SQL incarnation fixture |
+| newer re-love veto | `runLoveApiMaintenance` | 17 / 3 / 3 / 15 / 1 | refused; direct-SQL canonical love fixture |
+| active love.put awaiting | `runLoveApiMaintenance` | 13 / 1 / 1 / 13 / 1 | awaiting; direct-SQL operation fixture |
+| retained-fact lookup fault control | `runLoveApiMaintenance` | 13 / 3 / 3 / 12 / 1 | refused; query is executed then fault-injected as missing |
+| alias page session A, first page | `runLoveApiMaintenance` | 19 / 3 / 3 / 30 / 1 | awaiting; direct-SQL aliases |
+| alias epoch reset, session A | `runLoveApiMaintenance` | 19 / 3 / 3 / 30 / 1 | awaiting; direct-SQL epoch bump |
+| alias fresh session B, first page | `runLoveApiMaintenance` | 19 / 3 / 3 / 30 / 1 | awaiting; new session invalidates cursor |
+| alias session B, completion page | `runLoveApiMaintenance` | 71 / 17 / 14 / 32 / 1 | deferred; bounded page completion |
+| delayed partial-delete producer path | actual Node producer, pending-removal executor and signed B2 settlement, then `runLoveApiMaintenance` | 60 / 13 / 12 / 32 / 1 | queued; producer/source/authorization transaction is separately 16 reads / 14 mutation statements / 12 changes / 12 returned rows |
+| selected SENT before late proof | scheduler pass before settlement | 11 / 1 / 1 / 11 / 1 | awaiting; exact queued/held members also remain awaiting |
+| late selected SENT after settlement | real `settleRowsReturning`, then scheduler | 69 / 17 / 14 / 30 / 1 | deferred; settlement transaction is separate |
+
+Every populated decision row is asserted against the production transaction report at reads<=128, changedRows<=28, and one visit; the full maintenance report separately asserts writes<=96, visits<=16, and metadata reserve<=12. The exact-bound real partial-delete decision commits at128 reads. The production observed-Db 129th-SELECT control throws and rolls the decision, outbox/effect, and counters back. A new observed-Db injection adds exactly15 changed rows to a 14-row deferred decision; it reaches29, throws, and rolls back the recipient release, decision effects, injected rows, outbox and coverage counter. Existing actual metadata-cascade and reclaim-page overvisit controls remain active: the reclaim probe returns6 rows against a5-visit reservation and verifies rollback. The separate invocation guard rejects17 visits at helper level; an injected real whole-invocation17-visit rollback control is still pending and is not claimed here.
+
+Additional production paths are recorded by transaction rather than charged to the decision cap: source-excluded broad/narrow enqueue in both orders measured broad `21/10/9` and recipient `38/5/5` (reads/mutation statements/changed rows) in one order, and broad `18/5/5` and recipient `41/10/9` in reverse order; broad acceptance measured `21/10/9` and covered-recipient release `2/2/2` (reads/mutation statements/changed rows). These are enqueue/release transactions, not L2 decisions. Generation-2 queued/held awaiting measured `11/1/1/11/1`; failed-member refusal measured `13/3/3/13/1`. The actual delayed partial-delete producer test proves enqueue and signed settlement provenance; the separate matrix replay and terminal arrangements are test fixtures.
+
+The preserved cross-transaction lifecycle receipt `229 reads / 105 mutation statements / 87 changed rows / 110 returned rows / 1 visit / 1 deferred` remains informational wrong-unit evidence; it is not compared with the per-decision cap. The earlier +4/+4 API-path guess remains superseded by the measured N0/N1/N2 bounds documented above.
+
+This is a scoped whole-decision matrix checkpoint, not a complete L2 caller or lifecycle matrix. Still pending are the complete producer-batch combinations (mixed sent/pending/ignored/failed/cancelled siblings, batch-pin rollback and all refusal/source-order variants), additional true caller-derived cold/partial-delete/two-recipient combinations, the complete schema56/57 restore failure/accept-loss/journal matrix, and fresh independent review of the merged production source. The direct-expiry narrow Astra acceptance covers only that residual. No full-L2 acceptance or readiness is claimed.

@@ -16,8 +16,8 @@ import { applyRecordProof } from '../../../src/do/write/apply-record';
 import { enqueueListenDelete, hasCanonicalListenSurvivor } from '../../../src/forward/delete-enqueue';
 import { settleRows } from '../../../src/forward/forward-outbox';
 import { executeListenRemovals, type LiveRemovedListen } from '../../../src/forward/live-removal-effects';
-import { materializeLoveApiRecipientDecisions } from '../../../src/forward/love-api-materializer';
 import { bindApiLoveOperation, prepareLoveApiWindowAbsence } from '../../../src/forward/love-api-recipients';
+import { runLoveApiMaintenance } from '../../../src/forward/love-api-scheduler';
 import {
   admitForwardIdentity,
   cleanupForwardAdmissionsForSuppression,
@@ -609,10 +609,26 @@ it('owns a pending API-love window only for the exact current recipient generati
     expect(db.one('SELECT sent_operation_id FROM love_api_recipients WHERE uri=?', loveUri)).toEqual({
       sent_operation_id: 'api-window-op',
     });
-    expect(materializeLoveApiRecipientDecisions(db, NOW + 3, random, 'delayed-api-window')).toMatchObject({
-      deferred: 0,
-      queued: 1,
-    });
+    const maintenance = runLoveApiMaintenance(db, NOW + 3, random, 'delayed-api-window');
+    expect(maintenance.decisions).toMatchObject({ deferred: 0, queued: 1 });
+    const decisionTransaction = maintenance.transactions.find((row) => row.phase === 'l2-decision');
+    expect(decisionTransaction).toBeDefined();
+    expect(decisionTransaction!.reads).toBeLessThanOrEqual(128);
+    expect(decisionTransaction!.changedRows).toBeLessThanOrEqual(28);
+    expect(decisionTransaction!.visits).toBe(1);
+    expect(maintenance.writes).toBeLessThanOrEqual(96);
+    expect(maintenance.visits).toBeLessThanOrEqual(16);
+    expect(maintenance.writes - maintenance.lanes.reduce((sum, lane) => sum + lane.work, 0)).toBeLessThanOrEqual(12);
+    if (process.env.FINDING32_L2_COST_TRACE === '1')
+      console.info(
+        `L2_PARTIAL_DELETE_DECISION_TRACE ${JSON.stringify({
+          transaction: decisionTransaction,
+          decisions: maintenance.decisions,
+          writes: maintenance.writes,
+          visits: maintenance.visits,
+          lanes: maintenance.lanes,
+        })}`,
+      );
 
     const nextUri = `at://${DID}/com.example.atmusic.love/window-generation`;
     db.run("UPDATE linked_accounts SET generation=2 WHERE id='pending-link'");

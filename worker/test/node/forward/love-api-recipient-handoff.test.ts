@@ -524,6 +524,7 @@ describe('API recipient unlove handoff acknowledgements', () => {
   it('filters a source-excluded broad witness before the separately scoped recipient in both orders', async () => {
     for (const reverse of [false, true]) {
       await withMigratedDb((db) => {
+        const transactionRows: Record<string, unknown>[] = [];
         addLink(db, 'source-lastfm', 'lastfm', 'active');
         addLink(db, 'recipient-lb', 'listenbrainz', 'active');
         addApiFact(db, 'web', 'lastfm');
@@ -533,17 +534,25 @@ describe('API recipient unlove handoff acknowledgements', () => {
           payload: { artist: 'Artist', track: 'Track', origin: 'web' },
           authorization: { uri: URI, rev: REV },
         };
-        const recipient = () => measuredRecipient(db, args('recipient-lb', 'web', ['lastfm']));
-        const broad = () =>
-          enqueueForwards(db, {
+        const recipient = () => {
+          const measured = measuredRecipient(db, args('recipient-lb', 'web', ['lastfm']));
+          transactionRows.push({ phase: 'recipient-api-handoff', ack: measured.ack, ...measured.cost });
+          return measured;
+        };
+        const broad = () => {
+          const traced = traceDb(db);
+          const accepted = enqueueForwards(traced.db, {
             did: DID,
             items: [broadItem],
             excludeSourceServices: ['lastfm'],
             now: NOW,
             random: seededRandom(33),
           });
+          transactionRows.push({ phase: 'broad-source-excluded-enqueue', accepted, ...traced.result() });
+          return accepted;
+        };
         if (reverse) recipient();
-        broad();
+        expect(broad()).toBe(1);
         if (!reverse) recipient();
         expect(
           db.all<{ link_id: string; operation_id: string }>(
@@ -556,6 +565,8 @@ describe('API recipient unlove handoff acknowledgements', () => {
         expect(
           db.one("SELECT count(*) AS n FROM forward_deferred_love_witnesses WHERE link_id='source-lastfm'"),
         ).toEqual({ n: 0 });
+        if (process.env.FINDING32_L2_COST_TRACE === '1')
+          console.info(`L2_SOURCE_EXCLUDED_HANDOFF_ORDER reverse=${reverse} ${JSON.stringify(transactionRows)}`);
       });
     }
   });
