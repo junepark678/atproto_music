@@ -638,3 +638,163 @@ it.each([
     });
   },
 );
+
+it('rolls back the first real recipient handoff when the second decision handoff throws', async () => {
+  await withHarness(async (h) => {
+    h.seedUser(h.alice);
+    const lastfm = h.link(h.alice, 'lastfm');
+    const listenbrainz = h.link(h.alice, 'listenbrainz');
+    const records = [
+      { rkey: '3kbatchlastfm', source: 'lastfm' as const, artist: 'Batch Last.fm', track: 'Batch One' },
+      { rkey: '3kbatchlisten', source: 'listenbrainz' as const, artist: 'Batch ListenBrainz', track: 'Batch Two' },
+    ];
+    const decisions: Array<{ uri: string; incarnationKey: string; rev: string; source: 'lastfm' | 'listenbrainz' }> =
+      [];
+
+    for (const record of records) {
+      h.db.run(
+        `INSERT INTO forward_admissions(did,identity_key,path,source_service,created_at_ms,admission_seq)
+         VALUES(?,?,'import',?,?,?)`,
+        h.alice,
+        `love-uri:${h.alice}:${LOVE}:${record.rkey}`,
+        record.source,
+        h.m.clock.nowMs(),
+        100 + records.indexOf(record),
+      );
+      await h.kit.externalPut('Alice', LOVE, record.rkey, {
+        $type: LOVE,
+        artist: record.artist,
+        track: record.track,
+        createdAt: '2026-01-15T11:00:00Z',
+      });
+      expect((await projectLove(h, record.rkey)).outcome).toBe('applied');
+      const uri = `at://${h.alice}/${LOVE}/${record.rkey}`;
+      const accepted = await enqueueLove(h.m, {
+        did: h.alice,
+        input: { artist: record.artist, track: record.track },
+        origin: 'web',
+      });
+      if (!accepted.ok) throw new Error(`API love refused: ${accepted.reason.code}`);
+      await h.runUntilIdle();
+      expect(h.op(accepted.operation.id)).toMatchObject({ state: 'succeeded', result_uri: uri });
+      const binding = h.db.one<{ uri: string; incarnation_key: string }>(
+        'SELECT uri,incarnation_key FROM love_api_bindings WHERE operation_id=?',
+        accepted.operation.id,
+      );
+      expect(binding).toEqual({ uri, incarnation_key: expect.any(String) });
+      const loveRows = h.db.all<{ id: string; generation: number }>(
+        "SELECT id,generation FROM forward_outbox WHERE did=? AND kind='love' AND dedupe_key=? ORDER BY link_id",
+        h.alice,
+        accepted.operation.id,
+      );
+      expect(loveRows).toHaveLength(2);
+      for (const row of loveRows) settleRows(h.db, [row.id], 'sent', h.m.clock.nowMs(), null, true, row.generation);
+
+      const incarnation = binding!.incarnation_key;
+      await h.kit.externalDelete('Alice', LOVE, record.rkey);
+      const proof = await verifyRecordProof(await h.kit.repos.Alice.getRecordCar(LOVE, record.rkey), {
+        did: h.alice,
+        collection: LOVE,
+        rkey: record.rkey,
+        signingKey: h.kit.users.Alice.key.didKey,
+      });
+      if (proof.state !== 'absent') throw new Error('expected signed absence for batch recipient fixture');
+      recordLiveEvidence(
+        h.db,
+        { uri, did: h.alice, collection: LOVE, rkey: record.rkey, rev: proof.commit.rev, action: 'delete' },
+        h.m.clock.nowMs(),
+      );
+      expect((await projectLove(h, record.rkey, true)).outcome).toBe('absent');
+      decisions.push({ uri, incarnationKey: incarnation, rev: proof.commit.rev, source: record.source });
+    }
+
+    expect(
+      h.db.all<{ link_id: string; uri: string; generation: number }>(
+        'SELECT link_id,uri,generation FROM love_api_unlove_decisions ORDER BY uri,link_id',
+      ),
+    ).toEqual(
+      [
+        { link_id: lastfm, uri: decisions[0]!.uri, generation: 1 },
+        { link_id: listenbrainz, uri: decisions[1]!.uri, generation: 1 },
+      ].sort((left, right) => left.uri.localeCompare(right.uri)),
+    );
+
+    const rollbackTables = [
+      'love_api_recipients',
+      'love_api_recipient_members',
+      'love_api_unlove_decisions',
+      'love_api_comparison_facts',
+      'love_api_window_owners',
+      'forward_outbox',
+      'forward_receipts',
+      'forward_deferred_love_heads',
+      'forward_deferred_love_intents',
+      'forward_deferred_love_witnesses',
+      'forward_deferred_love_authorities',
+      'counters',
+    ];
+    const snapshot = () =>
+      Object.fromEntries(rollbackTables.map((table) => [table, h.db.all(`SELECT * FROM ${table} ORDER BY rowid`)]));
+    const before = snapshot();
+    let handoffInserts = 0;
+    let firstEffectReachedTransaction = false;
+    const faultedDb: Db = {
+      all<T>(sql: string, ...params: SqlParam[]): T[] {
+        return h.db.all<T>(sql, ...params);
+      },
+      one<T>(sql: string, ...params: SqlParam[]): T | null {
+        return h.db.one<T>(sql, ...params);
+      },
+      run(sql: string, ...params: SqlParam[]) {
+        if (/^\s*INSERT INTO forward_outbox\b/i.test(sql) && params[4] === 'unlove') {
+          handoffInserts++;
+          if (handoffInserts === 2) {
+            firstEffectReachedTransaction =
+              h.db.one<{ n: number }>(
+                "SELECT count(*) AS n FROM forward_outbox WHERE kind='unlove' AND dedupe_key LIKE '%:api-recipient'",
+              )?.n === 1;
+            throw new Error('injected second recipient handoff failure');
+          }
+        }
+        return h.db.run(sql, ...params);
+      },
+      tx<T>(fn: () => T extends Promise<unknown> ? never : T): T {
+        return h.db.tx(fn);
+      },
+    };
+    expect(() =>
+      materializeLoveApiRecipientDecisions(faultedDb, h.m.clock.nowMs(), h.m.random, 'second-handoff-fault'),
+    ).toThrow('injected second recipient handoff failure');
+    expect(handoffInserts).toBe(2);
+    expect(firstEffectReachedTransaction).toBe(true);
+    expect(snapshot()).toEqual(before);
+
+    expect(
+      materializeLoveApiRecipientDecisions(h.db, h.m.clock.nowMs(), h.m.random, 'second-handoff-success'),
+    ).toMatchObject({
+      visited: 2,
+      queued: 2,
+      deferred: 0,
+      replay: 0,
+      refused: 0,
+    });
+    expect(
+      h.db.all<{ link_id: string; authorization_uri: string; dedupe_key: string }>(
+        "SELECT link_id,authorization_uri,dedupe_key FROM forward_outbox WHERE kind='unlove' AND dedupe_key LIKE '%:api-recipient' ORDER BY link_id",
+      ),
+    ).toEqual(
+      [
+        {
+          link_id: lastfm,
+          authorization_uri: decisions[0]!.source === 'lastfm' ? decisions[0]!.uri : decisions[1]!.uri,
+          dedupe_key: `love-delete:${decisions[0]!.source === 'lastfm' ? decisions[0]!.incarnationKey : decisions[1]!.incarnationKey}:rev:${decisions[0]!.source === 'lastfm' ? decisions[0]!.rev : decisions[1]!.rev}:api-recipient`,
+        },
+        {
+          link_id: listenbrainz,
+          authorization_uri: decisions[0]!.source === 'listenbrainz' ? decisions[0]!.uri : decisions[1]!.uri,
+          dedupe_key: `love-delete:${decisions[0]!.source === 'listenbrainz' ? decisions[0]!.incarnationKey : decisions[1]!.incarnationKey}:rev:${decisions[0]!.source === 'listenbrainz' ? decisions[0]!.rev : decisions[1]!.rev}:api-recipient`,
+        },
+      ].sort((left, right) => left.link_id.localeCompare(right.link_id)),
+    );
+  });
+});
