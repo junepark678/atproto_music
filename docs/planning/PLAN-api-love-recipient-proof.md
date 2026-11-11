@@ -1,6 +1,6 @@
 # Finding 32: API love recipient proof (L2)
 
-## Current acceptance ledger (test-only matrix checkpoint on `e057645`)
+## Current acceptance ledger (test checkpoint on `f58fe8f`; integrated audit requests changes)
 
 Production and schema are frozen at `e057645ac1a2229c0d1d69189ae0128de9df84fa`; Sol verified `worker/src` matches narrowly accepted `8a406a2bf7b6e20ed82b73ddf1ff5e570ffc1b9a` byte-for-byte. Recipient source SHA-256: `ea26de81e4439d48d5dfce3e7aa661fb99dd6b58f139db173b026d1089c83622`. Migration57 remains frozen at SHA-256 `54dc2d344097763e055b0f8f7f10d8f85993ccdaf0e31620b699726c35256a96`; migrations1–56 are unchanged.
 
@@ -10,8 +10,35 @@ Production and schema are frozen at `e057645ac1a2229c0d1d69189ae0128de9df84fa`; 
 | Whole-invocation changed rows and visits | production eight-decision/orphan fixture reaches16 visits; `rejects an actual seventeenth invocation visit after earlier scheduler phases committed` injects a seventh valid query row against a six-row reservation, totals17 actual visited rows, and proves the current reclaim transaction rolls back while earlier phase commits remain | scoped pass; RECLAIM 7/6 preguard fires before the shared invocation assertion, so a mutation removing only the global assertion is not independently demonstrated |
 | Broad-covered paused recipient and narrow SENT proof | `listenbrainz-forward.test.ts`: paused broad B2 acceptance is asserted by exact deferred intent+witness, with no narrow effect; `loves.test.ts`: source-excluded narrow recipient still gets an exact API SENT proof path | scoped pass |
 | Schema57 migration ledger and all-table reopen | `local-index.test.ts`: exact historical 1–56 prefix plus 57 tail; coherent rows in all eight non-derived L2 tables survive close/reopen with exact dump equality | scoped pass, 5/5 |
-| Real producer batching across two current services | actual API/PDS/direct-delete tests cover a web API love sent to both services and broad route suppression of duplicate narrow effects; producer-derived restore covers imported Last.fm exclusion from broad route plus same-remote transport resume. Two-recipient fact-pin rollback is covered at the pending-removal producer-function seam. The multiple-API-operation, mixed member-status signed producer batch remains incomplete | scoped partial; broader batch remains |
-| Restore | producer-derived schema56 capture/real CLI 56→57 and schema57 restore/dispatch proofs exist; populated-state pre-swap merge failure, FK and accept-loss cleanup tests exist; full `scripts/test/restore.test.ts` passes26/26. Some test worlds boot the current server before CLI entry, migrating that live DB first; those live inputs are schema57, not all schema56. The separate #209 archive case is the actual schema56 producer input | scoped proofs; full restore matrix remains |
+| Real producer batching across two current services | `astra-core-cdb.test.ts`: two explicit API love operations with distinct request rkeys reuse one API-created incarnation, retain independent `api_origin` values, and production settlement selects the older SENT operation after the newer is ignored. Direct and A2 delayed signed absence both cover broad single-effects for the two current services; direct-path injected second-effect failure proves transaction rollback. Existing schema57 restore proves imported-source exclusion and transport resume. The integrated audit's snapshot/import two-operation case is separate and not covered by this API-created-projection test | scoped partial; snapshot/import repro and other batch outcomes remain |
+| Restore | exact-parent #209 schema56 producer archive has no L2 tables; real CLI 56→57 migration gives old API SENT/reuse no authority, then a new post-upgrade API admission reuses the legacy projection and proves new SENT. Producer-derived schema57 real-CLI restore covers operation/outbox GC, retained origin, exact rows, fresh composition/timer, paused/revoked zero egress and same-remote one-send/rerun-zero. `restore.test.ts` also covers all-eight-table merge/reopen, pre-swap failure atomicity and unreadable-live `--accept-loss`; fixtures which boot current server before CLI have already migrated live to57. Exact test mapping is in the Restore coverage ledger below | scoped proofs; literal eight-table accept-loss clearing and integrated source case remain |
+
+The integrated audit's two source defects were reproduced on unchanged production
+source `f58fe8fd50b4802b1e2306104ed1e56652ee1cc1` using its archived, hash-checked
+tests (temporary files removed afterward). The snapshot two-operation Node
+repro fails as expected (`state` remains `present`, not `sealed`); the real
+fake-transport repro sends zero Last.fm/ListenBrainz unlove for two completed
+same-incarnation API operations, while one-operation and reverse-settlement
+controls pass. The production handoff SQL's captured complete `COUNT(*)` query
+also fails the 100/1k/10k bounded-growth probe at 30,184 VM steps versus a 968
+upper bound; its `EXISTS` control is flat at183. Red logs are preserved under
+`/tmp/atproto-followup-sol/pr210-astra-integrated-f58fe8f/reproduction-current-{0,1,2}.log`.
+The new `astra-core-cdb.test.ts` coverage exercises two operations on an
+API-created incarnation, including ignored newer settlement and direct/A2
+delayed broad single-effect behavior. It does not substitute for the failing
+snapshot/import repro. Source repairs and fresh review remain pending.
+
+### Restore coverage ledger
+
+| Requirement | Test and fixture provenance | Status / exact gap |
+| --- | --- | --- |
+| Real schema56 upgrade and conservative old-state behavior | `restore.test.ts`: `migrates real schema-56 backup and live files to 57 through the restore CLI` starts from downgraded files; `restores an exact-parent schema-56 API/PDS reused projection without historical proof, then proves a new post-upgrade SENT` captures actual producers from exact #209 parent source archive, confirms no L2 tables and no binding for old API operation IDs, then performs a new API admission/PDS/SENT after migration | covered; in the generic test `FakeSystemd.boot()` can migrate live before the CLI starts, so only the backup is guaranteed schema56. The exact-parent archive case is the true schema56 producer fixture |
+| Populated schema57 producer rows, operation/outbox GC, origin and resumed delivery | `restores producer-derived API love proof after real PDS SENT, verified absence, and both remote deliveries`; production API admission/PDS/SENT, signed present/absence, removal window and real CLI restore. `api_origin` remains after operation and SENT-outbox deletion; current-generation recipients, exact payload/fact/owner rows, fresh server timer, paused/revoked zero egress, same-remote one-per-service resume and zero-request rerun are asserted | covered; the removal window is arranged with production `recordPendingRemovals` and signed proof, not claimed as an independent full A2 authorization-sweep fixture |
+| All eight non-derived schema57 tables merge and survive a regular close/reopen | `local-index.test.ts`: coherent rows are populated across all eight tables, exact table dumps compared after reopen; `restores populated schema-57 API-love proof rows from live after operation and sent-outbox cleanup` also checks merged rows after real CLI restore | covered as fixture-arranged storage/merge plus separate producer-derived restore |
+| Merge failure atomicity | `keeps populated schema-56 live and backup state intact when the completed merge fails before the file swap`; actual restore CLI injection after merge and pre-swap snapshots of live and backup files, including populated L2 rows | covered for the labeled post-merge/pre-swap injection point; the fixture has already booted/migrated current runtime before arranging rows, so do not call every input file schema56 at CLI entry |
+| Readable live state wins where newer, foreign keys and fresh composition | `keeps the newest live evidence, candidate, and pending removal when a readable restore merges an older backup`; producer-derived restore assertions and `PRAGMA foreign_key_check` after restore | covered for those named live-merge invariants |
+| Unreadable live `--accept-loss`, revocation journal and L2 cleanup | `with --accept-loss on an unreadable live db...`; real CLI and journal assertions remove sessions/links/receipts/outbox and cascade recipient members/window owners/decisions; retained comparison fact, binding, epoch and singleton remain for bounded cleanup | covered for current cascade/reclaim behavior; literal clearing of all eight tables is not proved. Sol's new ruling also requires a pending-proof loss notice on both refusal and accepted paths; that test change is delegated to the isolated restore checkout and remains pending |
+| Post-restore coverage, dispatch and timer resume | producer-derived schema57 restore and exact-parent schema56 post-upgrade positive case use fresh composition and actual fake Last.fm/ListenBrainz transports | covered for the named scenarios; integrated snapshot/import multiple-operation qualification and expanded producer-batch matrix remain in progress |
 
 The read cap is still a provisional relaxation: `96 + (25 - 13) + 20 = 128`; the20 is integration slack, not full-path measurement. Whole-decision<=128, changedRows<=28, invocation<=96 changed rows/16 visits, and metadata reserve12 are unchanged. The 229-read lifecycle receipt is informational wrong-unit evidence. PR210 is not ready and no full-L2 acceptance is claimed.
 
@@ -29,6 +56,45 @@ the corrected exact-carrier test remains part of this candidate. The merged
 scoped reruns pass the Last.fm/ListenBrainz/Astra/loves Node suites (114/114),
 local-index modules (5/5), and full Astra CDB bench file (78/78). The nested
 gate was not rerun; those checks remain Sol-owned.
+
+Root's later full gate on exact candidate `f58fe8fd50b4802b1e2306104ed1e56652ee1cc1`
+passed with 2474 passed, 0 failed, and 1 skipped. Receipt:
+`/tmp/atproto-followup-sol/pr210-f58fe8f-full-pass/{receipt.json,ts-test-report.json,ts-test-cases.jsonl,gate-durations.json}`;
+log: `/tmp/atproto-followup-sol/pr210-sol-check-ts-f58fe8f.log`. This closes
+the old ten test-oracle failures on f58 only; later test commits supersede that
+exact candidate, and Sol owns a fresh final gate on the eventual candidate.
+It does not establish integrated L2 acceptance, host-green status, or readiness.
+
+The hosted f58 check later reported both TypeScript jobs red because the shallow
+checkout cannot produce the historical #209 archive used by the selected
+schema56 producer test. No network fetch, CI depth change, or workaround was
+made. The local full-gate receipt above remains exact f58 evidence; it does not
+override the hosted red result. Any later candidate supersedes both f58 results
+and needs Sol's fresh final gate.
+
+Fresh integrated Astra review `pr210-astra-integrated-f58fe8f.md` is **SOURCE
+REQUEST CHANGES**, required proof pending. It found (1) an actual snapshot
+incarnation under-send when two API operations reuse one URI and the older
+operation is selected SENT while the newer succeeded operation is the current
+local intent, and (2) unbounded pending-member prefix work from a correlated
+`COUNT(*)` used only as a presence predicate. Exact reproductions and source
+hashes are archived in `/tmp/atproto-followup-sol/pr210-astra-integrated-f58fe8f/`.
+The API-created-incarnation test below is separate coverage and does not close
+the snapshot/import case. These two bounded source fixes are authorized; they
+must preserve the current SENT proof contract, current generation, alias and
+newer-unbound-love guards, and all fixed budgets/schema.
+
+### Restore coverage ledger
+
+| Requirement | Test and fixture provenance | Status / exact gap |
+| --- | --- | --- |
+| Real schema56 upgrade and conservative old-state behavior | `restore.test.ts`: `migrates real schema-56 backup and live files to 57 through the restore CLI` starts from downgraded files; `restores an exact-parent schema-56 API/PDS reused projection without historical proof, then proves a new post-upgrade SENT` captures actual producers from exact #209 parent source archive, confirms no L2 tables and no binding for old API operation IDs, then performs a new API admission/PDS/SENT after migration | covered; in the generic test `FakeSystemd.boot()` can migrate live before the CLI starts, so only the backup is guaranteed schema56 there. The exact-parent archive case is the true schema56 producer fixture |
+| Populated schema57 producer rows, operation/outbox GC, origin and resumed delivery | `restores producer-derived API love proof after real PDS SENT, verified absence, and both remote deliveries`; production API admission/PDS/SENT, signed present/absence, removal window and real CLI restore. `api_origin` remains after operation and SENT-outbox deletion; current-generation recipients, exact payload/fact/owner rows, fresh server timer, paused/revoked zero egress, same-remote one-per-service resume and zero-request rerun are asserted | covered; the removal window is arranged with production `recordPendingRemovals` and signed proof, not claimed as a full independent A2 authorization-sweep fixture |
+| All eight non-derived schema57 tables merge and survive a regular close/reopen | `local-index.test.ts`: coherent rows are populated across all eight tables, exact table dumps compared after reopen; `restores populated schema-57 API-love proof rows from live after operation and sent-outbox cleanup` also checks merged rows after real CLI restore | covered as fixture-arranged storage/merge plus separate producer-derived restore |
+| Merge failure atomicity | `keeps populated schema-56 live and backup state intact when the completed merge fails before the file swap`; actual restore CLI injection after merge and pre-swap snapshots of live and backup files, including populated L2 rows | covered for the labeled post-merge/pre-swap injection point; the fixture has already booted/migrated current runtime before arranging rows, so do not call every input file schema56 at CLI entry |
+| Readable live state wins where newer, foreign keys and fresh composition | `keeps the newest live evidence, candidate, and pending removal when a readable restore merges an older backup`; producer-derived restore assertions and `PRAGMA foreign_key_check` after restore | covered for those specific live-merge invariants |
+| Unreadable live `--accept-loss`, revocation journal and L2 cleanup | `with --accept-loss on an unreadable live db...`; real CLI and journal assertions remove sessions/links/receipts/outbox and cascade recipient members/window owners/decisions; retained comparison fact, binding, epoch and singleton remain available for safe bounded cleanup | covered for current cascade/reclaim behavior; literal immediate clearing of all eight L2 tables is not proved and is not claimed |
+| Post-restore coverage, dispatch and timer resume | producer-derived schema57 restore and exact-parent schema56 post-upgrade positive case use fresh composition and actual fake Last.fm/ListenBrainz transports | covered for named scenarios; integrated snapshot/import multiple-operation qualification and expanded producer-batch matrix remain in progress |
 
 ## Scope and binding behavior
 
