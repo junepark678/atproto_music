@@ -717,7 +717,7 @@ These repairs do not close the full L2 acceptance matrix. Whole-decision cold/pa
 
 ## Latest preserved producer-restore and repair rerun
 
-The restore integration starts with a signed PDS LOVE projection and records its original Last.fm import source through the production `admitForwardIdentity(path='import')` helper. It then invokes API `love.put` with a different request rkey and verifies that the successful operation reuses the projection URI. After exact SENT, signed absence, operation/outbox cleanup, and real CLI restore, only the Last.fm import-source recipient has a narrow L2 decision; the broad route covers ListenBrainz. Both recipient rows and their immutable origin binding survive cleanup/reopen. The fresh production timer defers while the Last.fm link is revoked and ListenBrainz forwarding is disabled, both transports observe zero requests, and the same-remote resume emits exactly one unlove for each service with a zero-request rerun. This is current producer-derived schema-57 restore evidence; schema-56 producer-derived restore is still pending.
+The schema-57 restore integration starts with a signed PDS LOVE projection and records its original Last.fm import source through the production `admitForwardIdentity(path='import')` helper. It then invokes API `love.put` with a different request rkey and verifies that the successful operation reuses the projection URI. After exact SENT, signed absence, operation/outbox cleanup, and real CLI restore, only the Last.fm import-source recipient has a narrow L2 decision; the broad route covers ListenBrainz. Both recipient rows and their immutable origin binding survive cleanup/reopen. The fresh production timer defers while the Last.fm link is revoked and ListenBrainz forwarding is disabled, both transports observe zero requests, and the same-remote resume emits exactly one unlove for each service with a zero-request rerun. At that earlier checkpoint, the producer-derived schema-56 restore remained pending; its scoped completion is recorded below.
 
 The restored decision transaction table changed with the added fact-minimum preparation and source-aware route. The actual rows are decision `69 reads / 12 changed rows / 1 visit` and the second decision `3 / 0 / 0`; both are under128/28. The complete cold invocation still totals135 reads across separate transactions and is informational at invocation scope, not compared against the per-decision bound. The 229-read lifecycle receipt remains preserved as wrong-unit informational evidence.
 
@@ -743,7 +743,7 @@ Astra's full report at `pr210-astra-core-2b84472.md` requested changes for five 
 
 Scoped verification on this candidate: worker-bench scheduler/accounting suite47/47; archived independent 2b defect matrix19/19; production active transport plus love outbox tests30/30; current broad-query full-schema plan and growth tests pass as part of the scheduler suite; `npm run typecheck` passed after the final source and test edits. The exact-bound fixture now injects64 extra observed reads because the actual full production transaction baseline is64; it still commits at128, while the production129-read control rolls back. A restored obsolete scratch growth pair still uses the former seven-parameter query and failed against the current eight-parameter source; those temporary files were removed, their archived receipts were preserved, and the current tracked production-query plan/growth tests pass.
 
-No new Astra source acceptance or full-L2 acceptance is claimed. The whole-decision scenario matrix, schema56 producer-derived restore, full CLI restore/rollback/accept-loss matrix, complete producer batch controls, and independent review remain pending. The provisional128 read cap and `96 + (25 - 13) + 20 = 128` derivation, 96 changed rows,16 visits,12 metadata reserve, DECISION28, and frozen DDL are unchanged. The preserved229-read cross-transaction lifecycle receipt remains informational and is not comparable to the per-decision cap.
+No new Astra source acceptance or full-L2 acceptance was claimed at the dfa repair checkpoint. The whole-decision scenario matrix, full CLI restore/rollback/accept-loss matrix, complete producer batch controls, and independent review remain pending. The schema56 producer-derived restore checkpoint is now recorded below. The provisional128 read cap and `96 + (25 - 13) + 20 = 128` derivation, 96 changed rows,16 visits,12 metadata reserve, DECISION28, and frozen DDL are unchanged. The preserved229-read cross-transaction lifecycle receipt remains informational and is not comparable to the per-decision cap.
 
 ## dfa retained-minimum repair checkpoint (fresh review pending)
 
@@ -757,3 +757,42 @@ Sol's reconciliation of Astra's full `pr210-astra-core-dfa1e73.md` confirms scop
 Current scoped evidence: full scheduler/accounting worker-bench60/60; direct+delayed/replay/original-fact focused controls12/12 (within that suite); Node lifecycle/handoff/module-boundary/outbox/active transport83/83; actual producer-derived restore case1/1; typecheck and scoped Biome pass. Existing measured decision bounds remain unchanged. The archived dfa defect probe showed five prior retained-minimum failures before this repair; its red receipt is preserved. These current controls are not fresh Astra source acceptance.
 
 Fresh independent review of this retained-minimum repair remains pending. Broader whole-decision outcome matrix, schema56 producer-derived restore and full CLI restore/rollback/accept-loss matrix remain queued. No readiness or whole-L2 acceptance is claimed. The 128-read cap and derivation `96 + (25 - 13) + 20 = 128`, 96 changed rows,16 visits, reserve12, DECISION28, SWEEP17 and RECLAIM8 remain unchanged. The prior 229-read lifecycle receipt remains informational wrong-unit evidence.
+
+## Schema-56 producer-derived restore checkpoint
+
+The scoped restore case now creates its pre-L2 database by extracting exact
+READY #209 source `5d573706bf07bb50e0c8b79cf1d34a3f6c56a975` with `git
+archive` into a temporary directory and running a generated test through that
+archive's Node harness. The parent producer performs an actual API love
+admission, sends it through the fake PDS, verifies and projects the signed
+record, then imports a separate snapshot and performs an API acceptance that
+reuses that projection without another PDS request. The captured DB reports
+schema56, has no `love_api_*` tables, and contains both succeeded operation
+rows plus the imported-source projection. No L2 rows are seeded.
+
+The captured file is copied as both backup and stopped live state and passed
+through the real restore CLI. The CLI reports 56→57, checks all eight L2 tables
+empty, and starts a fresh current server composition. Both pre-upgrade API
+operation IDs remain absent from `love_api_bindings`; old API SENT and old
+reuse state do not gain authority during migration. The current production
+PDS helper then accepts a new API operation against a legacy imported
+projection at the same URI with a different request rkey. The test verifies
+the current binding origin, both recipient identities and generations, exact
+SENT love rows and payloads, signed PDS absence, retained delete fact and
+decision source. The original Last.fm import exclusion leaves its narrow
+recipient while broad acceptance covers ListenBrainz. Revoked/paused links
+produce zero egress; resuming the same remotes through the fresh server timer
+produces exactly one Last.fm unlove and one ListenBrainz score-zero delivery,
+then a zero-request rerun. Foreign-key checks run after the current server
+closes.
+
+The selected schema56 case and the existing schema57 producer-derived restore
+case both passed together (2/2) with one worker on CPUs8–11. This checkpoint
+adds test code and this evidence only: production runtime, migration57, and
+migrations1–56 are unchanged from `333e8ae`. It does not close the queued
+whole-decision outcome/cost matrix, producer-batch matrix, or full restore
+acceptance matrix, and it makes no readiness or whole-L2 claim. Project
+typecheck, scoped Biome, `git diff --check`, the secret-scan test, and a
+credential-shaped scan of added lines also passed; the scan reported no
+matches. The test-only source delta was checked against `worker/src` and
+`worker/migrations`, with no changes in either tree.

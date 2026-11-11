@@ -16,7 +16,7 @@
 // it with SIGKILL at each swap step. No real systemctl, network or
 // 127.2.0.1:8888 is involved.
 
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import {
   chmodSync,
@@ -28,6 +28,7 @@ import {
   openSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
   writeSync,
 } from 'node:fs';
@@ -114,6 +115,7 @@ import { authorizedLiveOptions } from '../../worker/test/write/support.ts';
 import { type CommandResult, main, type RestoreStep } from '../admin/restore.ts';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
+const PR209_SOURCE = '5d573706bf07bb50e0c8b79cf1d34a3f6c56a975';
 const BUSY_MS = 200;
 const DID_A = 'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa';
 const DID_B = 'did:plc:bbbbbbbbbbbbbbbbbbbbbbbb';
@@ -713,7 +715,12 @@ async function dispatchListenbrainz(
   return { report: await runForward(runtime, now), feedbacks };
 }
 
-async function produceApiLoveWithRealPds(db: SqliteDb, clock: FixedClock, label: string) {
+async function produceApiLoveWithRealPds(
+  db: SqliteDb,
+  clock: FixedClock,
+  label: string,
+  reuse?: { rkey: string; artist: string; track: string; album: string; recordingMbid: string },
+) {
   const kit = await createFixtureKit({ clock });
   expect(kit.users.Alice.did).toBe(DID_A);
   const random = seededRandom(label === 'Live' ? 0x71 : 0x70);
@@ -771,14 +778,18 @@ async function produceApiLoveWithRealPds(db: SqliteDb, clock: FixedClock, label:
     },
   ).link.id;
   db.run("UPDATE operations SET state='cancelled' WHERE id IN ('op1','op2')");
-  const projectionRkey = `3kimport${label.toLowerCase()}001`;
+  const projectionRkey = reuse?.rkey ?? `3kimport${label.toLowerCase()}001`;
+  const projectionArtist = reuse?.artist ?? `Producer restore ${label}`;
+  const projectionTrack = reuse?.track ?? 'SENT love';
+  const projectionAlbum = reuse?.album ?? 'Actual producer album';
+  const projectionMbid = reuse?.recordingMbid ?? '12345678-1234-1234-1234-123456789abc';
   const projectionUri = `at://${DID_A}/${LOVE_COLLECTION}/${projectionRkey}`;
   await kit.externalPut('Alice', LOVE_COLLECTION, projectionRkey, {
     $type: LOVE_COLLECTION,
-    artist: `Producer restore ${label}`,
-    track: 'SENT love',
-    album: 'Actual producer album',
-    recordingMbid: '12345678-1234-1234-1234-123456789abc',
+    artist: projectionArtist,
+    track: projectionTrack,
+    album: projectionAlbum,
+    recordingMbid: projectionMbid,
     createdAt: new Date(clock.nowMs()).toISOString(),
   });
   expect(
@@ -809,10 +820,10 @@ async function produceApiLoveWithRealPds(db: SqliteDb, clock: FixedClock, label:
   const created = await enqueueLove(m, {
     did: DID_A,
     input: {
-      artist: `Producer restore ${label}`,
-      track: 'SENT love',
-      album: 'Actual producer album',
-      recordingMbid: '12345678-1234-1234-1234-123456789abc',
+      artist: projectionArtist,
+      track: projectionTrack,
+      album: projectionAlbum,
+      recordingMbid: projectionMbid,
     },
     origin: 'lastfm',
   });
@@ -1176,6 +1187,101 @@ function downgradeFixtureTo56(path: string): void {
   } finally {
     db.close();
   }
+}
+
+/** Build a real schema-56 producer file using the exact pre-L2 source archive. */
+function produceSchema56FromParentArchive(outputPath: string): void {
+  const archiveDir = mkdtempSync(join(tmpdir(), 'atmusic-pr209-source-'));
+  dirs.push(archiveDir);
+  const archive = execFileSync('git', ['archive', '--format=tar', PR209_SOURCE], {
+    cwd: REPO,
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  execFileSync('tar', ['-xf', '-', '-C', archiveDir], { input: archive, maxBuffer: 8 * 1024 * 1024 });
+  symlinkSync(join(REPO, 'node_modules'), join(archiveDir, 'node_modules'), 'dir');
+  const testPath = join(archiveDir, 'worker/test/node/outbox/schema56-producer-restore.test.ts');
+  writeFileSync(
+    testPath,
+    [
+      "import { copyFileSync, writeFileSync } from 'node:fs';",
+      "import { DatabaseSync } from 'node:sqlite';",
+      "import { expect, it } from 'vitest';",
+      "import { verifyRecordProof } from '@atmusic/atproto/verify/record-proof';",
+      "import { seededRandom } from '@atmusic/core/test-support/random';",
+      "import { fromMs } from '@atmusic/core/timestamp';",
+      "import { applyRecordProof } from '../../../src/do/write/apply-record';",
+      "import { admitForwardIdentity } from '../../../src/forward/projection';",
+      "import { enqueueLove } from '../../../src/outbox/love-ops';",
+      "import { authorizedLiveOptions } from '../../write/support';",
+      "import { LOVE, withHarness } from './support';",
+      "const DID = 'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa';",
+      "it('exports an exact-parent schema-56 API/PDS/SENT reused projection', async () => {",
+      '  await withHarness(async (h) => {',
+      '    h.seedUser(h.alice);',
+      "    const api = await enqueueLove(h.m, { did: h.alice, input: { artist: 'Legacy API producer', track: 'Legacy actual SENT' }, origin: 'web' });",
+      "    if (!api.ok) throw new Error('parent API admission refused: ' + api.reason.code);",
+      '    await h.runUntilIdle();',
+      "    expect(h.op(api.operation.id).state).toBe('succeeded');",
+      "    expect(h.writers.sent.some((row) => row.nsid === 'com.atproto.repo.createRecord' && row.status === 200)).toBe(true);",
+      '    const sentRkey = h.op(api.operation.id).rkey!;',
+      '    const sentCar = await h.kit.repos.Alice.getRecordCar(LOVE, sentRkey);',
+      '    const sentProof = await verifyRecordProof(sentCar, { did: DID, collection: LOVE, rkey: sentRkey, signingKey: h.kit.users.Alice.key.didKey });',
+      "    expect(sentProof.state).toBe('present');",
+      '    const now = fromMs(h.kit.clock.nowMs());',
+      "    h.db.tx(() => applyRecordProof(h.db, sentProof, { prefix: 'com.example.atmusic', nowNs: now, receiptNs: now, live: authorizedLiveOptions(h.db, sentProof, seededRandom(27)).live }));",
+      "    const reuseRkey = '3kimportlive001';",
+      "    await h.kit.externalPut('Alice', LOVE, reuseRkey, { $type: LOVE, artist: 'Producer restore Live', track: 'SENT love', album: 'Actual producer album', recordingMbid: '12345678-1234-1234-1234-123456789abc', createdAt: new Date(h.kit.clock.nowMs()).toISOString() });",
+      "    expect(admitForwardIdentity(h.db, { did: DID, identityKey: 'love-uri:' + DID + ':' + LOVE + ':' + reuseRkey, path: 'import', sourceService: 'lastfm', now: h.kit.clock.nowMs() })).toBe(true);",
+      '    const reuseCar = await h.kit.repos.Alice.getRecordCar(LOVE, reuseRkey);',
+      '    const reuseProof = await verifyRecordProof(reuseCar, { did: DID, collection: LOVE, rkey: reuseRkey, signingKey: h.kit.users.Alice.key.didKey });',
+      '    const reuseNow = fromMs(h.kit.clock.nowMs());',
+      "    h.db.tx(() => applyRecordProof(h.db, reuseProof, { prefix: 'com.example.atmusic', nowNs: reuseNow, receiptNs: reuseNow, live: authorizedLiveOptions(h.db, reuseProof, seededRandom(28)).live }));",
+      "    const positiveUri = 'at://' + DID + '/' + LOVE + '/' + reuseRkey;",
+      "    const legacyReuseRkey = '3kimportoldreuse1';",
+      "    await h.kit.externalPut('Alice', LOVE, legacyReuseRkey, { $type: LOVE, artist: 'Legacy API reuse target', track: 'Legacy reused track', createdAt: new Date(h.kit.clock.nowMs()).toISOString() });",
+      "    expect(admitForwardIdentity(h.db, { did: DID, identityKey: 'love-uri:' + DID + ':' + LOVE + ':' + legacyReuseRkey, path: 'import', sourceService: 'listenbrainz', now: h.kit.clock.nowMs() })).toBe(true);",
+      '    const legacyReuseCar = await h.kit.repos.Alice.getRecordCar(LOVE, legacyReuseRkey);',
+      '    const legacyReuseProof = await verifyRecordProof(legacyReuseCar, { did: DID, collection: LOVE, rkey: legacyReuseRkey, signingKey: h.kit.users.Alice.key.didKey });',
+      '    const legacyReuseNow = fromMs(h.kit.clock.nowMs());',
+      "    h.db.tx(() => applyRecordProof(h.db, legacyReuseProof, { prefix: 'com.example.atmusic', nowNs: legacyReuseNow, receiptNs: legacyReuseNow, live: authorizedLiveOptions(h.db, legacyReuseProof, seededRandom(29)).live }));",
+      "    const uri = 'at://' + DID + '/' + LOVE + '/' + legacyReuseRkey;",
+      '    const pdsCalls = h.writers.sent.length;',
+      "    const reused = await enqueueLove(h.m, { did: h.alice, input: { artist: 'Legacy API reuse target', track: 'Legacy reused track' }, origin: 'web' });",
+      "    if (!reused.ok) throw new Error('parent reuse admission refused: ' + reused.reason.code);",
+      '    await h.runUntilIdle();',
+      '    expect(h.op(reused.operation.id).result_uri).toBe(uri);',
+      '    expect(h.writers.sent.length).toBe(pdsCalls);',
+      "    expect(h.db.one('SELECT max(version) AS version FROM schema_migrations')).toEqual({ version: 56 });",
+      "    expect(h.db.one(\"SELECT 1 FROM sqlite_master WHERE type='table' AND name='love_api_bindings'\")).toBeNull();",
+      '    const historicalUri = h.op(api.operation.id).result_uri;',
+      '    h.ctx.current.close();',
+      '    const checkpoint = new DatabaseSync(h.ctx.path);',
+      "    checkpoint.exec('PRAGMA wal_checkpoint(TRUNCATE)');",
+      '    checkpoint.close();',
+      '    copyFileSync(h.ctx.path, process.env.ATMUSIC_SCHEMA56_OUTPUT!);',
+      "    writeFileSync(process.env.ATMUSIC_SCHEMA56_OUTPUT! + '.json', JSON.stringify({ apiId: api.operation.id, reuseId: reused.operation.id, uri, rkey: legacyReuseRkey, historicalUri, positiveUri, positiveRkey: reuseRkey }));",
+      '  });',
+      '});',
+    ].join('\n'),
+  );
+  execFileSync(
+    process.execPath,
+    [
+      join(REPO, 'node_modules/.bin/vitest'),
+      'run',
+      '--config',
+      'vitest.node.config.ts',
+      'test/node/outbox/schema56-producer-restore.test.ts',
+      '--maxWorkers',
+      '1',
+    ],
+    {
+      cwd: join(archiveDir, 'worker'),
+      env: { ...process.env, ATMUSIC_SCHEMA56_OUTPUT: outputPath },
+      encoding: 'utf8',
+      maxBuffer: 8 * 1024 * 1024,
+    },
+  );
 }
 
 function downgradeFixtureTo55(path: string): void {
@@ -1548,6 +1654,355 @@ describe('restore.ts', () => {
       restored.close();
     }
     expect(query(live56, 'PRAGMA foreign_key_check')).toEqual([]);
+  }, 30_000);
+
+  it('restores an exact-parent schema-56 API/PDS reused projection without historical proof, then proves a new post-upgrade SENT', async () => {
+    const world = await buildWorld();
+    const parentDb = join(world.dir, 'schema-56-parent-producer.db');
+    produceSchema56FromParentArchive(parentDb);
+    const parent = JSON.parse(readFileSync(`${parentDb}.json`, 'utf8')) as {
+      apiId: string;
+      reuseId: string;
+      uri: string;
+      rkey: string;
+      historicalUri: string;
+      positiveUri: string;
+      positiveRkey: string;
+    };
+    expect(query(parentDb, 'SELECT max(version) AS version FROM schema_migrations')).toEqual([{ version: 56 }]);
+    expect(query(parentDb, "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'love_api_%'")).toEqual([]);
+    expect(
+      query(
+        parentDb,
+        'SELECT id,state,result_uri FROM operations WHERE id IN (?,?) ORDER BY id',
+        parent.apiId,
+        parent.reuseId,
+      ),
+    ).toEqual([
+      { id: parent.apiId, state: 'succeeded', result_uri: parent.historicalUri },
+      { id: parent.reuseId, state: 'succeeded', result_uri: parent.uri },
+    ]);
+    expect(query(parentDb, 'SELECT uri,path FROM love_incarnations WHERE uri=?', parent.uri)).toEqual([
+      { uri: parent.uri, path: 'import' },
+    ]);
+    expect(query(parentDb, 'SELECT uri,rkey FROM loves WHERE uri=?', parent.uri)).toEqual([
+      { uri: parent.uri, rkey: parent.rkey },
+    ]);
+
+    // Use the exact-parent file as both the real backup and stopped live state.
+    rmSync(`${world.dbPath}-wal`, { force: true });
+    rmSync(`${world.dbPath}-shm`, { force: true });
+    copyFileSync(parentDb, world.dbPath);
+    copyFileSync(parentDb, world.backupPath);
+    const oldWorld = { ...world };
+    const servicePort = await freePort();
+    const systemd = new FakeSystemd(oldWorld, { servicePort });
+    await systemd.boot();
+    await systemd.systemctl(['stop', 'atmusic.service', 'atmusic.socket']);
+    const result = await restoreCli(oldWorld, systemd, [...baseArgs(oldWorld), '--listen', `127.0.0.1:${servicePort}`]);
+    expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.stdout).toContain('migrated the copy from version 56 to 57');
+    expect(systemd.server).not.toBeNull();
+    const db = systemd.server!.server.db;
+    expect(db.one('SELECT max(version) AS version FROM schema_migrations')).toEqual({ version: 57 });
+    expect(db.one('SELECT 1 FROM love_api_bindings WHERE operation_id=?', parent.apiId)).toBeNull();
+    expect(db.one('SELECT 1 FROM love_api_bindings WHERE operation_id=?', parent.reuseId)).toBeNull();
+    for (const table of LOVE_API_TABLES) expect(db.one(`SELECT count(*) AS n FROM ${table}`), table).toEqual({ n: 0 });
+    // A new post-upgrade API admission reuses that legacy projection through the
+    // real PDS fixture. Its exact SENT is the first source of recipient authority.
+    const restoreBox = createBox(parseSecrets(world.secretsDoc).encryptionKeys, seededRandom(0x66));
+    const lastfm = saveLink(
+      { db, clock: world.clock, random: seededRandom(0x67), box: restoreBox },
+      { did: DID_A, service: 'lastfm', remoteUser: 'schema56-same-remote', credential: 'schema56-resume-token' },
+    ).link;
+    const source = await produceApiLoveWithRealPds(db, world.clock, 'Live', {
+      rkey: parent.positiveRkey,
+      artist: 'Legacy API producer',
+      track: 'Legacy SENT projection',
+      album: 'Legacy producer album',
+      recordingMbid: '12345678-1234-1234-1234-123456789abc',
+    });
+    expect(source.uri).toBe(parent.positiveUri);
+    expect(source.requestRkey).not.toBe(source.rkey);
+    expect(db.one('SELECT state,result_uri FROM operations WHERE id=?', source.operationId)).toEqual({
+      state: 'succeeded',
+      result_uri: parent.positiveUri,
+    });
+    const currentBinding = db.all<{
+      did: string;
+      operation_id: string;
+      api_origin: string;
+      uri: string;
+      incarnation_key: string;
+    }>(
+      'SELECT did,operation_id,api_origin,uri,incarnation_key FROM love_api_bindings WHERE operation_id=?',
+      source.operationId,
+    );
+    expect(currentBinding).toHaveLength(1);
+    expect(currentBinding[0]).toMatchObject({
+      did: DID_A,
+      operation_id: source.operationId,
+      api_origin: 'lastfm',
+      uri: parent.positiveUri,
+    });
+    const currentRecipients = db.all<{
+      did: string;
+      uri: string;
+      incarnation_key: string;
+      link_id: string;
+      generation: number;
+      state: string;
+      sent_operation_id: string | null;
+      service: string;
+      current_generation: number;
+    }>(
+      `SELECT r.did,r.uri,r.incarnation_key,r.link_id,r.generation,r.state,r.sent_operation_id,
+         l.service,l.generation AS current_generation
+       FROM love_api_recipients r JOIN linked_accounts l ON l.id=r.link_id AND l.did=r.did
+       WHERE r.uri=? ORDER BY l.service`,
+      source.uri,
+    );
+    expect(currentRecipients).toHaveLength(2);
+    expect(currentRecipients.map(({ service }) => service)).toEqual(['lastfm', 'listenbrainz']);
+    expect(currentRecipients.map(({ link_id }) => link_id).sort()).toEqual([lastfm.id, source.listenbrainzLink].sort());
+    for (const recipient of currentRecipients)
+      expect(recipient).toMatchObject({
+        did: DID_A,
+        uri: source.uri,
+        incarnation_key: currentBinding[0]!.incarnation_key,
+        generation: recipient.current_generation,
+      });
+
+    const firstDelivery = await dispatchRestoreLoveTransports(db, world.clock.nowMs());
+    expect(firstDelivery.report.requests).toBe(2);
+    expect(firstDelivery.lastfmRequests).toEqual(['track.love']);
+    expect(firstDelivery.listenbrainzRequests).toEqual([
+      { recording_mbid: '12345678-1234-1234-1234-123456789abc', score: 1 },
+    ]);
+    const deliveredLoveRows = db.all<{
+      did: string;
+      kind: string;
+      link_id: string;
+      generation: number;
+      dedupe_key: string;
+      state: string;
+      authorization_uri: string | null;
+      payload_json: string;
+    }>(
+      `SELECT did,kind,link_id,generation,dedupe_key,state,authorization_uri,payload_json
+       FROM forward_outbox WHERE kind='love' AND dedupe_key=? ORDER BY link_id`,
+      source.operationId,
+    );
+    expect(deliveredLoveRows).toHaveLength(2);
+    expect(deliveredLoveRows.map(({ link_id }) => link_id).sort()).toEqual([lastfm.id, source.listenbrainzLink].sort());
+    for (const row of deliveredLoveRows) {
+      expect(row).toMatchObject({
+        did: DID_A,
+        kind: 'love',
+        dedupe_key: source.operationId,
+        state: 'sent',
+        authorization_uri: null,
+      });
+      expect(JSON.parse(row.payload_json)).toEqual({
+        artist: 'Legacy API producer',
+        track: 'Legacy SENT projection',
+        album: 'Legacy producer album',
+        recordingMbid: '12345678-1234-1234-1234-123456789abc',
+        origin: 'lastfm',
+      });
+      expect(currentRecipients.find((recipient) => recipient.link_id === row.link_id)?.generation).toBe(row.generation);
+    }
+    const loveRow = db.one<{
+      uri: string;
+      cid: string;
+      artist_key: string;
+      track_key: string;
+      artist: string;
+      track: string;
+      recording_mbid: string | null;
+    }>('SELECT uri,cid,artist_key,track_key,artist,track,recording_mbid FROM loves WHERE uri=?', source.uri)!;
+    const incarnation = db.one<{ incarnation_key: string }>(
+      "SELECT incarnation_key FROM love_incarnations WHERE uri=? AND state='present'",
+      source.uri,
+    )!;
+    const presentProof = await verifyRecordProof(
+      await source.kit.repos.Alice.getRecordCar(LOVE_COLLECTION, source.rkey),
+      {
+        did: DID_A,
+        collection: LOVE_COLLECTION,
+        rkey: source.rkey,
+        signingKey: source.kit.users.Alice.key.didKey,
+      },
+    );
+    expect(presentProof.state).toBe('present');
+    if (presentProof.state !== 'present') throw new Error('expected actual PDS present proof');
+    expect(revokeLink(db, lastfm, 'credential_revoked', world.clock.nowMs())).toBe(true);
+    const listenbrainzLink = getLinkById(db, source.listenbrainzLink)!;
+    expect(
+      patchLink({ db, clock: world.clock }, DID_A, listenbrainzLink.id, { forwardScrobbles: false }),
+    ).not.toBeNull();
+    const deleteCommit = await source.kit.externalDelete('Alice', LOVE_COLLECTION, source.rkey);
+    const absentProof = await verifyRecordProof(
+      await source.kit.repos.Alice.getRecordCar(LOVE_COLLECTION, source.rkey),
+      {
+        did: DID_A,
+        collection: LOVE_COLLECTION,
+        rkey: source.rkey,
+        signingKey: source.kit.users.Alice.key.didKey,
+      },
+    );
+    expect(absentProof.state).toBe('absent');
+    if (absentProof.state !== 'absent') throw new Error('expected PDS absence proof');
+    const absenceRev = absentProof.commit.rev;
+    recordPendingRemovals(db, [
+      {
+        did: DID_A,
+        uri: source.uri,
+        kind: 'love',
+        row: {
+          ...loveRow,
+          listened_at: new Date(world.clock.nowMs()).toISOString(),
+          record_uri: null,
+          listen_id: null,
+        },
+        identityKey: incarnation.incarnation_key,
+        windowLo: presentProof.commit.rev,
+        windowHi: deleteCommit.rev,
+        replacedByCid: null,
+        nowMs: world.clock.nowMs(),
+      },
+    ]);
+    recordLiveEvidence(
+      db,
+      {
+        uri: source.uri,
+        did: DID_A,
+        collection: LOVE_COLLECTION,
+        rkey: source.rkey,
+        rev: absenceRev,
+        action: 'delete',
+      },
+      world.clock.nowMs(),
+    );
+    db.tx(() =>
+      applyRecordProof(db, absentProof, {
+        prefix: PREFIX,
+        nowNs: fromMs(world.clock.nowMs()),
+        receiptNs: fromMs(world.clock.nowMs()),
+        live: authorizedLiveOptions(db, absentProof, seededRandom(0x68)).live,
+      }),
+    );
+    expect(db.one('SELECT count(*) AS n FROM love_api_window_owners WHERE uri=?', source.uri)).toEqual({ n: 2 });
+    const currentDecisions = db.all<{
+      did: string;
+      uri: string;
+      incarnation_key: string;
+      link_id: string;
+      generation: number;
+      authorization_uri: string;
+      authorization_rev: string;
+      fact_action: string;
+      fact_cid: string;
+      payload_json: string;
+      service: string;
+    }>(
+      `SELECT d.did,d.uri,d.incarnation_key,d.link_id,d.generation,d.authorization_uri,d.authorization_rev,
+         d.fact_action,d.fact_cid,d.payload_json,l.service
+       FROM love_api_unlove_decisions d JOIN linked_accounts l ON l.id=d.link_id AND l.did=d.did
+       WHERE d.uri=? ORDER BY l.service`,
+      source.uri,
+    );
+    expect(currentDecisions).toHaveLength(1);
+    expect(currentDecisions[0]).toMatchObject({
+      did: DID_A,
+      uri: source.uri,
+      incarnation_key: currentBinding[0]!.incarnation_key,
+      link_id: lastfm.id,
+      generation: lastfm.generation,
+      authorization_uri: source.uri,
+      authorization_rev: absenceRev,
+      fact_action: 'delete',
+      fact_cid: '',
+      service: 'lastfm',
+    });
+    expect(JSON.parse(currentDecisions[0]!.payload_json)).toEqual({
+      artist: 'Legacy API producer',
+      track: 'Legacy SENT projection',
+      album: 'Legacy producer album',
+      recordingMbid: '12345678-1234-1234-1234-123456789abc',
+      origin: 'lastfm',
+    });
+    expect(db.one('SELECT 1 FROM love_api_bindings WHERE operation_id=?', parent.apiId)).toBeNull();
+    expect(db.one('SELECT 1 FROM love_api_bindings WHERE operation_id=?', parent.reuseId)).toBeNull();
+    expect(
+      materializeLoveApiRecipientDecisions(db, world.clock.nowMs(), seededRandom(0x69), 'schema56-paused'),
+    ).toMatchObject({
+      queued: 0,
+    });
+    const paused = await dispatchRestoreLoveTransports(db, world.clock.nowMs() + 1_000);
+    expect(paused.report.requests).toBe(0);
+    expect(paused.lastfmRequests).toEqual([]);
+    expect(paused.listenbrainzRequests).toEqual([]);
+
+    // Re-enable the same remotes; a second timer pass may create one effect per
+    // current recipient, and the real fake transports must accept it once.
+    expect(
+      saveLink(
+        { db, clock: world.clock, random: seededRandom(0x6a), box: restoreBox },
+        { did: DID_A, service: 'lastfm', remoteUser: lastfm.remote_user, credential: 'schema56-resume-token' },
+      ).link.generation,
+    ).toBe(lastfm.generation);
+    expect(
+      patchLink({ db, clock: world.clock }, DID_A, listenbrainzLink.id, { forwardScrobbles: true }),
+    ).not.toBeNull();
+    db.run("UPDATE users SET indexing_state='current' WHERE did=?", DID_A);
+    db.run(
+      "UPDATE linked_accounts SET backfill_state='running',backfill_discovery_done=1 WHERE did=? AND status='active' AND forward_scrobbles=1",
+      DID_A,
+    );
+    const timer = systemd
+      .server!.server.features.features.flatMap((feature) => feature.extensions ?? [])
+      .find((extension) => extension.name === 'link-backfill')?.timers?.['link-backfill'];
+    expect(timer).toBeTypeOf('function');
+    const scheduled: number[] = [];
+    const timerContext = {
+      schedule: (_name: 'link-backfill', at: number) => scheduled.push(at),
+      kick: () => null,
+    } as unknown as ExtensionContext;
+    const timerNow = world.clock.nowMs() + 30_000;
+    for (let turn = 0; turn < 8; turn++) await timer!(timerNow + turn * 1_000, timerContext);
+    expect(scheduled.length).toBeGreaterThan(0);
+    const unloveRows = db.all<{
+      did: string;
+      service: string;
+      link_id: string;
+      generation: number;
+      dedupe_key: string;
+      state: string;
+    }>(
+      `SELECT o.did,l.service,o.link_id,o.generation,o.dedupe_key,o.state FROM forward_outbox o JOIN linked_accounts l ON l.id=o.link_id
+      WHERE o.kind='unlove' AND o.authorization_uri=? ORDER BY l.service`,
+      source.uri,
+    );
+    expect(unloveRows).toHaveLength(2);
+    expect(unloveRows.map(({ service }) => service)).toEqual(['lastfm', 'listenbrainz']);
+    expect(unloveRows.map(({ link_id }) => link_id).sort()).toEqual([lastfm.id, source.listenbrainzLink].sort());
+    expect(
+      unloveRows.every(
+        (row) =>
+          row.did === DID_A &&
+          row.generation === (row.service === 'lastfm' ? lastfm.generation : listenbrainzLink.generation),
+      ),
+    ).toBe(true);
+    expect(unloveRows.filter((row) => row.dedupe_key.endsWith(':api-recipient'))).toHaveLength(1);
+    const dispatch = await dispatchRestoreLoveTransports(db, timerNow + 10_000);
+    expect(dispatch.lastfmRequests.filter((method) => method === 'track.unlove')).toHaveLength(1);
+    expect(dispatch.listenbrainzRequests.filter((row) => (row as { score?: number }).score === 0)).toHaveLength(1);
+    const rerun = await dispatchRestoreLoveTransports(db, timerNow + 20_000);
+    expect(rerun.report.requests).toBe(0);
+    await stopServer(systemd.server!.server);
+    systemd.server = null;
+    expect(query(world.dbPath, 'PRAGMA foreign_key_check')).toEqual([]);
   }, 30_000);
 
   it('restores populated schema-57 API-love proof rows from live after operation and sent-outbox cleanup', async () => {
