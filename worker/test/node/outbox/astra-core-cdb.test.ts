@@ -344,31 +344,33 @@ it.each(['direct', 'delayed'] as const)(
 );
 
 it.each([
-  { reverseSettlement: false, gcBeforeAbsence: true, sent: [true, false] as const },
-  { reverseSettlement: false, gcBeforeAbsence: false, sent: [false, true] as const },
-  { reverseSettlement: false, gcBeforeAbsence: false, sent: [true, true] as const },
-  { reverseSettlement: true, gcBeforeAbsence: false, sent: [true, true] as const },
+  { reverseSettlement: false, gcBeforeAbsence: true, outcomes: ['sent', 'ignored'] as const },
+  { reverseSettlement: false, gcBeforeAbsence: false, outcomes: ['ignored', 'sent'] as const },
+  { reverseSettlement: false, gcBeforeAbsence: false, outcomes: ['sent', 'sent'] as const },
+  { reverseSettlement: true, gcBeforeAbsence: false, outcomes: ['sent', 'sent'] as const },
+  { reverseSettlement: false, gcBeforeAbsence: false, outcomes: ['failed', 'sent'] as const },
+  { reverseSettlement: true, gcBeforeAbsence: true, outcomes: ['expired', 'ignored'] as const },
   {
     reverseSettlement: true,
     gcBeforeAbsence: true,
-    sent: [false, false] as const,
+    outcomes: ['ignored', 'ignored'] as const,
     absencePath: 'delayed-import' as const,
   },
   {
     reverseSettlement: true,
     gcBeforeAbsence: true,
-    sent: [true, true] as const,
+    outcomes: ['sent', 'sent'] as const,
     absencePath: 'delayed-import' as const,
   },
   {
     reverseSettlement: false,
     gcBeforeAbsence: false,
-    sent: [false, true] as const,
+    outcomes: ['ignored', 'sent'] as const,
     absencePath: 'delayed-import' as const,
   },
 ])(
   'handles snapshot same-incarnation API operation bindings safely (%o)',
-  async ({ reverseSettlement, gcBeforeAbsence, sent, absencePath = 'direct' }) => {
+  async ({ reverseSettlement, gcBeforeAbsence, outcomes, absencePath = 'direct' }) => {
     await withHarness(async (h) => {
       h.seedUser(h.alice);
       const lastfm = h.link(h.alice, 'lastfm');
@@ -429,16 +431,18 @@ it.each([
       expect(loveRows).toHaveLength(4);
       expect(new Set(loveRows.map(({ link_id }) => link_id))).toEqual(new Set([lastfm, listenbrainz]));
       const settlementOrder = reverseSettlement ? [...operations].reverse() : operations;
-      const selectedSentOperation = settlementOrder.find((operation) => sent[operations.indexOf(operation)]);
+      const selectedSentOperation = settlementOrder.find(
+        (operation) => outcomes[operations.indexOf(operation)] === 'sent',
+      );
       for (const operation of settlementOrder) {
-        const operationSent = sent[operations.indexOf(operation)]!;
+        const operationOutcome = outcomes[operations.indexOf(operation)]!;
         for (const row of loveRows.filter(({ dedupe_key }) => dedupe_key === operation.id))
           settleRows(
             h.db,
             [row.id],
-            operationSent ? 'sent' : 'ignored',
+            operationOutcome,
             h.m.clock.nowMs(),
-            operationSent ? null : 'fixture_terminal_ignore',
+            operationOutcome === 'sent' ? null : `fixture_terminal_${operationOutcome}`,
             true,
             row.generation,
           );
