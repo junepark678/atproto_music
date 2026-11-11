@@ -970,6 +970,63 @@ it('delayed preparation and the shared sealer persist the retained minimum befor
     expect(db.one('SELECT expires_at_ms FROM love_api_unlove_decisions')).toEqual({ expires_at_ms: 50 });
   }));
 
+it.each([50, 60])('keeps the shorter direct evidence horizon on expiry refusal at now=%s', async (nowMs) =>
+  withMigratedDb((db) => {
+    seed(db, 1);
+    const uri = `at://${DID}/com.example.atmusic.love/r1`;
+    db.run('UPDATE love_api_comparison_facts SET horizon_ms=100 WHERE authorization_uri=?', uri);
+    db.run(
+      `INSERT INTO live_record_evidence(uri,did,collection,rkey,del_rev,received_ms,expires_at_ms)
+       VALUES(?,?,'com.example.atmusic.love','r1',?,20,50)`,
+      uri,
+      DID,
+      REV,
+    );
+    const payload = db.one('SELECT payload_json FROM love_api_unlove_decisions');
+    expect(prepareLoveApiDirectAbsence(db, { did: DID, uri, incarnationKey: 'inc1', rev: REV, nowMs })).toBeNull();
+    expect(db.one('SELECT expires_at_ms FROM love_api_unlove_decisions')).toEqual({ expires_at_ms: 50 });
+    expect(db.one('SELECT payload_json FROM love_api_unlove_decisions')).toEqual(payload);
+    expect(db.one('SELECT horizon_ms,conflicted FROM love_api_comparison_facts')).toEqual({
+      horizon_ms: 100,
+      conflicted: 0,
+    });
+    expect(db.one('SELECT 1 FROM forward_deferred_love_authorities')).toBeNull();
+    expect(db.one('SELECT 1 FROM forward_deferred_love_witnesses')).toBeNull();
+    expect(db.one("SELECT 1 FROM forward_outbox WHERE kind='unlove'")).toBeNull();
+  }),
+);
+
+it.each(['conflicted', 'other-revision'] as const)(
+  'refuses %s expired direct evidence as a new minimum',
+  async (mode) =>
+    withMigratedDb((db) => {
+      seed(db, 1);
+      const uri = `at://${DID}/com.example.atmusic.love/r1`;
+      db.run('UPDATE love_api_comparison_facts SET horizon_ms=100 WHERE authorization_uri=?', uri);
+      db.run(
+        `INSERT INTO live_record_evidence(uri,did,collection,rkey,del_rev,conflict_rev,received_ms,expires_at_ms)
+       VALUES(?,?,'com.example.atmusic.love','r1',?,?,20,50)`,
+        uri,
+        DID,
+        mode === 'other-revision' ? '3lbcdefghijmv' : REV,
+        mode === 'conflicted' ? REV : null,
+      );
+      expect(
+        prepareLoveApiDirectAbsence(db, { did: DID, uri, incarnationKey: 'inc1', rev: REV, nowMs: 60 }),
+      ).toBeNull();
+      expect(db.one('SELECT expires_at_ms FROM love_api_unlove_decisions')).toEqual({
+        expires_at_ms: mode === 'conflicted' ? 100 : 10000,
+      });
+      expect(db.one('SELECT horizon_ms,conflicted FROM love_api_comparison_facts')).toEqual({
+        horizon_ms: 100,
+        conflicted: 0,
+      });
+      expect(db.one('SELECT 1 FROM forward_deferred_love_authorities')).toBeNull();
+      expect(db.one('SELECT 1 FROM forward_deferred_love_witnesses')).toBeNull();
+      expect(db.one("SELECT 1 FROM forward_outbox WHERE kind='unlove'")).toBeNull();
+    }),
+);
+
 it.each([30, 50, 60])('persists an accepted direct minimum before expiry refusal at now=%s', async (nowMs) =>
   withMigratedDb((db) => {
     seed(db, 1);

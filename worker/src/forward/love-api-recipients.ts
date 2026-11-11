@@ -480,9 +480,23 @@ export function prepareLoveApiDirectAbsence(
   )
     return null;
   if (first.evidence_expires_at_ms <= args.nowMs) {
+    // Exact expired evidence may shorten accepted work, but cannot authorize a handoff.
     for (const row of rows) {
       const decision = decisionMinimumFromRow(row);
-      if (decision !== null) persistAcceptedDecisionMinimum(db, decision, null, args.nowMs);
+      if (decision !== null)
+        persistAcceptedDecisionMinimum(
+          db,
+          decision,
+          {
+            uri: args.uri,
+            rev: args.rev,
+            action: 'delete',
+            cid: '',
+            horizonMs: first.evidence_expires_at_ms,
+            conflicted: first.evidence_conflict_rev === args.rev ? 1 : 0,
+          },
+          args.nowMs,
+        );
     }
     return null;
   }
