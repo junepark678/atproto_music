@@ -22,12 +22,13 @@ and `pr210-sol-check-ts-e057645.log`. Failures identified two stale broad-
 coverage recipient expectations (three instances), two local-index schema57
 fixture/ledger assertions, and four nested-gate cascades from those failures.
 Sol separately fixed the Last.fm test carrier assumption in test-only commit
-`499ca6efec972d7d5962ce1ef9cd99dc8f3fe7fe`; its full 27/27 Last.fm result and
-mutation evidence are in `pr210-sol-lastfm-oracle-{green,mutant,typecheck,secret}.log`.
-The commit is not yet merged into this candidate at this ledger entry. The
-current scoped repairs pass the complete three-file Node set (87/87), the
-local-index module suite (5/5), and the full Astra CDB bench file (78/78).
-The nested gate was not rerun; those checks remain Sol-owned.
+`499ca6efec972d7d5962ce1ef9cd99dc8f3fe7fe`, normally forward-merged as
+`54f3588fda6da2b921995a02e604578ec26545c8`. Its full 27/27 Last.fm result and
+mutation evidence are in `pr210-sol-lastfm-oracle-{green,mutant,typecheck,secret}.log`;
+the corrected exact-carrier test remains part of this candidate. The merged
+scoped reruns pass the Last.fm/ListenBrainz/Astra/loves Node suites (114/114),
+local-index modules (5/5), and full Astra CDB bench file (78/78). The nested
+gate was not rerun; those checks remain Sol-owned.
 
 ## Scope and binding behavior
 
