@@ -138,6 +138,48 @@ it('rolls back a whole decision when its actual metered SQL reaches 129 reads', 
       lane_turn: 0,
     });
   }));
+
+it('keeps cold singleton initialization separately metered while bounding the cold decision transaction', async () =>
+  withMigratedDb((db) => {
+    seed(db, 1);
+    db.run('DELETE FROM love_api_proof_state');
+    db.run(
+      `INSERT INTO live_pending_removal_events(uri,rev,action,cid,created_at_ms,expires_at_ms)
+       SELECT authorization_uri,authorization_rev,action,cid,1,10000 FROM love_api_comparison_facts`,
+    );
+    const accepted = runLoveApiMaintenance(db, 100, seededRandom(5), 'cold-boundary', injectDecisionReads(65));
+    expect(accepted.transactions.find((row) => row.phase === 'l2-cold-singleton-init')).toMatchObject({
+      changedRows: 1,
+      visits: 0,
+    });
+    expect(accepted.transactions.find((row) => row.phase === 'l2-decision')).toMatchObject({
+      reads: 128,
+      visits: 1,
+    });
+    expect(accepted.decisions.deferred).toBe(1);
+  }));
+
+it('rolls back an over-bound cold decision after separately committing singleton initialization', async () =>
+  withMigratedDb((db) => {
+    seed(db, 1);
+    db.run('DELETE FROM love_api_proof_state');
+    db.run(
+      `INSERT INTO live_pending_removal_events(uri,rev,action,cid,created_at_ms,expires_at_ms)
+       SELECT authorization_uri,authorization_rev,action,cid,1,10000 FROM love_api_comparison_facts`,
+    );
+    const beforeOutbox = db.one<{ count: number }>('SELECT count(*) AS count FROM forward_outbox')!.count;
+    const beforeDecision = db.all('SELECT * FROM love_api_unlove_decisions');
+    expect(() => runLoveApiMaintenance(db, 100, seededRandom(5), 'cold-over-bound', injectDecisionReads(66))).toThrow(
+      /L2 DECISION read bound exceeded: 129\/128/,
+    );
+    expect(db.one<{ state: string }>('SELECT state FROM love_api_recipients')).toEqual({ state: 'sealed' });
+    expect(db.all('SELECT * FROM love_api_unlove_decisions')).toEqual(beforeDecision);
+    expect(db.one<{ count: number }>('SELECT count(*) AS count FROM forward_outbox')!.count).toBe(beforeOutbox);
+    expect(db.one<{ lane_turn: number }>('SELECT lane_turn FROM love_api_proof_state WHERE singleton=1')).toEqual({
+      lane_turn: 0,
+    });
+  }));
+
 it.each([1, 8])('enforces combined invocation budget count=%i', async (n) =>
   withMigratedDb((db) => {
     seed(db, n);
