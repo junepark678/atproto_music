@@ -781,14 +781,15 @@ async function produceApiLoveWithRealPds(db: SqliteDb, clock: FixedClock, label:
     recordingMbid: '12345678-1234-1234-1234-123456789abc',
     createdAt: new Date(clock.nowMs()).toISOString(),
   });
-  db.run(
-    `INSERT INTO forward_admissions(did,identity_key,path,source_service,created_at_ms,admission_seq)
-     VALUES(?,?,'import','lastfm',?,?)`,
-    DID_A,
-    `love-uri:${DID_A}:${LOVE_COLLECTION}:${projectionRkey}`,
-    clock.nowMs(),
-    101,
-  );
+  expect(
+    admitForwardIdentity(db, {
+      did: DID_A,
+      identityKey: `love-uri:${DID_A}:${LOVE_COLLECTION}:${projectionRkey}`,
+      path: 'import',
+      sourceService: 'lastfm',
+      now: clock.nowMs(),
+    }),
+  ).toBe(true);
   const importedCar = await kit.repos.Alice.getRecordCar(LOVE_COLLECTION, projectionRkey);
   const importedProof = await verifyRecordProof(importedCar, {
     did: DID_A,
