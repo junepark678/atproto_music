@@ -349,6 +349,7 @@ it.each([
   { reverseSettlement: false, gcBeforeAbsence: false, outcomes: ['ignored', 'sent'] as const },
   { reverseSettlement: false, gcBeforeAbsence: false, outcomes: ['sent', 'sent'] as const },
   { reverseSettlement: true, gcBeforeAbsence: false, outcomes: ['sent', 'sent'] as const },
+  { reverseSettlement: false, gcBeforeAbsence: false, outcomes: ['sent', 'pending'] as const },
   { reverseSettlement: false, gcBeforeAbsence: false, outcomes: ['failed', 'sent'] as const },
   { reverseSettlement: true, gcBeforeAbsence: true, outcomes: ['expired', 'ignored'] as const },
   {
@@ -437,6 +438,7 @@ it.each([
       );
       for (const operation of settlementOrder) {
         const operationOutcome = outcomes[operations.indexOf(operation)]!;
+        if (operationOutcome === 'pending') continue;
         for (const row of loveRows.filter(({ dedupe_key }) => dedupe_key === operation.id))
           settleRows(
             h.db,
@@ -448,7 +450,16 @@ it.each([
             row.generation,
           );
       }
-      expect(h.db.all('SELECT 1 FROM love_api_recipient_members')).toEqual([]);
+      const pendingOperation = operations.find((_operation, index) => outcomes[index] === 'pending');
+      expect(
+        h.db.all<{ link_id: string; operation_id: string }>(
+          'SELECT link_id,operation_id FROM love_api_recipient_members ORDER BY link_id,operation_id',
+        ),
+      ).toEqual(
+        pendingOperation === undefined
+          ? []
+          : [lastfm, listenbrainz].map((link_id) => ({ link_id, operation_id: pendingOperation.id })),
+      );
       expect(
         h.db.all<{ link_id: string; sent_operation_id: string }>(
           'SELECT link_id,sent_operation_id FROM love_api_recipients ORDER BY link_id',
@@ -555,7 +566,7 @@ it.each([
           ).groups,
         ).toBe(1);
       }
-      if (!gcBeforeAbsence) cleanApiHistory();
+      if (!gcBeforeAbsence && pendingOperation === undefined) cleanApiHistory();
       if (selectedSentOperation === undefined) {
         // Bindings and a terminal negative outcome never establish recipient
         // proof. An import-source-excluded link stays present; the other link
@@ -603,12 +614,31 @@ it.each([
         ].sort((left, right) => left.link_id.localeCompare(right.link_id)),
       );
       const result = materializeLoveApiRecipientDecisions(h.db, h.m.clock.nowMs(), h.m.random, 'snapshot-multi-api');
-      expect(result).toMatchObject({
-        visited: positiveLinks.length,
-        queued: positiveLinks.length,
-        deferred: 0,
-        refused: 0,
-      });
+      if (pendingOperation === undefined) {
+        expect(result).toMatchObject({
+          visited: positiveLinks.length,
+          queued: positiveLinks.length,
+          deferred: 0,
+          refused: 0,
+        });
+      } else {
+        expect(result).toMatchObject({
+          visited: positiveLinks.length,
+          queued: 0,
+          awaiting: positiveLinks.length,
+          deferred: 0,
+          refused: 0,
+        });
+        for (const row of loveRows.filter(({ dedupe_key }) => dedupe_key === pendingOperation.id))
+          settleRows(h.db, [row.id], 'sent', h.kit.clock.nowMs(), null, true, row.generation);
+        const resumed = materializeLoveApiRecipientDecisions(
+          h.db,
+          h.kit.clock.nowMs() + 1_000,
+          h.m.random,
+          'late-sibling-sent',
+        );
+        expect(resumed).toMatchObject({ visited: positiveLinks.length, queued: positiveLinks.length, refused: 0 });
+      }
       expect(
         h.db.all<{ link_id: string; kind: string; state: string; dedupe_key: string }>(
           `SELECT link_id,kind,state,dedupe_key FROM forward_outbox WHERE kind='unlove' ORDER BY link_id`,
@@ -636,6 +666,12 @@ it.each([
               dedupe_key: `love-delete:${h.db.one<{ incarnation_key: string }>('SELECT incarnation_key FROM love_incarnations WHERE uri=?', uri)!.incarnation_key}:rev:${absentProof.commit.rev}:api-recipient`,
             }))),
       ]);
+      if (pendingOperation !== undefined) {
+        expect(
+          materializeLoveApiRecipientDecisions(h.db, h.kit.clock.nowMs(), h.m.random, 'late-sibling-sent'),
+        ).toMatchObject({ queued: 0, refused: 0 });
+        expect(h.db.all("SELECT kind FROM forward_outbox WHERE kind='unlove'")).toHaveLength(positiveLinks.length);
+      }
     });
   },
 );
