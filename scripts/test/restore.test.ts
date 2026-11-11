@@ -16,7 +16,8 @@
 // it with SIGKILL at each swap step. No real systemctl, network or
 // 127.2.0.1:8888 is involved.
 
-import { execFileSync, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import {
   chmodSync,
@@ -28,7 +29,6 @@ import {
   openSync,
   readFileSync,
   rmSync,
-  symlinkSync,
   writeFileSync,
   writeSync,
 } from 'node:fs';
@@ -115,7 +115,6 @@ import { authorizedLiveOptions } from '../../worker/test/write/support.ts';
 import { type CommandResult, main, type RestoreStep } from '../admin/restore.ts';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
-const PR209_SOURCE = '5d573706bf07bb50e0c8b79cf1d34a3f6c56a975';
 const BUSY_MS = 200;
 const DID_A = 'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa';
 const DID_B = 'did:plc:bbbbbbbbbbbbbbbbbbbbbbbb';
@@ -1189,101 +1188,6 @@ function downgradeFixtureTo56(path: string): void {
   }
 }
 
-/** Build a real schema-56 producer file using the exact pre-L2 source archive. */
-function produceSchema56FromParentArchive(outputPath: string): void {
-  const archiveDir = mkdtempSync(join(tmpdir(), 'atmusic-pr209-source-'));
-  dirs.push(archiveDir);
-  const archive = execFileSync('git', ['archive', '--format=tar', PR209_SOURCE], {
-    cwd: REPO,
-    maxBuffer: 64 * 1024 * 1024,
-  });
-  execFileSync('tar', ['-xf', '-', '-C', archiveDir], { input: archive, maxBuffer: 8 * 1024 * 1024 });
-  symlinkSync(join(REPO, 'node_modules'), join(archiveDir, 'node_modules'), 'dir');
-  const testPath = join(archiveDir, 'worker/test/node/outbox/schema56-producer-restore.test.ts');
-  writeFileSync(
-    testPath,
-    [
-      "import { copyFileSync, writeFileSync } from 'node:fs';",
-      "import { DatabaseSync } from 'node:sqlite';",
-      "import { expect, it } from 'vitest';",
-      "import { verifyRecordProof } from '@atmusic/atproto/verify/record-proof';",
-      "import { seededRandom } from '@atmusic/core/test-support/random';",
-      "import { fromMs } from '@atmusic/core/timestamp';",
-      "import { applyRecordProof } from '../../../src/do/write/apply-record';",
-      "import { admitForwardIdentity } from '../../../src/forward/projection';",
-      "import { enqueueLove } from '../../../src/outbox/love-ops';",
-      "import { authorizedLiveOptions } from '../../write/support';",
-      "import { LOVE, withHarness } from './support';",
-      "const DID = 'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa';",
-      "it('exports an exact-parent schema-56 API/PDS/SENT reused projection', async () => {",
-      '  await withHarness(async (h) => {',
-      '    h.seedUser(h.alice);',
-      "    const api = await enqueueLove(h.m, { did: h.alice, input: { artist: 'Legacy API producer', track: 'Legacy actual SENT' }, origin: 'web' });",
-      "    if (!api.ok) throw new Error('parent API admission refused: ' + api.reason.code);",
-      '    await h.runUntilIdle();',
-      "    expect(h.op(api.operation.id).state).toBe('succeeded');",
-      "    expect(h.writers.sent.some((row) => row.nsid === 'com.atproto.repo.createRecord' && row.status === 200)).toBe(true);",
-      '    const sentRkey = h.op(api.operation.id).rkey!;',
-      '    const sentCar = await h.kit.repos.Alice.getRecordCar(LOVE, sentRkey);',
-      '    const sentProof = await verifyRecordProof(sentCar, { did: DID, collection: LOVE, rkey: sentRkey, signingKey: h.kit.users.Alice.key.didKey });',
-      "    expect(sentProof.state).toBe('present');",
-      '    const now = fromMs(h.kit.clock.nowMs());',
-      "    h.db.tx(() => applyRecordProof(h.db, sentProof, { prefix: 'com.example.atmusic', nowNs: now, receiptNs: now, live: authorizedLiveOptions(h.db, sentProof, seededRandom(27)).live }));",
-      "    const reuseRkey = '3kimportlive001';",
-      "    await h.kit.externalPut('Alice', LOVE, reuseRkey, { $type: LOVE, artist: 'Producer restore Live', track: 'SENT love', album: 'Actual producer album', recordingMbid: '12345678-1234-1234-1234-123456789abc', createdAt: new Date(h.kit.clock.nowMs()).toISOString() });",
-      "    expect(admitForwardIdentity(h.db, { did: DID, identityKey: 'love-uri:' + DID + ':' + LOVE + ':' + reuseRkey, path: 'import', sourceService: 'lastfm', now: h.kit.clock.nowMs() })).toBe(true);",
-      '    const reuseCar = await h.kit.repos.Alice.getRecordCar(LOVE, reuseRkey);',
-      '    const reuseProof = await verifyRecordProof(reuseCar, { did: DID, collection: LOVE, rkey: reuseRkey, signingKey: h.kit.users.Alice.key.didKey });',
-      '    const reuseNow = fromMs(h.kit.clock.nowMs());',
-      "    h.db.tx(() => applyRecordProof(h.db, reuseProof, { prefix: 'com.example.atmusic', nowNs: reuseNow, receiptNs: reuseNow, live: authorizedLiveOptions(h.db, reuseProof, seededRandom(28)).live }));",
-      "    const positiveUri = 'at://' + DID + '/' + LOVE + '/' + reuseRkey;",
-      "    const legacyReuseRkey = '3kimportoldreuse1';",
-      "    await h.kit.externalPut('Alice', LOVE, legacyReuseRkey, { $type: LOVE, artist: 'Legacy API reuse target', track: 'Legacy reused track', createdAt: new Date(h.kit.clock.nowMs()).toISOString() });",
-      "    expect(admitForwardIdentity(h.db, { did: DID, identityKey: 'love-uri:' + DID + ':' + LOVE + ':' + legacyReuseRkey, path: 'import', sourceService: 'listenbrainz', now: h.kit.clock.nowMs() })).toBe(true);",
-      '    const legacyReuseCar = await h.kit.repos.Alice.getRecordCar(LOVE, legacyReuseRkey);',
-      '    const legacyReuseProof = await verifyRecordProof(legacyReuseCar, { did: DID, collection: LOVE, rkey: legacyReuseRkey, signingKey: h.kit.users.Alice.key.didKey });',
-      '    const legacyReuseNow = fromMs(h.kit.clock.nowMs());',
-      "    h.db.tx(() => applyRecordProof(h.db, legacyReuseProof, { prefix: 'com.example.atmusic', nowNs: legacyReuseNow, receiptNs: legacyReuseNow, live: authorizedLiveOptions(h.db, legacyReuseProof, seededRandom(29)).live }));",
-      "    const uri = 'at://' + DID + '/' + LOVE + '/' + legacyReuseRkey;",
-      '    const pdsCalls = h.writers.sent.length;',
-      "    const reused = await enqueueLove(h.m, { did: h.alice, input: { artist: 'Legacy API reuse target', track: 'Legacy reused track' }, origin: 'web' });",
-      "    if (!reused.ok) throw new Error('parent reuse admission refused: ' + reused.reason.code);",
-      '    await h.runUntilIdle();',
-      '    expect(h.op(reused.operation.id).result_uri).toBe(uri);',
-      '    expect(h.writers.sent.length).toBe(pdsCalls);',
-      "    expect(h.db.one('SELECT max(version) AS version FROM schema_migrations')).toEqual({ version: 56 });",
-      "    expect(h.db.one(\"SELECT 1 FROM sqlite_master WHERE type='table' AND name='love_api_bindings'\")).toBeNull();",
-      '    const historicalUri = h.op(api.operation.id).result_uri;',
-      '    h.ctx.current.close();',
-      '    const checkpoint = new DatabaseSync(h.ctx.path);',
-      "    checkpoint.exec('PRAGMA wal_checkpoint(TRUNCATE)');",
-      '    checkpoint.close();',
-      '    copyFileSync(h.ctx.path, process.env.ATMUSIC_SCHEMA56_OUTPUT!);',
-      "    writeFileSync(process.env.ATMUSIC_SCHEMA56_OUTPUT! + '.json', JSON.stringify({ apiId: api.operation.id, reuseId: reused.operation.id, uri, rkey: legacyReuseRkey, historicalUri, positiveUri, positiveRkey: reuseRkey }));",
-      '  });',
-      '});',
-    ].join('\n'),
-  );
-  execFileSync(
-    process.execPath,
-    [
-      join(REPO, 'node_modules/.bin/vitest'),
-      'run',
-      '--config',
-      'vitest.node.config.ts',
-      'test/node/outbox/schema56-producer-restore.test.ts',
-      '--maxWorkers',
-      '1',
-    ],
-    {
-      cwd: join(archiveDir, 'worker'),
-      env: { ...process.env, ATMUSIC_SCHEMA56_OUTPUT: outputPath },
-      encoding: 'utf8',
-      maxBuffer: 8 * 1024 * 1024,
-    },
-  );
-}
-
 function downgradeFixtureTo55(path: string): void {
   downgradeFixtureTo56(path);
   const db = openSqliteDb(path, { busyTimeoutMs: BUSY_MS });
@@ -1305,6 +1209,72 @@ function downgradeFixtureTo55(path: string): void {
   } finally {
     db.close();
   }
+}
+
+function sha256(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+function canonicalSchema(db: sqlite.DatabaseSync | SqliteDb): string {
+  const sql = "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name";
+  const rows = 'prepare' in db ? db.prepare(sql).all() : db.exec(sql);
+  return rows
+    .map((row) => {
+      const value = row as { type: string; name: string; tbl_name: string; sql: string };
+      return `${value.type}\t${value.name}\t${value.tbl_name}\t${value.sql.replace(/\\s+/g, ' ').trim()}`;
+    })
+    .join('\n');
+}
+
+interface Schema56Manifest extends Record<string, string | number> {
+  schemaVersion: number;
+}
+
+function verifySchema56Fixture(sql: string, metadataText: string, manifest: Schema56Manifest, schema: string): void {
+  if (manifest.sourceCommit !== '5d573706bf07bb50e0c8b79cf1d34a3f6c56a975')
+    throw new Error('fixture source pin mismatch');
+  if (manifest.sqlSha256 !== sha256(sql)) throw new Error('schema-56 SQL fixture checksum mismatch');
+  if (manifest.metadataSha256 !== sha256(metadataText)) throw new Error('schema-56 metadata checksum mismatch');
+  if (manifest.canonicalMigration1To56DdlSha256 !== sha256(schema))
+    throw new Error('schema-56 canonical DDL checksum mismatch');
+}
+
+/** Load the one-time old-producer SQL export; CI does not need historical Git objects. */
+function loadSchema56Fixture(outputPath: string): Record<string, string> {
+  const sql = readFileSync(new URL('./fixtures/schema56-parent-producer.sql', import.meta.url), 'utf8');
+  const metadataText = readFileSync(new URL('./fixtures/schema56-parent-producer.json', import.meta.url), 'utf8');
+  const manifest = JSON.parse(
+    readFileSync(new URL('./fixtures/schema56-parent-producer.manifest.json', import.meta.url), 'utf8'),
+  ) as Schema56Manifest;
+  const metadata = JSON.parse(metadataText) as Record<string, string>;
+  const db = new sqlite.DatabaseSync(outputPath);
+  try {
+    db.exec(sql);
+    db.exec('PRAGMA foreign_keys = ON');
+    expect(db.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+    expect(db.prepare('PRAGMA integrity_check').get()).toEqual({ integrity_check: 'ok' });
+    const schema = canonicalSchema(db);
+    const scratchDir = mkdtempSync(join(tmpdir(), 'atmusic-schema56-ddl-'));
+    dirs.push(scratchDir);
+    const scratch = openSqliteDb(join(scratchDir, 'schema56.db'), { create: true, busyTimeoutMs: BUSY_MS });
+    try {
+      expect(migrate(scratch, MIGRATIONS.slice(0, 56))).toEqual({ status: 'ready', version: 56 });
+      verifySchema56Fixture(sql, metadataText, manifest, schema);
+      expect(schema).toBe(canonicalSchema(scratch));
+      expect(manifest.schemaVersion).toBe(56);
+      expect(() => verifySchema56Fixture(`${sql}\n-- altered`, metadataText, manifest, schema)).toThrow(
+        'schema-56 SQL fixture checksum mismatch',
+      );
+      expect(() => verifySchema56Fixture(sql, metadataText, manifest, `${schema}\nALTERED`)).toThrow(
+        'schema-56 canonical DDL checksum mismatch',
+      );
+    } finally {
+      scratch.close();
+    }
+  } finally {
+    db.close();
+  }
+  return metadata;
 }
 
 function boxOf(doc: Record<string, unknown>): { box: Box; secrets: Secrets } {
@@ -1659,8 +1629,7 @@ describe('restore.ts', () => {
   it('restores an exact-parent schema-56 API/PDS reused projection without historical proof, then proves a new post-upgrade SENT', async () => {
     const world = await buildWorld();
     const parentDb = join(world.dir, 'schema-56-parent-producer.db');
-    produceSchema56FromParentArchive(parentDb);
-    const parent = JSON.parse(readFileSync(`${parentDb}.json`, 'utf8')) as {
+    const parent = loadSchema56Fixture(parentDb) as {
       apiId: string;
       reuseId: string;
       uri: string;
