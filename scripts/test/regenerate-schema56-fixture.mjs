@@ -78,7 +78,7 @@ try {
       sourceCommit: SOURCE,
       generationCommand: 'node --import tsx scripts/test/regenerate-schema56-fixture.mjs',
       fixtureFormat: 'sqlite3 .dump SQL plus JSON producer metadata; test runs only load these checked-in text outputs',
-      producerTest: 'scripts/test/fixtures/schema56-parent-producer.test.ts',
+      producerTest: 'scripts/test/fixtures/schema56-parent-producer.test.ts.txt',
       producerGeneration: 'Run once from the exact schema-56 source archive; CI replays the exported SQL and does not rerun old producer code.',
       schemaVersion: 56,
       canonicalMigration1To56DdlSha256: sha256(scratchDdl),
