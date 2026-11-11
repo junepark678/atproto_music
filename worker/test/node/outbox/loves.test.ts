@@ -15,10 +15,13 @@ import {
   recordPendingRemoval,
 } from '../../../src/do/ingest/live-pending-removals';
 import { applyRecordProof } from '../../../src/do/write/apply-record';
+import { disconnectLocalData } from '../../../src/do/write/suppression';
 import { settleRows } from '../../../src/forward/forward-outbox';
+import { dropLiveState } from '../../../src/forward/live-acceptance';
 import { reclaimLoveApiProofRows } from '../../../src/forward/love-api-maintenance';
 import { materializeLoveApiRecipientDecisions } from '../../../src/forward/love-api-materializer';
 import { bumpLoveApiIntentEpoch, prepareLoveApiRecipientHandoff } from '../../../src/forward/love-api-recipients';
+import { runLoveApiMaintenance } from '../../../src/forward/love-api-scheduler';
 import { enqueueForwards } from '../../../src/outbox/forward-enqueue';
 import { enqueueLove, enqueueUnlove } from '../../../src/outbox/love-ops';
 import { cancelUnsent } from '../../../src/outbox/operations';
@@ -271,6 +274,51 @@ it('bumps the durable alias epoch for API love and unlove intents but not import
   });
 });
 
+it('accepts the last safe API intent epoch and rolls back the overflowing API enqueue', async () => {
+  await withHarness(async (h) => {
+    h.seedUser(h.alice);
+    h.db.run('INSERT INTO love_api_intent_epochs(did,epoch) VALUES(?,?)', h.alice, Number.MAX_SAFE_INTEGER - 1);
+    const lastSafe = await enqueueLove(h.m, {
+      did: h.alice,
+      input: { artist: 'Epoch boundary', track: 'Last safe successor' },
+      origin: 'web',
+    });
+    if (!lastSafe.ok) throw new Error(`last safe API epoch refused: ${lastSafe.reason.code}`);
+    expect(h.db.one('SELECT epoch FROM love_api_intent_epochs WHERE did=?', h.alice)).toEqual({
+      epoch: Number.MAX_SAFE_INTEGER,
+    });
+    const before = {
+      operations: h.db.all('SELECT id,kind,state,send_state FROM operations ORDER BY id'),
+      admissions: h.db.all('SELECT did,identity_key,path,source_service FROM forward_admissions ORDER BY identity_key'),
+      intents: h.db.all(
+        'SELECT did,love_key,intent,operation_id,recording_mbid FROM linked_love_intents ORDER BY love_key',
+      ),
+      outbox: h.db.all(
+        'SELECT link_id,generation,kind,dedupe_key FROM forward_outbox ORDER BY link_id,kind,dedupe_key',
+      ),
+      epoch: h.db.one('SELECT epoch FROM love_api_intent_epochs WHERE did=?', h.alice),
+    };
+    await expect(
+      enqueueLove(h.m, {
+        did: h.alice,
+        input: { artist: 'Epoch boundary', track: 'Overflow attempt' },
+        origin: 'web',
+      }),
+    ).rejects.toThrow(RangeError);
+    expect({
+      operations: h.db.all('SELECT id,kind,state,send_state FROM operations ORDER BY id'),
+      admissions: h.db.all('SELECT did,identity_key,path,source_service FROM forward_admissions ORDER BY identity_key'),
+      intents: h.db.all(
+        'SELECT did,love_key,intent,operation_id,recording_mbid FROM linked_love_intents ORDER BY love_key',
+      ),
+      outbox: h.db.all(
+        'SELECT link_id,generation,kind,dedupe_key FROM forward_outbox ORDER BY link_id,kind,dedupe_key',
+      ),
+      epoch: h.db.one('SELECT epoch FROM love_api_intent_epochs WHERE did=?', h.alice),
+    }).toEqual(before);
+  });
+});
+
 /** Applies a fake-PDS commit through the production record-proof verifier and projector. */
 async function projectLove(h: Harness, rkey: string, live = false) {
   const car = await h.kit.repos.Alice.getRecordCar(LOVE, rkey);
@@ -290,6 +338,294 @@ async function projectLove(h: Harness, rkey: string, live = false) {
     }),
   );
 }
+
+it('rolls back reused API binding and member allocation when the real love executor faults after allocation', async () => {
+  await withHarness(async (h) => {
+    h.seedUser(h.alice);
+    const projectionRkey = '3kbindfaultafter';
+    await h.kit.externalPut('Alice', LOVE, projectionRkey, love('Executor rollback', 'Allocated member'));
+    expect((await projectLove(h, projectionRkey)).outcome).toBe('applied');
+    const linkId = h.link(h.alice, 'lastfm');
+    const admitted = await enqueueLove(h.m, {
+      did: h.alice,
+      input: { artist: 'Executor rollback', track: 'Allocated member' },
+      origin: 'web',
+    });
+    if (!admitted.ok) throw new Error(`API enqueue refused: ${admitted.reason.code}`);
+
+    const tables = [
+      'forward_admissions',
+      'loves',
+      'love_incarnations',
+      'love_delete_bridges',
+      'love_import_bridges',
+      'love_api_bindings',
+      'love_api_recipients',
+      'love_api_recipient_members',
+      'love_api_proof_state',
+      'love_api_intent_epochs',
+      'forward_outbox',
+    ];
+    const snapshot = () =>
+      Object.fromEntries(tables.map((table) => [table, h.db.all(`SELECT * FROM ${table} ORDER BY rowid`)]));
+    const before = snapshot();
+    let reachedAfterAllocation = false;
+    const faultedDb: Db = {
+      all<T>(sql: string, ...params: SqlParam[]): T[] {
+        return h.db.all<T>(sql, ...params);
+      },
+      one<T>(sql: string, ...params: SqlParam[]): T | null {
+        return h.db.one<T>(sql, ...params);
+      },
+      run(sql: string, ...params: SqlParam[]) {
+        const result = h.db.run(sql, ...params);
+        if (/^\s*UPDATE love_api_recipients SET next_member_seq=/i.test(sql)) {
+          reachedAfterAllocation =
+            h.db.one(
+              'SELECT 1 FROM love_api_bindings WHERE did=? AND operation_id=?',
+              h.alice,
+              admitted.operation.id,
+            ) !== null &&
+            h.db.one(
+              'SELECT 1 FROM love_api_recipient_members WHERE link_id=? AND generation=1 AND operation_id=?',
+              linkId,
+              admitted.operation.id,
+            ) !== null;
+          throw new Error('injected after API binding and member allocation');
+        }
+        return result;
+      },
+      tx<T>(fn: () => T extends Promise<unknown> ? never : T): T {
+        return h.db.tx(fn);
+      },
+    };
+    h.m = {
+      ...h.m,
+      db: faultedDb,
+      identity: cachedIdentityResolver(faultedDb, { transport: h.m.transport, clock: h.m.clock }),
+    };
+
+    await h.run();
+    expect(reachedAfterAllocation).toBe(true);
+    expect(snapshot()).toEqual(before);
+    // The executor attempt is durably failed by the runner after its owned
+    // transaction rolls back. No PDS request occurred on this local reuse path.
+    expect(h.op(admitted.operation.id)).toMatchObject({
+      state: 'failed',
+      attempts: 1,
+      send_state: 'unknown',
+      last_error: 'outbox_internal_error',
+    });
+    expect(h.seen.filter((request) => request.url.includes('com.atproto.repo.createRecord'))).toHaveLength(0);
+    expect(
+      h.db.one('SELECT 1 FROM love_api_bindings WHERE did=? AND operation_id=?', h.alice, admitted.operation.id),
+    ).toBeNull();
+    expect(
+      h.db.one(
+        'SELECT 1 FROM love_api_recipient_members WHERE link_id=? AND generation=1 AND operation_id=?',
+        linkId,
+        admitted.operation.id,
+      ),
+    ).toBeNull();
+  });
+});
+
+it('drops live state and suppresses a DID through production callers without inventing an L2 unlove', async () => {
+  await withHarness(async (h) => {
+    h.seedUser(h.alice);
+    const linkId = h.link(h.alice, 'lastfm');
+    const accepted = await enqueueLove(h.m, {
+      did: h.alice,
+      input: { artist: 'Suppression preserves proof boundary', track: 'No absence proof' },
+      origin: 'web',
+    });
+    if (!accepted.ok) throw new Error(`API enqueue refused: ${accepted.reason.code}`);
+    await h.runUntilIdle();
+    expect(h.op(accepted.operation.id).state).toBe('succeeded');
+    const binding = h.db.one<{ uri: string; incarnation_key: string }>(
+      'SELECT uri,incarnation_key FROM love_api_bindings WHERE did=? AND operation_id=?',
+      h.alice,
+      accepted.operation.id,
+    );
+    expect(binding).not.toBeNull();
+    const before = {
+      bindings: h.db.all('SELECT * FROM love_api_bindings WHERE did=? ORDER BY binding_seq', h.alice),
+      recipients: h.db.all('SELECT * FROM love_api_recipients WHERE did=? ORDER BY aggregate_seq', h.alice),
+      members: h.db.all('SELECT * FROM love_api_recipient_members WHERE did=? ORDER BY member_seq', h.alice),
+      owners: h.db.all('SELECT * FROM love_api_window_owners WHERE did=? ORDER BY link_id,generation', h.alice),
+      facts: h.db.all('SELECT * FROM love_api_comparison_facts WHERE authorization_uri=?', binding!.uri),
+      decisions: h.db.all('SELECT * FROM love_api_unlove_decisions WHERE did=? ORDER BY due_at_ms', h.alice),
+    };
+    expect(before.recipients).toEqual([
+      expect.objectContaining({
+        did: h.alice,
+        uri: binding!.uri,
+        incarnation_key: binding!.incarnation_key,
+        link_id: linkId,
+        generation: 1,
+        state: 'present',
+      }),
+    ]);
+    expect(before.members).toEqual([
+      expect.objectContaining({ link_id: linkId, generation: 1, operation_id: accepted.operation.id }),
+    ]);
+
+    // This is the same narrow live-state cleanup invoked by verify-drain's
+    // dropped-proof path; it must not manufacture a verified absence.
+    h.db.tx(() => dropLiveState(h.db, binding!.uri));
+    h.db.tx(() =>
+      disconnectLocalData(h.db, h.alice, {
+        settingsUri: `at://${h.alice}/com.example.atmusic.settings/self`,
+        settingsRev: '4',
+        nowNs: fromMs(h.m.clock.nowMs()),
+      }),
+    );
+    expect(h.db.one('SELECT 1 FROM users WHERE did=?', h.alice)).toBeNull();
+    for (const limit of [0, -1, 1.5, 9])
+      expect(() =>
+        materializeLoveApiRecipientDecisions(h.db, h.m.clock.nowMs(), h.m.random, 'invalid-page', limit),
+      ).toThrow(RangeError);
+    expect(
+      materializeLoveApiRecipientDecisions(h.db, h.m.clock.nowMs(), h.m.random, 'suppressed-no-proof'),
+    ).toMatchObject({
+      visited: 0,
+      queued: 0,
+      deferred: 0,
+      replay: 0,
+      refused: 0,
+    });
+    const maintenance = runLoveApiMaintenance(h.db, h.m.clock.nowMs(), h.m.random, 'suppressed-no-proof');
+    expect(maintenance.visits).toBeLessThanOrEqual(16);
+    expect(maintenance.writes).toBeLessThanOrEqual(96);
+    expect(h.db.one("SELECT count(*) AS n FROM forward_outbox WHERE did=? AND kind='unlove'", h.alice)).toEqual({
+      n: 0,
+    });
+    expect(h.db.one('SELECT generation FROM linked_accounts WHERE id=?', linkId)).toEqual({ generation: 1 });
+    expect(h.db.all('SELECT * FROM love_api_bindings WHERE did=? ORDER BY binding_seq', h.alice)).toEqual(
+      before.bindings,
+    );
+    expect(h.db.all('SELECT * FROM love_api_recipients WHERE did=? ORDER BY aggregate_seq', h.alice)).toEqual(
+      before.recipients,
+    );
+    expect(h.db.all('SELECT * FROM love_api_recipient_members WHERE did=? ORDER BY member_seq', h.alice)).toEqual(
+      before.members,
+    );
+    expect(h.db.all('SELECT * FROM love_api_window_owners WHERE did=? ORDER BY link_id,generation', h.alice)).toEqual(
+      before.owners,
+    );
+    expect(h.db.all('SELECT * FROM love_api_comparison_facts WHERE authorization_uri=?', binding!.uri)).toEqual(
+      before.facts,
+    );
+    expect(h.db.all('SELECT * FROM love_api_unlove_decisions WHERE did=? ORDER BY due_at_ms', h.alice)).toEqual(
+      before.decisions,
+    );
+    expect(
+      h.db.all(
+        `SELECT m.link_id,m.generation,m.operation_id FROM love_api_recipient_members m
+         LEFT JOIN love_api_recipients r ON r.did=m.did AND r.uri=m.uri AND r.incarnation_key=m.incarnation_key
+           AND r.link_id=m.link_id AND r.generation=m.generation
+         WHERE r.did IS NULL`,
+      ),
+    ).toEqual([]);
+    expect(
+      h.db.all(
+        `SELECT d.did,d.uri,d.link_id,d.generation FROM love_api_unlove_decisions d
+         LEFT JOIN love_api_recipients r ON r.did=d.did AND r.uri=d.uri AND r.incarnation_key=d.incarnation_key
+           AND r.link_id=d.link_id AND r.generation=d.generation
+         LEFT JOIN love_api_comparison_facts f ON f.authorization_uri=d.authorization_uri
+           AND f.authorization_rev=d.authorization_rev
+         WHERE r.did IS NULL OR f.authorization_uri IS NULL`,
+      ),
+    ).toEqual([]);
+  });
+});
+
+it('advances the last safe real scheduler sweep pass and rolls back an unsafe successor', async () => {
+  await withHarness(async (h) => {
+    h.seedUser(h.alice);
+    h.link(h.alice, 'lastfm');
+    for (let index = 0; index < 5; index++) {
+      const accepted = await enqueueLove(h.m, {
+        did: h.alice,
+        input: { artist: `Sweep pass ${index}`, track: `Producer aggregate ${index}` },
+        origin: 'web',
+      });
+      if (!accepted.ok) throw new Error(`API enqueue refused: ${accepted.reason.code}`);
+      await h.runUntilIdle();
+      expect(h.op(accepted.operation.id).state).toBe('succeeded');
+    }
+    expect(h.db.all('SELECT aggregate_seq,state FROM love_api_recipients ORDER BY aggregate_seq')).toEqual(
+      Array.from({ length: 5 }, (_, index) => ({ aggregate_seq: index + 1, state: 'present' })),
+    );
+    // Preserve valid current recipient/member identities while arranging a
+    // sparse high integer frontier for the production scheduler's finite pass.
+    h.db.run(
+      `UPDATE love_api_recipients SET aggregate_seq=aggregate_seq+9007199254740985
+       WHERE did=?`,
+      h.alice,
+    );
+    h.db.run(
+      `UPDATE love_api_proof_state SET next_aggregate_seq=?,sweep_cursor=0,sweep_frontier=0,
+       sweep_passes=?,lane_turn=1 WHERE singleton=1`,
+      Number.MAX_SAFE_INTEGER,
+      Number.MAX_SAFE_INTEGER - 1,
+    );
+    expect(
+      h.db.all('SELECT aggregate_seq FROM love_api_recipients WHERE did=? ORDER BY aggregate_seq', h.alice),
+    ).toEqual(Array.from({ length: 5 }, (_, index) => ({ aggregate_seq: Number.MAX_SAFE_INTEGER - 5 + index })));
+
+    const lastSafePass = runLoveApiMaintenance(h.db, h.m.clock.nowMs(), h.m.random, 'sweep-safe-pass');
+    expect(lastSafePass.sweepUnits, JSON.stringify(lastSafePass)).toBe(4);
+    expect(
+      h.db.one('SELECT sweep_passes,sweep_cursor,sweep_frontier FROM love_api_proof_state WHERE singleton=1'),
+    ).toEqual({
+      sweep_passes: Number.MAX_SAFE_INTEGER,
+      sweep_cursor: Number.MAX_SAFE_INTEGER - 2,
+      sweep_frontier: Number.MAX_SAFE_INTEGER - 1,
+    });
+
+    const beforeUnsafeSuccessor = {
+      state: h.db.one('SELECT sweep_passes,sweep_cursor,sweep_frontier FROM love_api_proof_state WHERE singleton=1'),
+      recipients: h.db.all('SELECT * FROM love_api_recipients WHERE did=? ORDER BY aggregate_seq', h.alice),
+      members: h.db.all(
+        'SELECT * FROM love_api_recipient_members WHERE did=? ORDER BY member_seq,operation_id',
+        h.alice,
+      ),
+      unlove: h.db.all("SELECT * FROM forward_outbox WHERE did=? AND kind='unlove'", h.alice),
+    };
+    h.db.run('UPDATE love_api_proof_state SET lane_turn=1 WHERE singleton=1');
+    expect(() => runLoveApiMaintenance(h.db, h.m.clock.nowMs(), h.m.random, 'sweep-final-row')).toThrow(RangeError);
+    const afterFinalRow = h.db.one(
+      'SELECT sweep_passes,sweep_cursor,sweep_frontier FROM love_api_proof_state WHERE singleton=1',
+    );
+    expect(afterFinalRow).toEqual({
+      sweep_passes: Number.MAX_SAFE_INTEGER,
+      sweep_cursor: Number.MAX_SAFE_INTEGER - 1,
+      sweep_frontier: Number.MAX_SAFE_INTEGER - 1,
+    });
+    // Earlier bounded scheduler phases may commit the final frontier row; the
+    // next invocation must refuse its unsafe pass successor before any write.
+    h.db.run('UPDATE love_api_proof_state SET lane_turn=1 WHERE singleton=1');
+    const beforeRetry = h.db.one(
+      'SELECT sweep_passes,sweep_cursor,sweep_frontier FROM love_api_proof_state WHERE singleton=1',
+    );
+    expect(() => runLoveApiMaintenance(h.db, h.m.clock.nowMs(), h.m.random, 'sweep-unsafe-successor')).toThrow(
+      RangeError,
+    );
+    expect(
+      h.db.one('SELECT sweep_passes,sweep_cursor,sweep_frontier FROM love_api_proof_state WHERE singleton=1'),
+    ).toEqual(beforeRetry);
+    expect(h.db.all('SELECT * FROM love_api_recipients WHERE did=? ORDER BY aggregate_seq', h.alice)).toEqual(
+      beforeUnsafeSuccessor.recipients,
+    );
+    expect(
+      h.db.all('SELECT * FROM love_api_recipient_members WHERE did=? ORDER BY member_seq,operation_id', h.alice),
+    ).toEqual(beforeUnsafeSuccessor.members);
+    expect(h.db.all("SELECT * FROM forward_outbox WHERE did=? AND kind='unlove'", h.alice)).toEqual(
+      beforeUnsafeSuccessor.unlove,
+    );
+  });
+});
 
 it('a second love for the same (artist_key, track_key) succeeds without a new record; unlove deletes every matching listed love', async () => {
   await withHarness(async (h) => {

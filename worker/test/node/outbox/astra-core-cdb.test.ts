@@ -901,3 +901,178 @@ it('rolls back the first real recipient handoff when the second decision handoff
     );
   });
 });
+
+it('refuses one production handoff child while its materializer-batch sibling queues once', async () => {
+  await withHarness(async (h) => {
+    h.seedUser(h.alice);
+    const lastfm = h.link(h.alice, 'lastfm');
+    const records = [
+      { rkey: '3kmixedacklf', source: 'lastfm' as const, linkId: lastfm },
+      { rkey: '3kmixedacklf2', source: 'lastfm' as const, linkId: lastfm },
+    ];
+    const acceptedApiOperations: Array<{ uri: string; incarnationKey: string; operationId: string; rkey: string }> = [];
+    const acceptedChildren: Array<{ uri: string; incarnationKey: string; rev: string; operationId: string }> = [];
+    const absences: Array<{ uri: string; rkey: string; proof: Parameters<typeof applyRecordProof>[1] }> = [];
+
+    // Both children are produced through the API reuse executor and a real
+    // signed PDS absence. Their materializer candidates share one atomic
+    // production page; no handoff result is fabricated by the fixture.
+    for (const [index, record] of records.entries()) {
+      const input = { artist: `Mixed handoff ${record.source}`, track: `Sibling ${index}` };
+      const uri = `at://${h.alice}/${LOVE}/${record.rkey}`;
+      h.db.run(
+        `INSERT INTO forward_admissions(did,identity_key,path,source_service,created_at_ms,admission_seq)
+         VALUES(?,?,'import',?,?,?)`,
+        h.alice,
+        `love-uri:${h.alice}:${LOVE}:${record.rkey}`,
+        record.source,
+        h.m.clock.nowMs(),
+        100 + index,
+      );
+      await h.kit.externalPut('Alice', LOVE, record.rkey, {
+        $type: LOVE,
+        ...input,
+        createdAt: '2026-01-15T11:00:00Z',
+      });
+      expect((await projectLove(h, record.rkey)).outcome).toBe('applied');
+      const accepted = await enqueueLove(h.m, { did: h.alice, input, origin: 'web' });
+      if (!accepted.ok) throw new Error(`API reuse refused: ${accepted.reason.code}`);
+      await h.runUntilIdle();
+      expect(h.op(accepted.operation.id)).toMatchObject({ state: 'succeeded', result_uri: uri });
+      const binding = h.db.one<{ incarnation_key: string }>(
+        'SELECT incarnation_key FROM love_api_bindings WHERE did=? AND operation_id=?',
+        h.alice,
+        accepted.operation.id,
+      )!;
+      const loveEffect = h.db.one<{ id: string; generation: number }>(
+        "SELECT id,generation FROM forward_outbox WHERE did=? AND link_id=? AND kind='love' AND dedupe_key=?",
+        h.alice,
+        record.linkId,
+        accepted.operation.id,
+      );
+      expect(loveEffect).not.toBeNull();
+      settleRows(h.db, [loveEffect!.id], 'sent', h.m.clock.nowMs(), null, true, loveEffect!.generation);
+      acceptedApiOperations.push({
+        uri,
+        incarnationKey: binding.incarnation_key,
+        operationId: accepted.operation.id,
+        rkey: record.rkey,
+      });
+    }
+    // Apply both deletes to the signed repo before asking for their proof CARs;
+    // each CAR then carries the same current commit revision for the producer Tx.
+    for (const child of acceptedApiOperations) await h.kit.externalDelete('Alice', LOVE, child.rkey);
+    for (const child of acceptedApiOperations) {
+      const proof = await verifyRecordProof(await h.kit.repos.Alice.getRecordCar(LOVE, child.rkey), {
+        did: h.alice,
+        collection: LOVE,
+        rkey: child.rkey,
+        signingKey: h.kit.users.Alice.key.didKey,
+      });
+      if (proof.state !== 'absent') throw new Error('expected signed absence');
+      recordLiveEvidence(
+        h.db,
+        { uri: child.uri, did: h.alice, collection: LOVE, rkey: child.rkey, rev: proof.commit.rev, action: 'delete' },
+        h.m.clock.nowMs(),
+      );
+      absences.push({ uri: child.uri, rkey: child.rkey, proof });
+      acceptedChildren.push({ ...child, rev: proof.commit.rev });
+    }
+    // The real projector processes both signed record changes in one owning
+    // synchronous producer transaction; subsequent materialization is one page.
+    h.db.tx(() => {
+      const nowNs = fromMs(h.m.clock.nowMs());
+      for (const absence of absences) {
+        const options = authorizedLiveOptions(h.db, absence.proof, projectionRandom);
+        expect(
+          applyRecordProof(h.db, absence.proof, { ...options, prefix: 'com.example.atmusic', nowNs, receiptNs: nowNs })
+            .outcome,
+        ).toBe('absent');
+      }
+    });
+    expect(
+      h.db.all<{ link_id: string; uri: string; generation: number }>(
+        'SELECT link_id,uri,generation FROM love_api_unlove_decisions ORDER BY uri',
+      ),
+    ).toEqual([
+      { link_id: lastfm, uri: acceptedChildren[0]!.uri, generation: 1 },
+      { link_id: lastfm, uri: acceptedChildren[1]!.uri, generation: 1 },
+    ]);
+
+    // A durable envelope corruption is a real filtered refusal for one child;
+    // its sibling still traverses the handoff. Preparation detects this exact
+    // immutable-row mismatch before authority or effect writes.
+    h.db.run(
+      `UPDATE love_api_unlove_decisions SET payload_json='{}'
+       WHERE did=? AND uri=? AND incarnation_key=? AND link_id=? AND generation=1`,
+      h.alice,
+      acceptedChildren[0]!.uri,
+      acceptedChildren[0]!.incarnationKey,
+      lastfm,
+    );
+    const result = materializeLoveApiRecipientDecisions(h.db, h.m.clock.nowMs(), h.m.random, 'mixed-ack');
+    expect(result).toMatchObject({ visited: 2, queued: 1, deferred: 0, replay: 0, refused: 1 });
+    expect(
+      h.db.all<{ link_id: string; uri: string; state: string }>(
+        'SELECT link_id,uri,state FROM love_api_recipients WHERE did=? ORDER BY uri,link_id',
+        h.alice,
+      ),
+    ).toEqual([
+      { link_id: lastfm, uri: acceptedChildren[0]!.uri, state: 'released' },
+      { link_id: lastfm, uri: acceptedChildren[1]!.uri, state: 'released' },
+    ]);
+    expect(
+      h.db.all<{ link_id: string; generation: number; dedupe_key: string; authorization_uri: string }>(
+        "SELECT link_id,generation,dedupe_key,authorization_uri FROM forward_outbox WHERE did=? AND kind='unlove' ORDER BY link_id",
+        h.alice,
+      ),
+    ).toEqual([
+      {
+        link_id: lastfm,
+        generation: 1,
+        dedupe_key: `love-delete:${acceptedChildren[1]!.incarnationKey}:rev:${acceptedChildren[1]!.rev}:api-recipient`,
+        authorization_uri: acceptedChildren[1]!.uri,
+      },
+    ]);
+    expect(
+      h.db.one(
+        "SELECT 1 FROM forward_outbox WHERE authorization_uri=? AND kind='unlove' AND dedupe_key LIKE '%:api-recipient'",
+        acceptedChildren[0]!.uri,
+      ),
+    ).toBeNull();
+    expect(
+      h.db.one(
+        'SELECT 1 FROM forward_deferred_love_authorities WHERE authorization_uri=? AND authorization_rev=?',
+        acceptedChildren[0]!.uri,
+        acceptedChildren[0]!.rev,
+      ),
+    ).toBeNull();
+    expect(
+      h.db.one(
+        'SELECT 1 FROM forward_deferred_love_witnesses WHERE link_id=? AND generation=1 AND operation_id=?',
+        lastfm,
+        `love-delete:${acceptedChildren[0]!.incarnationKey}:rev:${acceptedChildren[0]!.rev}:api-recipient`,
+      ),
+    ).toBeNull();
+    expect(
+      h.db.one(
+        'SELECT action,cid,state FROM forward_deferred_love_authorities WHERE authorization_uri=? AND authorization_rev=?',
+        acceptedChildren[1]!.uri,
+        acceptedChildren[1]!.rev,
+      ),
+    ).toEqual({ action: 'delete', cid: '', state: 'active' });
+    expect(
+      h.db.one(
+        'SELECT authorization_uri,authorization_rev,action,cid,horizon_ms,conflicted FROM love_api_comparison_facts WHERE authorization_uri=? AND authorization_rev=?',
+        acceptedChildren[0]!.uri,
+        acceptedChildren[0]!.rev,
+      ),
+    ).toMatchObject({
+      authorization_uri: acceptedChildren[0]!.uri,
+      authorization_rev: acceptedChildren[0]!.rev,
+      action: 'delete',
+      cid: '',
+      conflicted: 0,
+    });
+  });
+});
