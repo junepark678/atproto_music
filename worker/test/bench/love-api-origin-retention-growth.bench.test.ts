@@ -25,18 +25,25 @@ it('bounds actual binding dependency lookup across matching released history', a
     results: Array<{
       history: number;
       currentDependent: { steps: number; rows: number };
+      completedSibling: { steps: number; rows: number };
       releasedOnly: { steps: number; rows: number };
       oldPrefixNegativeControl: { steps: number };
     }>;
   };
   expect(result.results.map((entry) => entry.history)).toEqual([100, 1000, 10000]);
   expect(new Set(result.results.map((entry) => entry.currentDependent.steps)).size).toBe(1);
+  expect(new Set(result.results.map((entry) => entry.completedSibling.steps)).size).toBe(1);
   expect(new Set(result.results.map((entry) => entry.releasedOnly.steps)).size).toBe(1);
+  for (const entry of result.results) {
+    expect(entry.currentDependent.rows).toBe(1);
+    expect(entry.completedSibling.rows).toBe(1);
+    expect(entry.releasedOnly.rows).toBe(0);
+  }
   expect(result.results[2]!.oldPrefixNegativeControl.steps).toBeGreaterThan(
     result.results[0]!.oldPrefixNegativeControl.steps * 50,
   );
   await withMigratedDb((db) => {
-    const plan = db.all(`EXPLAIN QUERY PLAN ${usedSql}`, 'did', 'uri', 'inc', 'did', 'needle', 'needle') as Array<{
+    const plan = db.all(`EXPLAIN QUERY PLAN ${usedSql}`, 'did', 'uri', 'inc', 'did', 'needle') as Array<{
       detail: string;
     }>;
     expect(plan.length).toBeGreaterThan(0);
