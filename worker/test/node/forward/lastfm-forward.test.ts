@@ -1071,7 +1071,7 @@ describe('Last.fm forwarding', () => {
     expect(statesOf(w.rows(ALICE))).toEqual(['sent', 'sent', 'sent']);
 
     // Code 26: our key is suspended. Every Last.fm link pauses; ListenBrainz does not.
-    w.linkLastfm(BOB, 'bob_fm');
+    const bob = w.linkLastfm(BOB, 'bob_fm');
     w.lb.addToken('bob_lb', 'bob-lb-token');
     saveLink(
       { db: w.app.db, clock: w.clock, random: w.rt.random, box: w.rt.box },
@@ -1086,11 +1086,16 @@ describe('Last.fm forwarding', () => {
     const status = await w.app.composed.core.adminStatus();
     expect(status.counters).toContainEqual({ name: LASTFM_KEY_REJECTED, label: '', value: rejectedAt });
     expect(w.lb.submissions.map((s) => s.user)).toEqual(['bob_lb']);
+    const rejectedRequests = w.lastfm.calls.filter({ nsid: 'track.scrobble' }).filter((c) => c.fault === 'code:26');
+    expect(rejectedRequests).toHaveLength(1);
+    const rejectedSession = rejectedRequests[0]!.params.sk?.[0];
+    expect([sk2, bob.sk]).toContain(rejectedSession);
+    // The pause is global; the link error belongs to the request that received it.
+    const rejectedLinkId = rejectedSession === sk2 ? alice.id : bob.id;
     expect(
       w.app.db.one(
-        'SELECT last_error,last_failure_ms,consecutive_failures FROM linked_accounts WHERE did=? AND service=?',
-        ALICE,
-        'lastfm',
+        'SELECT last_error,last_failure_ms,consecutive_failures FROM linked_accounts WHERE id=?',
+        rejectedLinkId,
       ),
     ).toEqual({ last_error: 'lastfm_key_rejected', last_failure_ms: rejectedAt, consecutive_failures: 1 });
 
@@ -1107,8 +1112,8 @@ describe('Last.fm forwarding', () => {
     expect(pausedRows.map((r) => r.did).sort()).toEqual([ALICE, BOB].sort());
     expect(statesOf(pausedRows)).toEqual(['queued', 'queued']);
     expect(pausedRows.map((r) => [r.did, r.attempts]).sort()).toEqual([
-      [ALICE, 1],
-      [BOB, 0],
+      [ALICE, rejectedLinkId === alice.id ? 1 : 0],
+      [BOB, rejectedLinkId === bob.id ? 1 : 0],
     ]);
 
     // One probe an hour after the rejection; its success lifts the pause.
