@@ -466,17 +466,20 @@ it.each([true, false])(
   },
 );
 
-it.each([1, 2])(
-  'sends one actual unlove per service after %s API operations reuse one snapshot incarnation',
-  async (count) => {
-    const sentBeforeAbsence = true;
+it.each([
+  { count: 1, sentBeforeAbsence: true },
+  { count: 2, sentBeforeAbsence: true },
+  { count: 2, sentBeforeAbsence: false },
+])(
+  'sends one actual unlove per service after %o API operations reuse one snapshot incarnation',
+  async ({ count, sentBeforeAbsence }) => {
     const w = await world();
     const linkId = w.link();
     const sk = w.lastfm.addSession('alice_fm');
-    saveLink(
+    const lastfmLinkId = saveLink(
       { db: w.app.db, clock: w.clock, random: w.rt.random, box: w.rt.box },
       { did: ALICE, service: 'lastfm', remoteUser: 'alice_fm', credential: sk },
-    );
+    ).link.id;
     let fmUnloves = 0;
     const oldFetch = w.lastfm.fetch.bind(w.lastfm);
     w.lastfm.fetch = async (req: Request) => {
@@ -522,6 +525,14 @@ it.each([1, 2])(
       ALICE,
     );
     const snapshotKey = '3ksnapshotprobe';
+    if (!sentBeforeAbsence)
+      w.app.db.run(
+        `INSERT INTO forward_admissions(did,identity_key,path,source_service,created_at_ms,admission_seq)
+         VALUES(?,?,'import','lastfm',?,101)`,
+        ALICE,
+        `love-uri:${ALICE}:com.example.atmusic.love:${snapshotKey}`,
+        w.clock.nowMs(),
+      );
     await repo.put('com.example.atmusic.love', snapshotKey, {
       $type: 'com.example.atmusic.love',
       artist,
@@ -549,7 +560,7 @@ it.each([1, 2])(
         'SELECT path FROM love_incarnations WHERE uri=?',
         `at://${ALICE}/com.example.atmusic.love/${snapshotKey}`,
       ),
-    ).toEqual({ path: 'snapshot' });
+    ).toEqual({ path: sentBeforeAbsence ? 'snapshot' : 'import' });
     const created = await enqueueLove(tracedDeps, {
       did: ALICE,
       input: { artist, track, recordingMbid: MBID },
@@ -571,6 +582,7 @@ it.each([1, 2])(
       created.operation.id,
     );
     expect(binding).not.toBeNull();
+    const apiOperationIds = [created.operation.id];
     expect(
       w.app.db.one('SELECT sent_operation_id FROM love_api_recipients WHERE link_id=? AND uri=?', linkId, binding!.uri),
     ).toEqual({ sent_operation_id: sentBeforeAbsence ? created.operation.id : null });
@@ -603,6 +615,7 @@ it.each([1, 2])(
         origin: 'lastfm',
       });
       if (!second.ok) throw new Error(JSON.stringify(second.reason));
+      apiOperationIds.push(second.operation.id);
       await runOutbox(outboxDeps, w.clock.nowMs());
       expect(
         w.app.db.one('SELECT uri,incarnation_key FROM love_api_bindings WHERE operation_id=?', second.operation.id),
@@ -617,14 +630,16 @@ it.each([1, 2])(
         { operation_id: created.operation.id, api_origin: 'web' },
         { operation_id: second.operation.id, api_origin: 'lastfm' },
       ]);
-      for (let i = 0; i < 4; i++) {
-        w.clock.advance(SECOND);
-        await w.run();
+      if (sentBeforeAbsence) {
+        for (let i = 0; i < 4; i++) {
+          w.clock.advance(SECOND);
+          await w.run();
+        }
+        expect(
+          w.app.db.all("SELECT state FROM forward_outbox WHERE kind='love' AND dedupe_key=?", second.operation.id),
+        ).toEqual([{ state: 'sent' }, { state: 'sent' }]);
       }
-      expect(
-        w.app.db.all("SELECT state FROM forward_outbox WHERE kind='love' AND dedupe_key=?", second.operation.id),
-      ).toEqual([{ state: 'sent' }, { state: 'sent' }]);
-      expect(w.app.db.one('SELECT 1 FROM love_api_recipient_members')).toBeNull();
+      expect(w.app.db.all('SELECT 1 FROM love_api_recipient_members')).toHaveLength(sentBeforeAbsence ? 0 : count * 2);
     }
     await repo.delete('com.example.atmusic.love', rkey);
     const absentCar = await repo.getRecordCar('com.example.atmusic.love', rkey);
@@ -666,8 +681,41 @@ it.each([1, 2])(
       w.rt.random,
       'paused-world',
     );
-    expect(materialized.queued).toBe(2);
-    expect(materialized.awaiting).toBe(0);
+    if (!sentBeforeAbsence) {
+      expect(materialized).toMatchObject({ queued: 0, awaiting: 1 });
+      expect(
+        w.app.db.one<{ state: string; sent_operation_id: string | null }>(
+          'SELECT state,sent_operation_id FROM love_api_recipients WHERE link_id=? AND uri=?',
+          lastfmLinkId,
+          binding!.uri,
+        ),
+      ).toEqual({ state: 'sealed', sent_operation_id: null });
+      for (let i = 0; i < 8; i++) {
+        w.clock.advance(SECOND);
+        await w.run();
+      }
+      expect(w.app.db.all("SELECT state FROM forward_outbox WHERE kind='love' ORDER BY link_id,dedupe_key")).toEqual(
+        Array.from({ length: count * 2 }, () => ({ state: 'sent' })),
+      );
+      const recipientAfterSent = w.app.db.one<{ state: string; sent_operation_id: string | null }>(
+        'SELECT state,sent_operation_id FROM love_api_recipients WHERE link_id=? AND uri=?',
+        lastfmLinkId,
+        binding!.uri,
+      );
+      expect(recipientAfterSent?.sent_operation_id).toBeTruthy();
+      expect(apiOperationIds).toContain(recipientAfterSent?.sent_operation_id);
+      const resumed = materializeLoveApiRecipientDecisions(
+        wholeDecisionTrace.db,
+        w.clock.nowMs(),
+        w.rt.random,
+        'late-sent-resume',
+      );
+      expect(resumed.queued).toBe(1);
+      expect(materialized.awaiting).toBe(1);
+    } else {
+      expect(materialized.queued).toBe(2);
+      expect(materialized.awaiting).toBe(0);
+    }
     for (let i = 0; i < 8; i++) {
       w.clock.advance(SECOND);
       await w.run();
