@@ -33,7 +33,7 @@ async function projectLove(h: Harness, rkey: string, live = false) {
   );
 }
 
-it.each([false, true])('audit late SENT producer order early=%s', async (early) => {
+it.each([false, true])('keeps broad-covered producer order single-effect early=%s', async (early) => {
   await withHarness(async (h) => {
     h.seedUser(h.alice);
     h.link(h.alice, 'lastfm');
@@ -77,20 +77,42 @@ it.each([false, true])('audit late SENT producer order early=%s', async (early) 
       `at://${h.alice}/${LOVE}/${op.rkey}`,
     );
     expect(pending).not.toBeNull();
+    const incarnationKey = h.db.one<{ incarnation_key: string }>(
+      'SELECT incarnation_key FROM love_incarnations WHERE uri=?',
+      `at://${h.alice}/${LOVE}/${op.rkey}`,
+    )!.incarnation_key;
+    const broadOperationId = `love-delete:${incarnationKey}:rev:${proof.commit.rev}`;
+    expect(h.db.one('SELECT state FROM love_api_recipients WHERE uri=?', `at://${h.alice}/${LOVE}/${op.rkey}`)).toEqual(
+      {
+        state: 'released',
+      },
+    );
     expect(
       h.db.one('SELECT 1 FROM love_api_unlove_decisions WHERE uri=?', `at://${h.alice}/${LOVE}/${op.rkey}`),
-    ).not.toBeNull();
+    ).toBeNull();
+    expect(
+      h.db.one<{ kind: string; dedupe_key: string; state: string }>(
+        "SELECT kind,dedupe_key,state FROM forward_outbox WHERE kind='unlove' AND authorization_uri=?",
+        `at://${h.alice}/${LOVE}/${op.rkey}`,
+      ),
+    ).toEqual({ kind: 'unlove', dedupe_key: broadOperationId, state: 'queued' });
     if (!early) expect(pending!.sent_operation_id).toBeNull();
     if (!early) {
       expect(materializeLoveApiRecipientDecisions(h.db, h.m.clock.nowMs(), h.m.random, 'audit')).toMatchObject({
-        awaiting: 1,
+        visited: 0,
+        awaiting: 0,
         queued: 0,
         deferred: 0,
       });
-      expect(h.db.one("SELECT 1 FROM forward_outbox WHERE kind='unlove' AND dedupe_key=?", op.id)).toBeNull();
     }
     if (!early) settleRows(h.db, [effect.id], 'sent', h.m.clock.nowMs(), null, true, effect.generation);
     const result = materializeLoveApiRecipientDecisions(h.db, h.m.clock.nowMs(), h.m.random, 'audit');
-    expect(result.queued).toBe(1);
+    expect(result).toMatchObject({ visited: 0, queued: 0, deferred: 0, replay: 0 });
+    expect(
+      h.db.one(
+        "SELECT count(*) AS n FROM forward_outbox WHERE kind='unlove' AND authorization_uri=?",
+        `at://${h.alice}/${LOVE}/${op.rkey}`,
+      ),
+    ).toEqual({ n: 1 });
   });
 });

@@ -898,6 +898,140 @@ it('rolls back a production reclaim page when its actual row scan exceeds reserv
       ),
     ).toEqual({ cursor: 0, frontier: 0 });
   }));
+
+it('rejects an actual seventeenth invocation visit after earlier scheduler phases committed', async () =>
+  withMigratedDb((db) => {
+    seed(db, 8);
+    db.run(
+      `INSERT INTO live_pending_removal_events(uri,rev,action,cid,created_at_ms,expires_at_ms)
+       SELECT authorization_uri,authorization_rev,action,cid,1,10000 FROM love_api_comparison_facts`,
+    );
+    for (let index = 1; index <= 8; index++)
+      db.run(
+        `INSERT INTO love_api_bindings(did,operation_id,api_origin,uri,incarnation_key,binding_seq,created_at_ms)
+         VALUES(?,?,'web',?,?,?,1)`,
+        DID,
+        `visit-overrun-orphan-${index}`,
+        `at://${DID}/com.example.atmusic.love/visit-overrun-${index}`,
+        `visit-overrun-inc-${index}`,
+        8 + index,
+      );
+    runLoveApiMaintenance(db, 100, seededRandom(5), 'invocation-overrun');
+    runLoveApiMaintenance(db, 101, seededRandom(5), 'invocation-overrun');
+    expect(db.one<{ lane_turn: number }>('SELECT lane_turn FROM love_api_proof_state WHERE singleton=1')).toEqual({
+      lane_turn: 2,
+    });
+
+    type State = {
+      lane_turn: number;
+      binding_cursor: number;
+      binding_frontier: number;
+      fact_cursor: number;
+      fact_frontier: number;
+      reclaim_kind: string;
+    };
+    const state = () =>
+      db.one<State>(
+        `SELECT lane_turn,binding_cursor,binding_frontier,fact_cursor,fact_frontier,reclaim_kind
+       FROM love_api_proof_state WHERE singleton=1`,
+      )!;
+    const snapshot = () => ({
+      state: state(),
+      recipients: db.all(
+        'SELECT did,uri,incarnation_key,link_id,generation,state FROM love_api_recipients ORDER BY aggregate_seq',
+      ),
+      decisions: db.all(
+        'SELECT did,uri,incarnation_key,link_id,generation,expires_at_ms FROM love_api_unlove_decisions ORDER BY uri',
+      ),
+      outbox: db.all('SELECT id,link_id,generation,kind,dedupe_key,state FROM forward_outbox ORDER BY id'),
+      coverage: db.all("SELECT name,label,value FROM counters WHERE name='link_coverage' ORDER BY label"),
+    });
+    type Snapshot = ReturnType<typeof snapshot>;
+    const txFrames: Array<{ before: Snapshot; committed: boolean; changes: number }> = [];
+    let activeFrame: (typeof txFrames)[number] | undefined;
+    let overrunFrame: (typeof txFrames)[number] | undefined;
+    let nested = 0;
+    let injected = false;
+    let attemptedRows = 0;
+    let visitRowsSeen = 0;
+    let attemptedVisits = 0;
+    const visitSelect = (sql: string) =>
+      sql.includes('SELECT did,operation_id,uri,incarnation_key,binding_seq FROM love_api_bindings') ||
+      sql.includes('SELECT authorization_uri,authorization_rev,fact_seq,horizon_ms FROM love_api_comparison_facts') ||
+      sql.includes('FROM love_api_unlove_decisions INDEXED BY love_api_unlove_decisions_due');
+    const overrun: Db = {
+      all: <T>(sql: string, ...params: SqlParam[]) => {
+        if (
+          !injected &&
+          sql.includes('SELECT did,operation_id,uri,incarnation_key,binding_seq FROM love_api_bindings') &&
+          params.at(-1) === 6
+        ) {
+          const rows = db.all<T>(sql, params[0] as SqlParam, params[1] as SqlParam, 7);
+          if (rows.length === 7) {
+            injected = true;
+            attemptedRows = rows.length;
+            attemptedVisits = visitRowsSeen + rows.length;
+            overrunFrame = activeFrame;
+            return rows;
+          }
+        }
+        const rows = db.all<T>(sql, ...params);
+        if (visitSelect(sql)) visitRowsSeen += rows.length;
+        return rows;
+      },
+      one: <T>(sql: string, ...params: SqlParam[]) => {
+        const row = db.one<T>(sql, ...params);
+        if (
+          sql.includes('SELECT did,uri,incarnation_key,link_id,generation,aggregate_seq,state FROM love_api_recipients')
+        )
+          visitRowsSeen += row === null ? 0 : 1;
+        return row;
+      },
+      run: (sql: string, ...params: SqlParam[]) => db.run(sql, ...params),
+      tx: <T>(fn: () => T extends Promise<unknown> ? never : T) => {
+        const outer = nested === 0;
+        const frame = outer ? { before: snapshot(), committed: false, changes: 0 } : undefined;
+        const totalBefore = outer ? total(db) : 0;
+        if (outer) {
+          activeFrame = frame;
+          txFrames.push(frame!);
+        }
+        nested++;
+        try {
+          const result = db.tx(fn);
+          if (outer) frame!.committed = true;
+          return result;
+        } finally {
+          nested--;
+          if (outer) {
+            frame!.changes = total(db) - totalBefore;
+            activeFrame = undefined;
+          }
+        }
+      },
+    };
+    const beforeInvocation = snapshot();
+    expect(() => runLoveApiMaintenance(overrun, 102, seededRandom(5), 'invocation-overrun')).toThrow(
+      /L2 RECLAIM visit bound exceeded: 7\/6/,
+    );
+    expect(injected).toBe(true);
+    expect(attemptedRows).toBe(7);
+    expect(attemptedVisits).toBe(17);
+    expect(overrunFrame).toBeDefined();
+    expect(activeFrame).toBeUndefined();
+    expect(txFrames.some((frame) => frame.committed && frame.changes > 0)).toBe(true);
+    expect(txFrames.at(-1)?.committed).toBe(false);
+    expect(state()).toEqual(overrunFrame!.before.state);
+    expect(snapshot()).toEqual(overrunFrame!.before);
+    expect(snapshot()).not.toEqual(beforeInvocation);
+    expect(db.one<{ lane_turn: number }>('SELECT lane_turn FROM love_api_proof_state WHERE singleton=1')).toEqual({
+      lane_turn: 2,
+    });
+    // The committed phases in this invocation perform ten visits. The last
+    // reclaim transaction reserves six more but the injected seventh row would
+    // make17. Its owned transaction rolls back; earlier phase commits remain.
+    expect(txFrames.filter((frame) => frame.committed).length).toBeGreaterThanOrEqual(3);
+  }));
 it('expires pending decision before awaiting its member', async () =>
   withMigratedDb((db) => {
     seed(db, 1, 1);

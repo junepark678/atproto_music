@@ -614,7 +614,10 @@ describe('worker/test/harness', () => {
   it('the migration ledger is ordered across the N/M, M4, S1, S2, S3 and S4 stack', async () => {
     const versions = MIGRATIONS.map((m) => m.version);
     expect(versions.slice(0, 14)).toEqual(Array.from({ length: 14 }, (_, i) => i + 1));
-    expect(versions.slice(-24)).toEqual(Array.from({ length: 24 }, (_, i) => i + 33));
+    // Keep the historically accepted 1–56 ledger explicit; migration 57 is
+    // additive and must remain the single current tail entry.
+    expect(versions.slice(0, 56)).toEqual(Array.from({ length: 56 }, (_, i) => i + 1));
+    expect(versions.slice(-1)).toEqual([57]);
     expect(versions.every((version, index) => index === 0 || version > (versions[index - 1] ?? 0))).toBe(true);
     expect(SCHEMA_VERSION).toBe(MIGRATIONS[MIGRATIONS.length - 1]?.version);
     expect(MIGRATIONS.length).toBeGreaterThanOrEqual(2);
@@ -701,6 +704,43 @@ describe('worker/test/harness', () => {
       db.run(
         `INSERT INTO live_pending_removal_events(uri,rev,action,cid,created_at_ms,expires_at_ms)
          VALUES('at://did:plc:seed/com.example.atmusic.scrobble/live','r2','delete','',0,9999999999999)`,
+      );
+      db.run(
+        `INSERT INTO live_pending_removals(uri,member_uri,removed_cid,kind,window_lo,window_hi,replaced_by_cid,identity_key,listened_at,artist_key,track_key,artist,track,recording_mbid,love_source_service,love_import_sources,authorized_rev,created_at_ms,expires_at_ms)
+         VALUES('at://did:plc:seed/com.example.atmusic.love/api','at://did:plc:seed/com.example.atmusic.scrobble/live','removed-cid','love','r1','r2','','love:key',1,'artist-key','track-key','Artist','Track',NULL,NULL,NULL,'seed-rev',0,9999999999999)`,
+      );
+      db.run(
+        `INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,created_at_ms,updated_at_ms)
+         VALUES('l2','did:plc:seed','lastfm','seed',?, 'k2',${NOW},${NOW})`,
+        blob(15, 8),
+      );
+      db.run(
+        `INSERT INTO love_api_bindings(did,operation_id,api_origin,uri,incarnation_key,binding_seq,created_at_ms)
+         VALUES('did:plc:seed','seed-api-op','web','at://did:plc:seed/com.example.atmusic.love/api','seed-inc',1,0)`,
+      );
+      db.run(
+        `INSERT INTO love_api_recipients(did,uri,incarnation_key,link_id,generation,aggregate_seq,state,sent_operation_id,next_member_seq,validate_after_seq,created_at_ms,updated_at_ms)
+         VALUES('did:plc:seed','at://did:plc:seed/com.example.atmusic.love/api','seed-inc','l2',1,1,'sealed','seed-api-op',2,1,0,0)`,
+      );
+      db.run(
+        `INSERT INTO love_api_recipient_members(link_id,generation,operation_id,did,uri,incarnation_key,member_seq,created_at_ms)
+         VALUES('l2',1,'seed-api-op','did:plc:seed','at://did:plc:seed/com.example.atmusic.love/api','seed-inc',1,0)`,
+      );
+      db.run(
+        `INSERT INTO love_api_comparison_facts(authorization_uri,authorization_rev,fact_seq,action,cid,horizon_ms,conflicted,created_at_ms)
+         VALUES('at://did:plc:seed/com.example.atmusic.love/api','seed-rev',1,'delete','',${NOW + DAY},0,0)`,
+      );
+      db.run(
+        `INSERT INTO love_api_window_owners(uri,member_uri,removed_cid,window_lo,window_hi,replaced_by_cid,did,incarnation_key,link_id,generation,created_at_ms)
+         VALUES('at://did:plc:seed/com.example.atmusic.love/api','at://did:plc:seed/com.example.atmusic.scrobble/live','removed-cid','r1','r2','','did:plc:seed','seed-inc','l2',1,0)`,
+      );
+      db.run(
+        `INSERT INTO love_api_unlove_decisions(did,uri,incarnation_key,link_id,generation,artist,track,artist_key,track_key,recording_mbid,payload_json,love_source_service,love_import_sources,authorization_uri,authorization_rev,fact_action,fact_cid,expires_at_ms,due_at_ms,scan_session,alias_epoch,alias_cursor,created_at_ms)
+         VALUES('did:plc:seed','at://did:plc:seed/com.example.atmusic.love/api','seed-inc','l2',1,'Artist','Track','artist','track',NULL,'{}',NULL,NULL,'at://did:plc:seed/com.example.atmusic.love/api','seed-rev','delete','',${NOW + DAY},${NOW},NULL,NULL,NULL,0)`,
+      );
+      db.run("INSERT INTO love_api_intent_epochs(did,epoch) VALUES('did:plc:seed',1)");
+      db.run(
+        'INSERT INTO love_api_proof_state(singleton,lane_turn,next_binding_seq,next_aggregate_seq,next_fact_seq,updated_at_ms) VALUES(1,1,2,2,2,0)',
       );
       for (const [table, rows] of Object.entries(SEED_ROWS)) for (const row of rows) insertRow(db, table, row);
       db.run(

@@ -1108,6 +1108,21 @@ it('delayed signed absence seals the exact pending API member and waits for its 
       kind: 'unlove',
       state: 'queued',
     });
+    expect(
+      h.db.one<{ dedupe_key: string; state: string }>(
+        "SELECT dedupe_key,state FROM forward_outbox WHERE kind='unlove' AND authorization_uri=?",
+        uri,
+      ),
+    ).toEqual({
+      dedupe_key: `love-delete:${incarnation.incarnation_key}:rev:${absentProof.commit.rev}:api-recipient`,
+      state: 'queued',
+    });
+    expect(
+      h.db.one(
+        "SELECT 1 FROM forward_outbox WHERE kind='unlove' AND dedupe_key=?",
+        `love-delete:${incarnation.incarnation_key}:rev:${absentProof.commit.rev}`,
+      ),
+    ).toBeNull();
   });
 });
 

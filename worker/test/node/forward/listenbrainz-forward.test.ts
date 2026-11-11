@@ -239,12 +239,6 @@ function traceDb(raw: Db): {
   };
 }
 
-function assertL2DecisionBudget(transaction: { reads: number; changedRows: number }, visits: number): void {
-  if (transaction.reads > 128) throw new Error('L2 decision read budget exceeded');
-  if (transaction.changedRows > 28) throw new Error('L2 decision DECISION changed-row budget exceeded');
-  if (visits > 16) throw new Error('L2 decision visit budget exceeded');
-}
-
 async function world(migrations?: readonly (typeof MIGRATIONS)[number][]): Promise<World> {
   const clock = fixedClock();
   const lb = new FakeListenBrainz({ clock, rateLimit: 10_000 });
@@ -930,24 +924,65 @@ describe('ListenBrainz forwarding', () => {
     );
     const absentNs = fromMs(w.clock.nowMs());
     const applyOptions = authorizedLiveOptions(wholeDecisionTrace.db, absentProof, w.rt.random);
-    const absentResult = wholeDecisionTrace.db.tx(() =>
+    wholeDecisionTrace.db.tx(() =>
       applyRecordProof(wholeDecisionTrace.db, absentProof, {
         ...applyOptions,
         nowNs: absentNs,
         receiptNs: absentNs,
       }),
     );
+    const recipientAfterAbsence = w.app.db.one<{ state: string; sent_operation_id: string | null }>(
+      'SELECT state,sent_operation_id FROM love_api_recipients WHERE uri=? AND link_id=?',
+      binding!.uri,
+      linkId,
+    );
+    const broadOperationId = `love-delete:${binding!.incarnation_key}:rev:${absentProof.commit.rev}`;
+    expect(recipientAfterAbsence).toEqual({ state: 'released', sent_operation_id: created.operation.id });
+    expect(w.app.db.one('SELECT 1 FROM love_api_unlove_decisions WHERE uri=?', binding!.uri)).toBeNull();
+    // The link is paused, so the broad B2 path accepts this exact authorized
+    // operation as a deferred intent instead of creating an outbox row yet.
     expect(
-      w.app.db.one('SELECT authorization_rev FROM love_api_unlove_decisions'),
-      JSON.stringify({
-        absentResult,
-        liveEvidence: w.app.db.one('SELECT * FROM live_record_evidence WHERE uri=?', binding!.uri),
-        fact: w.app.db.one('SELECT * FROM love_api_comparison_facts WHERE authorization_uri=?', binding!.uri),
-        recipient: w.app.db.one('SELECT * FROM love_api_recipients WHERE uri=?', binding!.uri),
-        incarnation: w.app.db.one('SELECT * FROM love_incarnations WHERE uri=?', binding!.uri),
-        recordState: w.app.db.one('SELECT * FROM record_state WHERE uri=?', binding!.uri),
-      }),
-    ).toEqual({ authorization_rev: absentProof.commit.rev });
+      w.app.db.one<{
+        operation_id: string;
+        kind: string;
+        origin_class: string;
+        authorization_uri: string | null;
+        authorization_rev: string | null;
+      }>(
+        'SELECT operation_id,kind,origin_class,authorization_uri,authorization_rev FROM forward_deferred_love_intents WHERE link_id=? AND generation=1 AND operation_id=?',
+        linkId,
+        broadOperationId,
+      ),
+    ).toEqual({
+      operation_id: broadOperationId,
+      kind: 'unlove',
+      origin_class: 'authorized',
+      authorization_uri: binding!.uri,
+      authorization_rev: absentProof.commit.rev,
+    });
+    expect(
+      w.app.db.one<{
+        operation_id: string;
+        kind: string;
+        authorization_uri: string | null;
+        authorization_rev: string | null;
+      }>(
+        'SELECT operation_id,kind,authorization_uri,authorization_rev FROM forward_deferred_love_witnesses WHERE link_id=? AND generation=1 AND operation_id=?',
+        linkId,
+        broadOperationId,
+      ),
+    ).toEqual({
+      operation_id: broadOperationId,
+      kind: 'unlove',
+      authorization_uri: binding!.uri,
+      authorization_rev: absentProof.commit.rev,
+    });
+    expect(
+      w.app.db.one(
+        "SELECT 1 FROM forward_outbox WHERE kind='unlove' AND dedupe_key=?",
+        `${broadOperationId}:api-recipient`,
+      ),
+    ).toBeNull();
     const materialized = materializeLoveApiRecipientDecisions(
       wholeDecisionTrace.db,
       w.clock.nowMs(),
@@ -967,17 +1002,17 @@ describe('ListenBrainz forwarding', () => {
     expect(decisionTransaction, JSON.stringify(wholeDecisionCost)).toBeDefined();
     expect(decisionTransaction!.reads, JSON.stringify(decisionTransaction)).toBeLessThanOrEqual(128);
     expect(decisionTransaction!.changedRows, JSON.stringify(decisionTransaction)).toBeLessThanOrEqual(28);
-    expect(materialized.visited).toBeLessThanOrEqual(16);
-    assertL2DecisionBudget(decisionTransaction!, materialized.visited);
-    expect(() => assertL2DecisionBudget({ ...decisionTransaction!, reads: 129 }, materialized.visited)).toThrow(
-      'read budget exceeded',
-    );
-    expect(() => assertL2DecisionBudget({ ...decisionTransaction!, changedRows: 29 }, materialized.visited)).toThrow(
-      'DECISION changed-row budget exceeded',
-    );
-    expect(() => assertL2DecisionBudget(decisionTransaction!, 17)).toThrow('visit budget exceeded');
-    expect(materialized).toMatchObject({ visited: 1, deferred: 1, queued: 0, replay: 0, refused: 0 });
-    expect(w.app.db.one("SELECT count(*) AS n FROM forward_outbox WHERE kind='unlove'")).toEqual({ n: 0 });
+    expect(materialized.visited).toBe(0);
+    expect(decisionTransaction!.reads, JSON.stringify(decisionTransaction)).toBeLessThanOrEqual(128);
+    expect(decisionTransaction!.changedRows, JSON.stringify(decisionTransaction)).toBeLessThanOrEqual(28);
+    expect(materialized).toMatchObject({ visited: 0, deferred: 0, queued: 0, replay: 0, refused: 0 });
+    expect(
+      w.app.db.one(
+        "SELECT count(*) AS n FROM forward_deferred_love_intents WHERE link_id=? AND generation=1 AND operation_id=? AND kind='unlove'",
+        linkId,
+        broadOperationId,
+      ),
+    ).toEqual({ n: 1 });
 
     const pausedRequestCount = w.seen.length;
     await runForward({ ...w.rt, db: wholeDecisionTrace.db }, w.clock.nowMs());
@@ -996,10 +1031,15 @@ describe('ListenBrainz forwarding', () => {
       { recording_mbid: MBID, score: 1 },
       { recording_mbid: MBID, score: 0 },
     ]);
-    const completedAt = w.seen.length;
+    expect(
+      w.app.db.one("SELECT state FROM forward_outbox WHERE kind='unlove' AND dedupe_key=?", broadOperationId),
+    ).toEqual({
+      state: 'sent',
+    });
+    const broadCompletedAt = w.seen.length;
     w.clock.advance(SECOND);
     await runForward({ ...w.rt, db: wholeDecisionTrace.db }, w.clock.nowMs());
-    expect(w.seen).toHaveLength(completedAt);
+    expect(w.seen).toHaveLength(broadCompletedAt);
     expect(w.lb.feedback).toHaveLength(2);
   });
 
