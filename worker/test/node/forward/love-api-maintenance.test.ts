@@ -21,6 +21,13 @@ it('keeps original API origin while a selected SENT aggregate depends on it, the
       INCARNATION,
     );
     db.run(
+      `INSERT INTO love_api_bindings(did,operation_id,api_origin,uri,incarnation_key,binding_seq,created_at_ms)
+       VALUES(?, 'api-op-later','lastfm',?,?,2,1)`,
+      DID,
+      URI,
+      INCARNATION,
+    );
+    db.run(
       `INSERT INTO love_api_recipients(did,uri,incarnation_key,link_id,generation,aggregate_seq,state,sent_operation_id,created_at_ms,updated_at_ms)
        VALUES(?,?,?,'l2-link',1,1,'present','api-op',1,1)`,
       DID,
@@ -34,16 +41,20 @@ it('keeps original API origin while a selected SENT aggregate depends on it, the
     );
 
     const bindingPass = reclaimLoveApiProofRows(db, 10);
-    expect(bindingPass).toMatchObject({ lane: 'binding', visited: 1, bindingsDeleted: 0 });
+    expect(bindingPass).toMatchObject({ lane: 'binding', visited: 2, bindingsDeleted: 0 });
     expect(db.one("SELECT api_origin FROM love_api_bindings WHERE operation_id='api-op'")).toEqual({
       api_origin: 'listenbrainz',
     });
+    expect(db.one("SELECT api_origin FROM love_api_bindings WHERE operation_id='api-op-later'")).toEqual({
+      api_origin: 'lastfm',
+    });
+    expect(db.one('SELECT count(*) AS n FROM love_api_bindings')).toEqual({ n: 2 });
     const factPass = reclaimLoveApiProofRows(db, 10);
     expect(factPass).toMatchObject({ lane: 'fact', visited: 1, factsDeleted: 1 });
     expect(db.one('SELECT 1 FROM love_api_comparison_facts')).toBeNull();
 
     db.run("UPDATE love_api_recipients SET state='released',sent_operation_id=NULL WHERE link_id='l2-link'");
-    expect(reclaimLoveApiProofRows(db, 11)).toMatchObject({ lane: 'binding', visited: 1, bindingsDeleted: 1 });
+    expect(reclaimLoveApiProofRows(db, 11)).toMatchObject({ lane: 'binding', visited: 2, bindingsDeleted: 2 });
     expect(db.one('SELECT 1 FROM love_api_bindings')).toBeNull();
   });
 });

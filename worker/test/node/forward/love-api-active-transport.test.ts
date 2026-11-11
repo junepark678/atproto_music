@@ -465,3 +465,230 @@ it.each([true, false])(
     expect({ fmUnloves, lbUnloves }).toEqual({ fmUnloves: 1, lbUnloves: 1 });
   },
 );
+
+it.each([1, 2])(
+  'sends one actual unlove per service after %s API operations reuse one snapshot incarnation',
+  async (count) => {
+    const sentBeforeAbsence = true;
+    const w = await world();
+    const linkId = w.link();
+    const sk = w.lastfm.addSession('alice_fm');
+    saveLink(
+      { db: w.app.db, clock: w.clock, random: w.rt.random, box: w.rt.box },
+      { did: ALICE, service: 'lastfm', remoteUser: 'alice_fm', credential: sk },
+    );
+    let fmUnloves = 0;
+    const oldFetch = w.lastfm.fetch.bind(w.lastfm);
+    w.lastfm.fetch = async (req: Request) => {
+      const form = new URLSearchParams(await req.clone().text());
+      if (form.get('method') === 'track.unlove') fmUnloves++;
+      return oldFetch(req);
+    };
+    const deps = w.app.composed.core.deps;
+    const wholeDecisionTrace = traceDb(w.app.db);
+    const tracedDeps = { ...deps, db: wholeDecisionTrace.db };
+    const artist = 'L2 Paused API Artist';
+    const track = 'L2 Paused API Track';
+    const keys = await fixtureKeys();
+    const repo = new SignedRepo(ALICE, keys.alice, { clock: w.clock });
+    const pds = new FakePds('api-proof-pds.test', { clock: w.clock });
+    const account = await pds.addAccount(repo);
+    const pdsTransport = routerTransport({ hosts: { 'api-proof-pds.test': pds } });
+    const policyFetch = bindPolicyFetch(createPolicyFetch({ transport: pdsTransport }), PDS_WRITER_CAPS);
+    const writers: PdsWriterSource = {
+      async writerFor(did) {
+        if (did !== ALICE) return null;
+        return {
+          did,
+          fetchHandler: (pathname, init) => {
+            const headers = new Headers(init?.headers);
+            headers.set('authorization', `Bearer ${account.token}`);
+            return policyFetch(new URL(pathname, pds.origin), { ...init, headers });
+          },
+        };
+      },
+    };
+    w.app.db.run('UPDATE users SET pds=? WHERE did=?', pds.origin, ALICE);
+    const outboxDeps = {
+      ...deps,
+      db: wholeDecisionTrace.db,
+      config: { ...deps.config, publication: true },
+      transport: pdsTransport,
+      identity: cachedIdentityResolver(wholeDecisionTrace.db, { transport: pdsTransport, clock: w.clock }),
+      writers,
+    };
+    w.app.db.run(
+      "INSERT OR IGNORE INTO users(did,joined_at,indexing_state) VALUES(?,'2026-01-15T00:00:00Z','current')",
+      ALICE,
+    );
+    const snapshotKey = '3ksnapshotprobe';
+    await repo.put('com.example.atmusic.love', snapshotKey, {
+      $type: 'com.example.atmusic.love',
+      artist,
+      track,
+      recordingMbid: MBID,
+      createdAt: '2026-01-15T11:00:00Z',
+    });
+    const snapshotProof = await verifyRecordProof(await repo.getRecordCar('com.example.atmusic.love', snapshotKey), {
+      did: ALICE,
+      collection: 'com.example.atmusic.love',
+      rkey: snapshotKey,
+      signingKey: keys.alice.didKey,
+    });
+    expect(
+      w.app.db.tx(() =>
+        applyRecordProof(w.app.db, snapshotProof, {
+          prefix: 'com.example.atmusic',
+          nowNs: fromMs(w.clock.nowMs()),
+          receiptNs: fromMs(w.clock.nowMs()),
+        }),
+      ).outcome,
+    ).toBe('applied');
+    expect(
+      w.app.db.one(
+        'SELECT path FROM love_incarnations WHERE uri=?',
+        `at://${ALICE}/com.example.atmusic.love/${snapshotKey}`,
+      ),
+    ).toEqual({ path: 'snapshot' });
+    const created = await enqueueLove(tracedDeps, {
+      did: ALICE,
+      input: { artist, track, recordingMbid: MBID },
+      origin: 'web',
+    });
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    await runOutbox(outboxDeps, w.clock.nowMs());
+    if (sentBeforeAbsence) {
+      for (let i = 0; i < 4; i++) {
+        w.clock.advance(SECOND);
+        await runForward({ ...w.rt, db: wholeDecisionTrace.db }, w.clock.nowMs());
+      }
+      expect(w.lb.feedback.map((entry) => entry.json)).toEqual([{ recording_mbid: MBID, score: 1 }]);
+    }
+    const binding = w.app.db.one<{ uri: string; incarnation_key: string }>(
+      'SELECT uri,incarnation_key FROM love_api_bindings WHERE did=? AND operation_id=?',
+      ALICE,
+      created.operation.id,
+    );
+    expect(binding).not.toBeNull();
+    expect(
+      w.app.db.one('SELECT sent_operation_id FROM love_api_recipients WHERE link_id=? AND uri=?', linkId, binding!.uri),
+    ).toEqual({ sent_operation_id: sentBeforeAbsence ? created.operation.id : null });
+    const rkey = binding!.uri.slice(binding!.uri.lastIndexOf('/') + 1);
+    const presentCar = await repo.getRecordCar('com.example.atmusic.love', rkey);
+    const presentProof = await verifyRecordProof(presentCar, {
+      did: ALICE,
+      collection: 'com.example.atmusic.love',
+      rkey,
+      signingKey: keys.alice.didKey,
+    });
+    const presentNs = fromMs(w.clock.nowMs());
+    const presentResult = w.app.db.tx(() =>
+      applyRecordProof(wholeDecisionTrace.db, presentProof, {
+        ...authorizedLiveOptions(wholeDecisionTrace.db, presentProof, w.rt.random),
+        nowNs: presentNs,
+        receiptNs: presentNs,
+      }),
+    );
+    if (
+      presentResult.outcome !== 'noop_older' ||
+      w.app.db.one('SELECT 1 FROM loves WHERE uri=?', binding!.uri) === null
+    )
+      throw new Error(`API love projection missing: ${JSON.stringify(presentResult)}`);
+
+    if (count === 2) {
+      const second = await enqueueLove(tracedDeps, {
+        did: ALICE,
+        input: { artist, track, recordingMbid: MBID },
+        origin: 'lastfm',
+      });
+      if (!second.ok) throw new Error(JSON.stringify(second.reason));
+      await runOutbox(outboxDeps, w.clock.nowMs());
+      expect(
+        w.app.db.one('SELECT uri,incarnation_key FROM love_api_bindings WHERE operation_id=?', second.operation.id),
+      ).toEqual(binding);
+      expect(
+        w.app.db.all<{ operation_id: string; api_origin: string }>(
+          'SELECT operation_id,api_origin FROM love_api_bindings WHERE operation_id IN (?,?) ORDER BY binding_seq',
+          created.operation.id,
+          second.operation.id,
+        ),
+      ).toEqual([
+        { operation_id: created.operation.id, api_origin: 'web' },
+        { operation_id: second.operation.id, api_origin: 'lastfm' },
+      ]);
+      for (let i = 0; i < 4; i++) {
+        w.clock.advance(SECOND);
+        await w.run();
+      }
+      expect(
+        w.app.db.all("SELECT state FROM forward_outbox WHERE kind='love' AND dedupe_key=?", second.operation.id),
+      ).toEqual([{ state: 'sent' }, { state: 'sent' }]);
+      expect(w.app.db.one('SELECT 1 FROM love_api_recipient_members')).toBeNull();
+    }
+    await repo.delete('com.example.atmusic.love', rkey);
+    const absentCar = await repo.getRecordCar('com.example.atmusic.love', rkey);
+    const absentProof = await verifyRecordProof(absentCar, {
+      did: ALICE,
+      collection: 'com.example.atmusic.love',
+      rkey,
+      signingKey: keys.alice.didKey,
+    });
+    recordLiveEvidence(
+      wholeDecisionTrace.db,
+      {
+        uri: binding!.uri,
+        did: ALICE,
+        collection: 'com.example.atmusic.love',
+        rkey,
+        rev: absentProof.commit.rev,
+        action: 'delete',
+      },
+      w.clock.nowMs(),
+    );
+    const absentNs = fromMs(w.clock.nowMs());
+    const applyOptions = authorizedLiveOptions(wholeDecisionTrace.db, absentProof, w.rt.random);
+    const absentResult = wholeDecisionTrace.db.tx(() =>
+      applyRecordProof(wholeDecisionTrace.db, absentProof, {
+        ...applyOptions,
+        nowNs: absentNs,
+        receiptNs: absentNs,
+      }),
+    );
+    expect(absentResult.outcome).toBe('absent');
+
+    const unloveRowsBeforeDispatch = w.app.db.all(
+      "SELECT link_id,kind,dedupe_key,state FROM forward_outbox WHERE kind='unlove'",
+    );
+    const materialized = materializeLoveApiRecipientDecisions(
+      wholeDecisionTrace.db,
+      w.clock.nowMs(),
+      w.rt.random,
+      'paused-world',
+    );
+    expect(materialized.queued).toBe(2);
+    expect(materialized.awaiting).toBe(0);
+    for (let i = 0; i < 8; i++) {
+      w.clock.advance(SECOND);
+      await w.run();
+    }
+    const lbUnloves = w.lb.feedback.filter((x) => (x.json as { score: number }).score === 0).length;
+    console.log(
+      'ACTUAL_DUPLICATE_TRANSPORT',
+      JSON.stringify({
+        count,
+        unloveRowsBeforeDispatch,
+        fmUnloves,
+        lbUnloves,
+        rows: w.app.db.all("SELECT kind,dedupe_key,state FROM forward_outbox WHERE kind='unlove'"),
+      }),
+    );
+    const prior = w.lb.feedback.length;
+    const priorFm = fmUnloves;
+    w.clock.advance(SECOND);
+    await w.run();
+    expect(w.lb.feedback.length).toBe(prior);
+    expect(fmUnloves).toBe(priorFm);
+    expect({ fmUnloves, lbUnloves }).toEqual({ fmUnloves: 1, lbUnloves: 1 });
+  },
+);

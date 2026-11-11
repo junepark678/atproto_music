@@ -1742,14 +1742,14 @@ export function prepareLoveApiRecipientHandoff(
     alias_cursor: string | null;
     sent_operation_id: string | null;
     recipient_state: string;
-    pending_members: number;
+    has_pending_members: number;
     current_generation: number | null;
   }>(
     `SELECT d.artist,d.track,d.artist_key,d.track_key,d.recording_mbid,d.payload_json,d.authorization_uri,d.authorization_rev,
        d.fact_action,d.fact_cid,d.expires_at_ms,d.scan_session,d.alias_epoch,d.alias_cursor,
        r.sent_operation_id,r.state AS recipient_state,
-       (SELECT count(*) FROM love_api_recipient_members m WHERE m.did=d.did AND m.uri=d.uri
-         AND m.incarnation_key=d.incarnation_key AND m.link_id=d.link_id AND m.generation=d.generation) AS pending_members,
+       EXISTS(SELECT 1 FROM love_api_recipient_members m WHERE m.did=d.did AND m.uri=d.uri
+         AND m.incarnation_key=d.incarnation_key AND m.link_id=d.link_id AND m.generation=d.generation) AS has_pending_members,
        l.generation AS current_generation
      FROM love_api_unlove_decisions d
      JOIN love_api_recipients r ON r.did=d.did AND r.uri=d.uri AND r.incarnation_key=d.incarnation_key
@@ -1798,8 +1798,9 @@ export function prepareLoveApiRecipientHandoff(
   if (horizon <= nowMs) return { status: 'expired' };
   if (factMismatch) return { status: 'vetoed' };
   if (row.current_generation !== candidate.generation || row.recipient_state !== 'sealed') return { status: 'missing' };
-  if (row.sent_operation_id === null) return row.pending_members > 0 ? { status: 'awaiting' } : { status: 'vetoed' };
-  if (row.pending_members > 0) return { status: 'awaiting' };
+  if (row.sent_operation_id === null)
+    return row.has_pending_members !== 0 ? { status: 'awaiting' } : { status: 'vetoed' };
+  if (row.has_pending_members !== 0) return { status: 'awaiting' };
   const parsed = parseRecordUri(candidate.uri);
   const keys = loveApiTrackKeys(row.artist, row.track);
   if (
@@ -1899,9 +1900,14 @@ export function prepareLoveApiRecipientHandoff(
     send_state: string | null;
     send_started_at_ms: number | null;
     legacy_absent_at_ms: number | null;
+    bound_uri: string | null;
+    bound_incarnation_key: string | null;
+    bound_origin: string | null;
   }>(
-    `SELECT i.operation_id,o.state,o.attempts,o.send_state,o.send_started_at_ms,o.legacy_absent_at_ms
+    `SELECT i.operation_id,o.state,o.attempts,o.send_state,o.send_started_at_ms,o.legacy_absent_at_ms,
+       b.uri AS bound_uri,b.incarnation_key AS bound_incarnation_key,b.api_origin AS bound_origin
      FROM linked_love_intents i LEFT JOIN operations o ON o.id=i.operation_id
+     LEFT JOIN love_api_bindings b ON b.did=i.did AND b.operation_id=i.operation_id
      WHERE i.did=? AND i.love_key=? AND i.intent='love'`,
     candidate.did,
     `${row.artist_key}\u0000${row.track_key}`,
@@ -1917,6 +1923,17 @@ export function prepareLoveApiRecipientHandoff(
       exactIntent.legacy_absent_at_ms === null
     ) {
       return { status: 'awaiting' };
+    } else if (
+      (exactIntent.state === 'succeeded' || exactIntent.state === null) &&
+      exactIntent.bound_uri === candidate.uri &&
+      exactIntent.bound_incarnation_key === candidate.incarnationKey &&
+      (exactIntent.bound_origin === 'web' ||
+        exactIntent.bound_origin === 'lastfm' ||
+        exactIntent.bound_origin === 'listenbrainz')
+    ) {
+      // A later completed API operation can reuse this exact incarnation. Its
+      // binding qualifies the local intent, while row.sent_operation_id above
+      // remains the sole positive recipient proof.
     } else {
       return { status: 'vetoed' };
     }
@@ -1947,10 +1964,15 @@ export function prepareLoveApiRecipientHandoff(
       send_state: string | null;
       send_started_at_ms: number | null;
       legacy_absent_at_ms: number | null;
+      bound_uri: string | null;
+      bound_incarnation_key: string | null;
+      bound_origin: string | null;
     }>(
-      `SELECT i.love_key,i.operation_id,o.state,o.attempts,o.send_state,o.send_started_at_ms,o.legacy_absent_at_ms
+      `SELECT i.love_key,i.operation_id,o.state,o.attempts,o.send_state,o.send_started_at_ms,o.legacy_absent_at_ms,
+         b.uri AS bound_uri,b.incarnation_key AS bound_incarnation_key,b.api_origin AS bound_origin
        FROM linked_love_intents i INDEXED BY love_api_intent_alias_scan
        LEFT JOIN operations o ON o.id=i.operation_id
+       LEFT JOIN love_api_bindings b ON b.did=i.did AND b.operation_id=i.operation_id
        WHERE i.did=? AND i.recording_mbid=? AND i.intent='love' AND i.love_key>?
        ORDER BY i.love_key LIMIT ?`,
       candidate.did,
@@ -1960,6 +1982,13 @@ export function prepareLoveApiRecipientHandoff(
     );
     for (const alias of aliases) {
       if (alias.operation_id === row.sent_operation_id || alias.state === 'cancelled') continue;
+      if (
+        (alias.state === 'succeeded' || alias.state === null) &&
+        alias.bound_uri === candidate.uri &&
+        alias.bound_incarnation_key === candidate.incarnationKey &&
+        (alias.bound_origin === 'web' || alias.bound_origin === 'lastfm' || alias.bound_origin === 'listenbrainz')
+      )
+        continue;
       if (
         (alias.state === 'queued' || alias.state === 'blocked') &&
         alias.send_state === 'unsent' &&

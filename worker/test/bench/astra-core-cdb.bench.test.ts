@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { trackKey } from '@atmusic/core/music-key';
 import { seededRandom } from '@atmusic/core/test-support/random';
 import { expect, it } from 'vitest';
@@ -2452,3 +2453,112 @@ it('audit L2 failure after a committed B2 lane preserves its work and the earlie
     expect(db.one('SELECT 1 FROM love_api_proof_state WHERE singleton=1')).toBeNull();
     expect(schedules.at(-1)).toBe(5100);
   }));
+
+it('bounds actual pending-member handoff work while the former COUNT query grows with history', async () => {
+  const results: Array<{
+    size: number;
+    current: { steps: number; rows: Array<Record<string, unknown>> };
+    count: { steps: number; rows: Array<Record<string, unknown>> };
+    plan: string[];
+  }> = [];
+  for (const size of [100, 1_000, 10_000]) {
+    await withMigratedDb((raw, ctx) => {
+      raw.tx(() => {
+        seed(raw, 1);
+        raw.run('UPDATE love_api_recipients SET next_member_seq=?', size + 1);
+        for (let index = 1; index <= size; index++) {
+          const operationId = `pending-member-${index}`;
+          raw.run(
+            `INSERT INTO love_api_bindings(did,operation_id,api_origin,uri,incarnation_key,binding_seq,created_at_ms)
+             VALUES(?,?,'web',?,?,?,1)`,
+            DID,
+            operationId,
+            `at://${DID}/com.example.atmusic.love/r1`,
+            'inc1',
+            index + 1,
+          );
+          raw.run(
+            `INSERT INTO love_api_recipient_members(link_id,generation,operation_id,did,uri,incarnation_key,member_seq,created_at_ms)
+             VALUES('link',1,?,?,?,'inc1',?,1)`,
+            operationId,
+            DID,
+            `at://${DID}/com.example.atmusic.love/r1`,
+            index,
+          );
+          raw.run(
+            `INSERT INTO forward_outbox(id,link_id,did,kind,dedupe_key,payload_json,state,attempts,due_at,created_at_ms,updated_at_ms,generation)
+             VALUES(?,'link',?,'love',?,'{}','held',0,1,1,1,1)`,
+            `held-${index}`,
+            DID,
+            operationId,
+          );
+        }
+        raw.run('UPDATE love_api_proof_state SET next_binding_seq=?', size + 2);
+      });
+      let capturedSql = '';
+      let capturedParams: SqlParam[] = [];
+      const observedDb: Db = {
+        all: raw.all.bind(raw),
+        run: raw.run.bind(raw),
+        tx: raw.tx.bind(raw),
+        one<T>(sql: string, ...params: SqlParam[]): T | null {
+          if (sql.includes('AS has_pending_members')) {
+            capturedSql = sql;
+            capturedParams = params;
+          }
+          return raw.one<T>(sql, ...params);
+        },
+      };
+      expect(
+        prepareLoveApiRecipientHandoff(
+          observedDb,
+          {
+            did: DID,
+            uri: `at://${DID}/com.example.atmusic.love/r1`,
+            incarnationKey: 'inc1',
+            linkId: 'link',
+            generation: 1,
+          },
+          'member-growth',
+          100,
+        ),
+      ).toEqual({ status: 'awaiting' });
+      expect(capturedSql).toContain('EXISTS(SELECT 1 FROM love_api_recipient_members');
+      expect(capturedSql).not.toContain('SELECT count(*) FROM love_api_recipient_members');
+      const queryPlan = raw
+        .all<{ detail: string }>(`EXPLAIN QUERY PLAN ${capturedSql}`, ...capturedParams)
+        .map(({ detail }) => detail);
+      expect(queryPlan.some((detail) => /SCAN\s+(?:TABLE\s+)?love_api_/i.test(detail))).toBe(false);
+      expect(queryPlan.some((detail) => /TEMP B-TREE/i.test(detail))).toBe(false);
+      const maintenance = runLoveApiMaintenance(observedDb, 100, seededRandom(77), 'member-growth');
+      expect(maintenance.writes).toBeLessThanOrEqual(96);
+      expect(maintenance.visits).toBeLessThanOrEqual(16);
+
+      // Run the captured full production SELECT against the same full-schema
+      // file after closing Node's exclusive handle. The companion query is the
+      // deliberate former COUNT(*) anti-control over the exact same members.
+      raw.close();
+      const helper = fileURLToPath(new URL('./sqlite-vm-steps.py', import.meta.url));
+      const measured = spawnSync('python3', [helper, ctx.path], {
+        input: JSON.stringify({ sql: capturedSql, params: capturedParams }),
+        encoding: 'utf8',
+      });
+      expect(measured.status, measured.stderr).toBe(0);
+      const payload = JSON.parse(measured.stdout) as {
+        foreignKeys: unknown[];
+        current: { steps: number; rows: Array<Record<string, unknown>> };
+        count: { steps: number; rows: Array<Record<string, unknown>> };
+      };
+      expect(payload.foreignKeys).toEqual([]);
+      expect(payload.current.rows).toHaveLength(1);
+      expect(payload.count.rows).toHaveLength(1);
+      expect(payload.current.rows[0]!.has_pending_members).toBe(1);
+      expect(payload.count.rows[0]!.has_pending_members).toBe(size);
+      results.push({ size, current: payload.current, count: payload.count, plan: queryPlan });
+    });
+  }
+  expect(results[2]!.current.steps).toBeLessThanOrEqual(results[0]!.current.steps * 2);
+  expect(results[2]!.count.steps).toBeGreaterThan(results[0]!.count.steps * 2);
+  expect(results[2]!.count.steps).toBeGreaterThan(results[2]!.current.steps * 2);
+  if (process.env.FINDING32_L2_COST_TRACE === '1') console.info(`L2_PENDING_MEMBER_GROWTH ${JSON.stringify(results)}`);
+});

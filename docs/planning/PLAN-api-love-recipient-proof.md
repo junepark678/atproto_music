@@ -1,8 +1,8 @@
 # Finding 32: API love recipient proof (L2)
 
-## Current acceptance ledger (test checkpoint on `f58fe8f`; integrated audit requests changes)
+## Current acceptance ledger (local source-fix candidate based on `a14de15`; review pending)
 
-Production and schema are frozen at `e057645ac1a2229c0d1d69189ae0128de9df84fa`; Sol verified `worker/src` matches narrowly accepted `8a406a2bf7b6e20ed82b73ddf1ff5e570ffc1b9a` byte-for-byte. Recipient source SHA-256: `ea26de81e4439d48d5dfce3e7aa661fb99dd6b58f139db173b026d1089c83622`. Migration57 remains frozen at SHA-256 `54dc2d344097763e055b0f8f7f10d8f85993ccdaf0e31620b699726c35256a96`; migrations1–56 are unchanged.
+The worktree is based on `a14de1508909684b06a45788dcdfc9783590b202`; two integrated-audit source repairs and their regressions are in progress here. No source acceptance is claimed for this candidate. Migration57 remains frozen at SHA-256 `54dc2d344097763e055b0f8f7f10d8f85993ccdaf0e31620b699726c35256a96`; migrations1–56 are unchanged.
 
 | Requirement | Current evidence | State |
 | --- | --- | --- |
@@ -10,8 +10,13 @@ Production and schema are frozen at `e057645ac1a2229c0d1d69189ae0128de9df84fa`; 
 | Whole-invocation changed rows and visits | production eight-decision/orphan fixture reaches16 visits; `rejects an actual seventeenth invocation visit after earlier scheduler phases committed` injects a seventh valid query row against a six-row reservation, totals17 actual visited rows, and proves the current reclaim transaction rolls back while earlier phase commits remain | scoped pass; RECLAIM 7/6 preguard fires before the shared invocation assertion, so a mutation removing only the global assertion is not independently demonstrated |
 | Broad-covered paused recipient and narrow SENT proof | `listenbrainz-forward.test.ts`: paused broad B2 acceptance is asserted by exact deferred intent+witness, with no narrow effect; `loves.test.ts`: source-excluded narrow recipient still gets an exact API SENT proof path | scoped pass |
 | Schema57 migration ledger and all-table reopen | `local-index.test.ts`: exact historical 1–56 prefix plus 57 tail; coherent rows in all eight non-derived L2 tables survive close/reopen with exact dump equality | scoped pass, 5/5 |
-| Real producer batching across two current services | `astra-core-cdb.test.ts`: two explicit API love operations with distinct request rkeys reuse one API-created incarnation, retain independent `api_origin` values, and production settlement selects the older SENT operation after the newer is ignored. Direct and A2 delayed signed absence both cover broad single-effects for the two current services; direct-path injected second-effect failure proves transaction rollback. Existing schema57 restore proves imported-source exclusion and transport resume. The integrated audit's snapshot/import two-operation case is separate and not covered by this API-created-projection test | scoped partial; snapshot/import repro and other batch outcomes remain |
-| Restore | exact-parent #209 schema56 producer archive has no L2 tables; real CLI 56→57 migration gives old API SENT/reuse no authority, then a new post-upgrade API admission reuses the legacy projection and proves new SENT. Producer-derived schema57 real-CLI restore covers operation/outbox GC, retained origin, exact rows, fresh composition/timer, paused/revoked zero egress and same-remote one-send/rerun-zero. `restore.test.ts` also covers all-eight-table merge/reopen, pre-swap failure atomicity and unreadable-live `--accept-loss`; fixtures which boot current server before CLI have already migrated live to57. Exact test mapping is in the Restore coverage ledger below | scoped proofs; literal eight-table accept-loss clearing and integrated source case remain |
+| Same-incarnation multi-operation producer and transport | `astra-core-cdb.test.ts`: actual snapshot PDS record, two API admissions with different origins/rkeys, signed absence, operation/outbox GC before or after absence, selected SENT or all-ignored negative. `love-api-active-transport.test.ts`: real PDS/outbox and two fake services; one and two same-incarnation API operations both yield exactly one unlove per service and rerun zero; the second operation has a different persisted origin. | scoped pass for reproduced F1 shape; broader batch/status matrix remains |
+| Pending-member work growth | `astra-core-cdb.bench.test.ts`: captures the complete production handoff SELECT/params from `prepareLoveApiRecipientHandoff`, measures it on the same full-schema SQLite file with 100/1k/10k matching held members, and compares a count-only anti-control. Production query uses bounded indexed `EXISTS`; full bench file passes 79/79. | scoped pass for F2 query; broader whole-decision matrix remains |
+| Restore | exact-parent #209 schema56 producer archive has no L2 tables; real CLI 56→57 migration gives old API SENT/reuse no authority, then a new post-upgrade API admission reuses the legacy projection and proves new SENT. Producer-derived schema57 real-CLI restore covers operation/outbox GC, retained origin, exact rows, fresh composition/timer, paused/revoked zero egress and same-remote one-send/rerun-zero. Isolated restore worker owns the newly authorized literal all-eight cleanup and counts-only pending-proof-loss notice fixture; no restore files are edited here. Exact prior test mapping is in the Restore coverage ledger below | prior narrow receipts preserved; new accept-loss fixture pending |
+
+The integrated audit on `f58fe8fd50b4802b1e2306104ed1e56652ee1cc1` found two source defects. Both repairs are now present in the local candidate: direct and delayed producer same-incarnation checks treat a completed bound sibling as a qualification only when that exact current-generation aggregate has positive SENT proof or a still-pending exact member; recipient positive proof continues to come only from `sent_operation_id`. The handoff presence predicate now uses exact-key `EXISTS` instead of scanning the full member prefix with `COUNT(*)`. No DDL, budget, route, or positive-proof rule changed. Targeted Node tests pass 108/108; `astra-core-cdb.bench.test.ts` passes 79/79; the full source typecheck and scoped Biome check pass. A snapshot PDS/API producer transport test proves two same-incarnation operations send exactly one Last.fm unlove and one ListenBrainz score-zero, then zero on rerun. Separate terminal-ignored/GC controls prove bindings alone do not create authority. Fresh independent source review and the broader batch matrix remain pending.
+
+The f58 root-owned full gate passed 2474/0/1, but is historical source evidence only. At `a14de15`, both hosted TypeScript jobs failed the same one offline schema56 restore fixture (2475 passed / 1 failed / 1 skipped; jobs `130302795988` and `130302779899`) because the shallow checkout lacks the historical #209 archive. This is a known reproducible environment limitation, not a flaky test or readiness result. No network fetch or CI depth change was made. Receipt: `/tmp/atproto-followup-sol/pr210-hosted-a14de15-planner.json`. The new restore fixture work is isolated elsewhere and has not yet been merged. Keep PR210 draft.
 
 The integrated audit's two source defects were reproduced on unchanged production
 source `f58fe8fd50b4802b1e2306104ed1e56652ee1cc1` using its archived, hash-checked
@@ -67,10 +72,14 @@ It does not establish integrated L2 acceptance, host-green status, or readiness.
 
 The hosted f58 check later reported both TypeScript jobs red because the shallow
 checkout cannot produce the historical #209 archive used by the selected
-schema56 producer test. No network fetch, CI depth change, or workaround was
-made. The local full-gate receipt above remains exact f58 evidence; it does not
-override the hosted red result. Any later candidate supersedes both f58 results
-and needs Sol's fresh final gate.
+schema56 producer test. At a14de15 both hosted TypeScript jobs again failed the
+same offline archive fixture (2475 passed / 1 failed / 1 skipped; jobs
+130302795988 and 130302779899). No network fetch, CI depth change, or workaround
+was made. The exact a14de15 receipt is
+`/tmp/atproto-followup-sol/pr210-hosted-a14de15-planner.json`. These are known
+hosted reds, not flaky failures. The local f58 full-gate receipt remains exact
+f58 evidence and does not override them. Any later candidate supersedes both
+results and needs Sol's fresh final gate.
 
 Fresh integrated Astra review `pr210-astra-integrated-f58fe8f.md` is **SOURCE
 REQUEST CHANGES**, required proof pending. It found (1) an actual snapshot
@@ -79,9 +88,11 @@ operation is selected SENT while the newer succeeded operation is the current
 local intent, and (2) unbounded pending-member prefix work from a correlated
 `COUNT(*)` used only as a presence predicate. Exact reproductions and source
 hashes are archived in `/tmp/atproto-followup-sol/pr210-astra-integrated-f58fe8f/`.
-The API-created-incarnation test below is separate coverage and does not close
-the snapshot/import case. These two bounded source fixes are authorized; they
-must preserve the current SENT proof contract, current generation, alias and
+The API-created-incarnation test below was separate coverage and did not close
+the snapshot/import case. Sol authorized two bounded source fixes; the current
+local candidate implements them with snapshot/API/PDS/transport and production
+query-growth regressions below. Fresh source review remains pending. The fixes
+preserve the current SENT proof contract, current generation, alias and
 newer-unbound-love guards, and all fixed budgets/schema.
 
 ### Restore coverage ledger
@@ -968,3 +979,35 @@ Additional production paths are recorded by transaction rather than charged to t
 The preserved cross-transaction lifecycle receipt `229 reads / 105 mutation statements / 87 changed rows / 110 returned rows / 1 visit / 1 deferred` remains informational wrong-unit evidence; it is not compared with the per-decision cap. The earlier +4/+4 API-path guess remains superseded by the measured N0/N1/N2 bounds documented above.
 
 Merged-source scoped verification before this test-only matrix delta: worker-bench suite78/78; Node handoff/removal/love producer suites89/89; full restore suite26/26; project typecheck, scoped Biome, diff check and secret-scan test passed. For this delta, the complete three-file Node set passed87/87, local-index passed5/5, and the whole Astra CDB bench file passed78/78. The sanitized credential-shaped added-line scan must be repeated before push. This is a scoped whole-decision matrix checkpoint, not a complete L2 caller or lifecycle matrix. Still pending are the multiple-operation producer-batch combinations (mixed sent/pending/ignored/failed/cancelled siblings, early/late SENT, batch-pin rollback and all refusal/source-order variants), additional caller-derived cold/partial-delete/two-recipient outcome combinations, and any remaining restore/journal cases after reconciling the full26/26 restore suite against the plan. Fresh independent whole-L2 review remains pending. The direct-expiry narrow Astra acceptance covers only that residual. No full-L2 acceptance or readiness is claimed.
+
+## Integrated F1/F2 source-fix candidate (based on `a14de15`, local worktree)
+
+The direct and delayed absence guards now recognize a later completed API love
+as same-incarnation re-love qualification when its exact binding maps to the
+same URI/incarnation and the exact current-generation aggregate has selected
+SENT evidence. The binding does not create positive recipient proof:
+`sent_operation_id` remains the only positive proof. Tests cover a real signed
+snapshot, two explicit API operations with different origins and request
+rkeys, both service links, actual PDS execution/SENT, signed absence,
+operation/outbox GC before or after absence, plus an all-ignored terminal
+negative whose binding alone yields no decision or effect. The actual fake
+Last.fm/ListenBrainz transport sends one unlove each and zero on rerun.
+
+The handoff query now asks whether any exact-key pending member exists with
+indexed `EXISTS`. The worker-bench captures the complete SQL and parameters
+from the production handoff call, evaluates that query and the former
+`COUNT(*)` anti-control on the same full schema57 database after closing the
+Node handle, and checks full plans and FK integrity at 100/1,000/10,000
+matching members. Earlier measured production steps were 183/183/183 versus
+the old COUNT's 484/3,184/30,184; no elapsed-time or exact-opcode claim is
+made. Scoped evidence on this candidate: core producer/recipient suites
+108/108, the complete Astra CDB bench file 79/79, project typecheck, scoped
+Biome, and `git diff --check` pass. Secret scan and sanitized credential scan
+are required before push.
+
+Current source changes remain uncommitted and unreviewed independently. The
+accepted narrow 8a direct-expiry review does not pre-accept these integrated
+fixes. Broader mixed-status producer batches, all source-order/second-handoff
+rollback combinations, remaining restore work, fresh integrated Astra review,
+exact-candidate full gate, and host-green checks remain pending. PR210 stays
+draft; no whole-L2 acceptance or readiness is claimed.

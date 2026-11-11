@@ -769,7 +769,7 @@ function processGroup(db: Db, group: PendingGroup, nowMs: number, random: Random
          JOIN linked_accounts l ON l.id=r.link_id AND l.generation=r.generation
          JOIN love_api_bindings b ON b.did=linked_love_intents.did AND b.operation_id=linked_love_intents.operation_id
          WHERE r.did=linked_love_intents.did AND r.uri=? AND r.incarnation_key=?
-           AND (r.sent_operation_id=linked_love_intents.operation_id OR EXISTS(
+           AND (r.sent_operation_id IS NOT NULL OR EXISTS(
              SELECT 1 FROM love_api_recipient_members m WHERE m.did=r.did AND m.uri=r.uri
                AND m.incarnation_key=r.incarnation_key AND m.link_id=r.link_id AND m.generation=r.generation
                AND m.operation_id=linked_love_intents.operation_id))

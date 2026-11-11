@@ -14,6 +14,7 @@ import {
 } from '../../../src/do/ingest/live-pending-removals';
 import { applyRecordProof } from '../../../src/do/write/apply-record';
 import { settleRows } from '../../../src/forward/forward-outbox';
+import { reclaimLoveApiProofRows } from '../../../src/forward/love-api-maintenance';
 import { materializeLoveApiRecipientDecisions } from '../../../src/forward/love-api-materializer';
 import { enqueueLove } from '../../../src/outbox/love-ops';
 import { authorizedLiveOptions } from '../../write/support';
@@ -338,6 +339,150 @@ it.each(['direct', 'delayed'] as const)(
       expect(
         h.db.one("SELECT 1 FROM forward_outbox WHERE kind='unlove' AND dedupe_key LIKE '%:api-recipient'"),
       ).toBeNull();
+    });
+  },
+);
+
+it.each([
+  { reverseSettlement: false, gcBeforeAbsence: true, allSent: true },
+  { reverseSettlement: true, gcBeforeAbsence: false, allSent: true },
+  { reverseSettlement: false, gcBeforeAbsence: false, allSent: false },
+  { reverseSettlement: true, gcBeforeAbsence: true, allSent: false },
+])(
+  'handles snapshot same-incarnation API operation bindings safely (%o)',
+  async ({ reverseSettlement, gcBeforeAbsence, allSent }) => {
+    await withHarness(async (h) => {
+      h.seedUser(h.alice);
+      const lastfm = h.link(h.alice, 'lastfm');
+      const listenbrainz = h.link(h.alice, 'listenbrainz');
+      const rkey = '3ksnapshotmultio';
+      const recordingMbid = '12345678-1234-1234-1234-123456789abc';
+      await h.kit.externalPut('Alice', LOVE, rkey, {
+        $type: LOVE,
+        artist: 'Snapshot reuse artist',
+        track: 'Snapshot reuse track',
+        recordingMbid,
+        createdAt: '2026-01-15T11:00:00Z',
+      });
+      expect((await projectLove(h, rkey)).outcome).toBe('applied');
+      const uri = `at://${h.alice}/${LOVE}/${rkey}`;
+      expect(h.db.one('SELECT path FROM love_incarnations WHERE uri=?', uri)).toEqual({ path: 'snapshot' });
+
+      const operations: Array<{ id: string; rkey: string | null }> = [];
+      for (const origin of ['web', 'lastfm'] as const) {
+        const accepted = await enqueueLove(h.m, {
+          did: h.alice,
+          input: { artist: 'Snapshot reuse artist', track: 'Snapshot reuse track', recordingMbid },
+          origin,
+        });
+        if (!accepted.ok) throw Error(`API love refused: ${accepted.reason.code}`);
+        operations.push(accepted.operation);
+        await h.runUntilIdle();
+        expect(h.op(accepted.operation.id)).toMatchObject({ state: 'succeeded', result_uri: uri });
+      }
+      expect(new Set(operations.map((operation) => operation.rkey)).size).toBe(2);
+      expect(
+        h.db.all<{ operation_id: string; api_origin: string; uri: string; incarnation_key: string }>(
+          `SELECT operation_id,api_origin,uri,incarnation_key FROM love_api_bindings ORDER BY binding_seq`,
+        ),
+      ).toEqual([
+        expect.objectContaining({ operation_id: operations[0]!.id, api_origin: 'web', uri }),
+        expect.objectContaining({ operation_id: operations[1]!.id, api_origin: 'lastfm', uri }),
+      ]);
+      const loveRows = h.db.all<{ id: string; link_id: string; generation: number; dedupe_key: string }>(
+        `SELECT id,link_id,generation,dedupe_key FROM forward_outbox
+         WHERE kind='love' AND dedupe_key IN (?,?) ORDER BY link_id,dedupe_key`,
+        operations[0]!.id,
+        operations[1]!.id,
+      );
+      expect(loveRows).toHaveLength(4);
+      expect(new Set(loveRows.map(({ link_id }) => link_id))).toEqual(new Set([lastfm, listenbrainz]));
+      for (const row of reverseSettlement ? [...loveRows].reverse() : loveRows)
+        settleRows(
+          h.db,
+          [row.id],
+          allSent ? 'sent' : 'ignored',
+          h.m.clock.nowMs(),
+          allSent ? null : 'fixture_terminal_ignore',
+          true,
+          row.generation,
+        );
+      expect(h.db.all('SELECT 1 FROM love_api_recipient_members')).toEqual([]);
+      expect(
+        h.db.all<{ link_id: string; sent_operation_id: string }>(
+          'SELECT link_id,sent_operation_id FROM love_api_recipients ORDER BY link_id',
+        ),
+      ).toEqual([
+        { link_id: lastfm, sent_operation_id: allSent ? operations[reverseSettlement ? 1 : 0]!.id : null },
+        { link_id: listenbrainz, sent_operation_id: allSent ? operations[reverseSettlement ? 1 : 0]!.id : null },
+      ]);
+
+      const cleanApiHistory = () => {
+        h.db.run('DELETE FROM operations WHERE id IN (?,?)', operations[0]!.id, operations[1]!.id);
+        h.db.run(
+          "DELETE FROM forward_outbox WHERE kind='love' AND dedupe_key IN (?,?)",
+          operations[0]!.id,
+          operations[1]!.id,
+        );
+        for (let pass = 0; pass < 6; pass++) reclaimLoveApiProofRows(h.db, h.m.clock.nowMs());
+        expect(h.db.all('SELECT operation_id FROM love_api_bindings ORDER BY operation_id')).toHaveLength(
+          allSent ? 2 : 0,
+        );
+      };
+      if (gcBeforeAbsence) cleanApiHistory();
+
+      await h.kit.externalDelete('Alice', LOVE, rkey);
+      const absentProof = await verifyRecordProof(await h.kit.repos.Alice.getRecordCar(LOVE, rkey), {
+        did: h.alice,
+        collection: LOVE,
+        rkey,
+        signingKey: h.kit.users.Alice.key.didKey,
+      });
+      if (absentProof.state !== 'absent') throw Error('expected signed snapshot absence');
+      recordLiveEvidence(
+        h.db,
+        { uri, did: h.alice, collection: LOVE, rkey, rev: absentProof.commit.rev, action: 'delete' },
+        h.kit.clock.nowMs(),
+      );
+      expect((await projectLove(h, rkey, true)).outcome).toBe('absent');
+      if (!gcBeforeAbsence) cleanApiHistory();
+      if (!allSent) {
+        // Bindings and a terminal negative outcome never establish recipient
+        // proof. The aggregate remains inert until ordinary bounded expiry.
+        expect(h.db.all('SELECT state FROM love_api_recipients ORDER BY link_id')).toEqual([
+          { state: 'present' },
+          { state: 'present' },
+        ]);
+        expect(h.db.all("SELECT 1 FROM forward_outbox WHERE kind='unlove'")).toEqual([]);
+        expect(
+          materializeLoveApiRecipientDecisions(h.db, h.m.clock.nowMs(), h.m.random, 'snapshot-no-sent'),
+        ).toMatchObject({ queued: 0, deferred: 0, replay: 0 });
+        return;
+      }
+      expect(h.db.all('SELECT state FROM love_api_recipients ORDER BY link_id')).toEqual([
+        { state: 'sealed' },
+        { state: 'sealed' },
+      ]);
+      const result = materializeLoveApiRecipientDecisions(h.db, h.m.clock.nowMs(), h.m.random, 'snapshot-multi-api');
+      expect(result).toMatchObject({ visited: 2, queued: 2, deferred: 0, refused: 0 });
+      expect(
+        h.db.all<{ link_id: string; kind: string; state: string; dedupe_key: string }>(
+          `SELECT link_id,kind,state,dedupe_key FROM forward_outbox WHERE kind='unlove' ORDER BY link_id`,
+        ),
+      ).toEqual([
+        {
+          link_id: lastfm,
+          kind: 'unlove',
+          state: 'queued',
+          dedupe_key: `love-delete:${h.db.one<{ incarnation_key: string }>('SELECT incarnation_key FROM love_incarnations WHERE uri=?', uri)!.incarnation_key}:rev:${absentProof.commit.rev}:api-recipient`,
+        },
+        {
+          link_id: listenbrainz,
+          kind: 'unlove',
+          state: 'queued',
+          dedupe_key: `love-delete:${h.db.one<{ incarnation_key: string }>('SELECT incarnation_key FROM love_incarnations WHERE uri=?', uri)!.incarnation_key}:rev:${absentProof.commit.rev}:api-recipient`,
+        },
+      ]);
     });
   },
 );

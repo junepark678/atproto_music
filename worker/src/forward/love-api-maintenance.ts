@@ -157,7 +157,7 @@ export function reclaimLoveApiProofRows(db: Db, nowMs: number, limit = LOVE_API_
            CROSS JOIN love_api_recipients r ON r.did=? AND r.uri=? AND r.incarnation_key=?
              AND r.link_id=l.id AND r.generation=l.generation
            WHERE l.did=? AND r.state IN ('present','sealed') AND (
-             r.sent_operation_id=? OR EXISTS(
+             r.sent_operation_id IS NOT NULL OR EXISTS(
                SELECT 1 FROM love_api_recipient_members m
                WHERE m.link_id=r.link_id AND m.generation=r.generation AND m.operation_id=?
                  AND m.did=r.did AND m.uri=r.uri AND m.incarnation_key=r.incarnation_key
@@ -167,7 +167,6 @@ export function reclaimLoveApiProofRows(db: Db, nowMs: number, limit = LOVE_API_
           row.uri,
           row.incarnation_key,
           row.did,
-          row.operation_id,
           row.operation_id,
         );
         if (used === null)
