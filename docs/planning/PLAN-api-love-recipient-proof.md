@@ -10,7 +10,7 @@ This candidate contains the two authorized integrated-audit source repairs and t
 | Whole-invocation changed rows and visits | production eight-decision/orphan fixture reaches16 visits; `rejects an actual seventeenth invocation visit after earlier scheduler phases committed` injects a seventh valid query row against a six-row reservation, totals17 actual visited rows, and proves the current reclaim transaction rolls back while earlier phase commits remain | scoped pass; RECLAIM 7/6 preguard fires before the shared invocation assertion, so a mutation removing only the global assertion is not independently demonstrated |
 | Broad-covered paused recipient and narrow SENT proof | `listenbrainz-forward.test.ts`: paused broad B2 acceptance is asserted by exact deferred intent+witness, with no narrow effect; `loves.test.ts`: source-excluded narrow recipient still gets an exact API SENT proof path | scoped pass |
 | Schema57 migration ledger and all-table reopen | `local-index.test.ts`: exact historical 1–56 prefix plus 57 tail; coherent rows in all eight non-derived L2 tables survive close/reopen with exact dump equality | scoped pass, 5/5 |
-| Same-incarnation multi-operation producer and transport | `astra-core-cdb.test.ts`: actual snapshot PDS record, two API admissions with different origins/rkeys, signed absence, operation/outbox GC before or after absence, selected SENT or all-ignored negative. `love-api-active-transport.test.ts`: real PDS/outbox and two fake services; one and two same-incarnation API operations both yield exactly one unlove per service and rerun zero; the second operation has a different persisted origin. | scoped pass for reproduced F1 shape; broader batch/status matrix remains |
+| Same-incarnation multi-operation producer and transport | `astra-core-cdb.test.ts`: actual snapshot PDS record, two API admissions with different origins/rkeys, signed direct/A2-delayed absence, operation/outbox GC before or after absence, older-selected SENT/newer ignored, newer-selected after older ignored, both SENT in both settlement orders, all-negative control, and an import-source-excluded narrow recipient with independent broad coverage on the other service. `love-api-active-transport.test.ts`: real PDS/outbox and two fake services; one and two same-incarnation API operations both yield exactly one unlove per service and rerun zero; the second operation has a different persisted origin. | scoped pass for these F1 statuses; pending/late SENT, mixed failed/cancelled and batch-handoff rollback cases remain |
 | Pending-member work growth | `astra-core-cdb.bench.test.ts`: captures the complete production handoff SELECT/params from `prepareLoveApiRecipientHandoff`, measures it on the same full-schema SQLite file with 100/1k/10k matching held members, and compares a count-only anti-control. Production query uses bounded indexed `EXISTS`; full bench file passes 79/79. | scoped pass for F2 query; broader whole-decision matrix remains |
 | Restore | approved offline fixture chain `5ce00e1` → `e311061` → corrected `31f4772`, merged as `ce04893`; exact #209 schema56 producer SQL/metadata are checked in, normal restore test no longer needs Git history. All-eight unreadable-live cleanup, counts-only notice on refusal/acceptance, and mid-clear rollback are covered. Restore-owned files match accepted `e311061` except the two explicitly approved manifest-path strings in the manifest and regeneration script. | merged-candidate restore + inventory 29/29; focused manifest checks pass; exact-head full gate and hosted result pending |
 
@@ -1055,3 +1055,28 @@ and a14de15 hosted archive-fixture failure remain exact historical receipts;
 this candidate has no new full-gate or host-green result. Offline provenance
 removes the restore test's Git-history dependency without fetching history or
 changing CI depth. Producer-batch and whole-L2 acceptance remain pending.
+
+## Mixed terminal status producer cases
+
+The snapshot producer case now runs two real API admissions against the same
+incarnation through PDS execution, then feeds each operation's actual outbox
+rows through production settlement in these status combinations: older SENT
+then newer ignored; older ignored then newer SENT; both SENT with older-first
+and newer-first settlement; and both ignored. It checks the exact selected
+operation ID on both current recipient links, including the all-negative
+inert case. The A2 delayed-import variants additionally prove that the
+import-source-excluded Last.fm recipient retains its narrow path while
+ListenBrainz is handled by the accepted broad route. Operation/outbox GC runs
+before or after signed absence in the fixture matrix. The focused Astra CDB
+plus actual fake-service transport suites pass 15/15. This remains a bounded
+status matrix: it does not claim late terminal settlement after a pending
+member, failed/cancelled member permutations, or second-recipient L2 handoff
+rollback; those remain pending alongside the broader batch matrix.
+
+One initial negative-control expectation in the delayed import case was
+corrected after it exposed the expected durable broad behavior: a
+non-excluded ListenBrainz recipient is released by the accepted broad effect
+even when the API-bound members are all terminal-negative. The final
+assertions retain the excluded Last.fm recipient as present and prove no
+narrow API-recipient effect is created from negative members. No production
+source or policy changed.

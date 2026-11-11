@@ -344,14 +344,31 @@ it.each(['direct', 'delayed'] as const)(
 );
 
 it.each([
-  { reverseSettlement: false, gcBeforeAbsence: true, allSent: true },
-  { reverseSettlement: true, gcBeforeAbsence: false, allSent: true },
-  { reverseSettlement: false, gcBeforeAbsence: false, allSent: false },
-  { reverseSettlement: true, gcBeforeAbsence: true, allSent: false },
-  { reverseSettlement: true, gcBeforeAbsence: true, allSent: true, absencePath: 'delayed-import' as const },
+  { reverseSettlement: false, gcBeforeAbsence: true, sent: [true, false] as const },
+  { reverseSettlement: false, gcBeforeAbsence: false, sent: [false, true] as const },
+  { reverseSettlement: false, gcBeforeAbsence: false, sent: [true, true] as const },
+  { reverseSettlement: true, gcBeforeAbsence: false, sent: [true, true] as const },
+  {
+    reverseSettlement: true,
+    gcBeforeAbsence: true,
+    sent: [false, false] as const,
+    absencePath: 'delayed-import' as const,
+  },
+  {
+    reverseSettlement: true,
+    gcBeforeAbsence: true,
+    sent: [true, true] as const,
+    absencePath: 'delayed-import' as const,
+  },
+  {
+    reverseSettlement: false,
+    gcBeforeAbsence: false,
+    sent: [false, true] as const,
+    absencePath: 'delayed-import' as const,
+  },
 ])(
   'handles snapshot same-incarnation API operation bindings safely (%o)',
-  async ({ reverseSettlement, gcBeforeAbsence, allSent, absencePath = 'direct' }) => {
+  async ({ reverseSettlement, gcBeforeAbsence, sent, absencePath = 'direct' }) => {
     await withHarness(async (h) => {
       h.seedUser(h.alice);
       const lastfm = h.link(h.alice, 'lastfm');
@@ -412,25 +429,28 @@ it.each([
       expect(loveRows).toHaveLength(4);
       expect(new Set(loveRows.map(({ link_id }) => link_id))).toEqual(new Set([lastfm, listenbrainz]));
       const settlementOrder = reverseSettlement ? [...operations].reverse() : operations;
-      for (const operation of settlementOrder)
+      const selectedSentOperation = settlementOrder.find((operation) => sent[operations.indexOf(operation)]);
+      for (const operation of settlementOrder) {
+        const operationSent = sent[operations.indexOf(operation)]!;
         for (const row of loveRows.filter(({ dedupe_key }) => dedupe_key === operation.id))
           settleRows(
             h.db,
             [row.id],
-            allSent ? 'sent' : 'ignored',
+            operationSent ? 'sent' : 'ignored',
             h.m.clock.nowMs(),
-            allSent ? null : 'fixture_terminal_ignore',
+            operationSent ? null : 'fixture_terminal_ignore',
             true,
             row.generation,
           );
+      }
       expect(h.db.all('SELECT 1 FROM love_api_recipient_members')).toEqual([]);
       expect(
         h.db.all<{ link_id: string; sent_operation_id: string }>(
           'SELECT link_id,sent_operation_id FROM love_api_recipients ORDER BY link_id',
         ),
       ).toEqual([
-        { link_id: lastfm, sent_operation_id: allSent ? operations[reverseSettlement ? 1 : 0]!.id : null },
-        { link_id: listenbrainz, sent_operation_id: allSent ? operations[reverseSettlement ? 1 : 0]!.id : null },
+        { link_id: lastfm, sent_operation_id: selectedSentOperation?.id ?? null },
+        { link_id: listenbrainz, sent_operation_id: selectedSentOperation?.id ?? null },
       ]);
 
       const cleanApiHistory = () => {
@@ -442,7 +462,7 @@ it.each([
         );
         for (let pass = 0; pass < 6; pass++) reclaimLoveApiProofRows(h.db, h.m.clock.nowMs());
         expect(h.db.all('SELECT operation_id FROM love_api_bindings ORDER BY operation_id')).toHaveLength(
-          allSent ? 2 : 0,
+          selectedSentOperation === undefined ? 0 : 2,
         );
       };
       if (gcBeforeAbsence) cleanApiHistory();
@@ -531,14 +551,37 @@ it.each([
         ).toBe(1);
       }
       if (!gcBeforeAbsence) cleanApiHistory();
-      if (!allSent) {
+      if (selectedSentOperation === undefined) {
         // Bindings and a terminal negative outcome never establish recipient
-        // proof. The aggregate remains inert until ordinary bounded expiry.
-        expect(h.db.all('SELECT state FROM love_api_recipients ORDER BY link_id')).toEqual([
-          { state: 'present' },
-          { state: 'present' },
-        ]);
-        expect(h.db.all("SELECT 1 FROM forward_outbox WHERE kind='unlove'")).toEqual([]);
+        // proof. An import-source-excluded link stays present; the other link
+        // can still be covered by the independently accepted broad effect.
+        expect(
+          h.db.all<{ link_id: string; state: string }>(
+            'SELECT link_id,state FROM love_api_recipients ORDER BY link_id',
+          ),
+        ).toEqual(
+          [
+            { link_id: lastfm, state: 'present' },
+            { link_id: listenbrainz, state: absencePath === 'delayed-import' ? 'released' : 'present' },
+          ].sort((left, right) => left.link_id.localeCompare(right.link_id)),
+        );
+        expect(
+          h.db.all<{ link_id: string; dedupe_key: string }>(
+            "SELECT link_id,dedupe_key FROM forward_outbox WHERE kind='unlove' ORDER BY link_id",
+          ),
+        ).toEqual(
+          absencePath === 'delayed-import'
+            ? [
+                {
+                  link_id: listenbrainz,
+                  dedupe_key: `love-delete:${h.db.one<{ incarnation_key: string }>('SELECT incarnation_key FROM love_incarnations WHERE uri=?', uri)!.incarnation_key}:rev:${absentProof.commit.rev}`,
+                },
+              ]
+            : [],
+        );
+        expect(
+          h.db.one("SELECT 1 FROM forward_outbox WHERE kind='unlove' AND dedupe_key LIKE '%:api-recipient'"),
+        ).toBeNull();
         expect(
           materializeLoveApiRecipientDecisions(h.db, h.m.clock.nowMs(), h.m.random, 'snapshot-no-sent'),
         ).toMatchObject({ queued: 0, deferred: 0, replay: 0 });
