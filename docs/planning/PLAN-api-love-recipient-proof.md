@@ -10,7 +10,7 @@ This candidate contains the two authorized integrated-audit source repairs and t
 | Whole-invocation changed rows and visits | production eight-decision/orphan fixture reaches16 visits; `rejects an actual seventeenth invocation visit after earlier scheduler phases committed` injects a seventh valid query row against a six-row reservation, totals17 actual visited rows, and proves the current reclaim transaction rolls back while earlier phase commits remain | scoped pass; RECLAIM 7/6 preguard fires before the shared invocation assertion, so a mutation removing only the global assertion is not independently demonstrated |
 | Broad-covered paused recipient and narrow SENT proof | `listenbrainz-forward.test.ts`: paused broad B2 acceptance is asserted by exact deferred intent+witness, with no narrow effect; `loves.test.ts`: source-excluded narrow recipient still gets an exact API SENT proof path | scoped pass |
 | Schema57 migration ledger and all-table reopen | `local-index.test.ts`: exact historical 1–56 prefix plus 57 tail; coherent rows in all eight non-derived L2 tables survive close/reopen with exact dump equality | scoped pass, 5/5 |
-| Same-incarnation multi-operation producer and transport | `astra-core-cdb.test.ts`: actual snapshot PDS record, two API admissions with different origins/rkeys, signed direct/A2-delayed absence, operation/outbox GC before or after absence, older-selected SENT/newer ignored, newer-selected after older ignored, both SENT in both settlement orders, failed/expired/all-negative controls, and an import-source-excluded narrow recipient with independent broad coverage on the other service. `love-api-active-transport.test.ts`: real PDS/outbox and fake Last.fm/ListenBrainz, with one/two operations and queued members at signed absence followed by actual late SENT; one unlove per service and rerun zero. | scoped pass for these F1 statuses; cancelled-member reachability and remaining cross-lane combinations remain |
+| Same-incarnation multi-operation producer and transport | `astra-core-cdb.test.ts`: actual snapshot PDS record, two API admissions with different origins/rkeys, signed direct/A2-delayed absence, operation/outbox GC before or after absence, older-selected SENT/newer ignored, newer-selected after older ignored, both SENT in both settlement orders, failed/expired/all-negative controls, canceled-before-PDS account-disconnect helper control, and an import-source-excluded narrow recipient with independent broad coverage on the other service. `love-api-active-transport.test.ts`: real PDS/outbox and fake Last.fm/ListenBrainz, with one/two operations and queued members at signed absence followed by actual late SENT; one unlove per service and rerun zero. | scoped pass for these F1 statuses; HTTP disconnect route and remaining cross-lane combinations are not covered |
 | Pending-member work growth | `astra-core-cdb.bench.test.ts`: captures the complete production handoff SELECT/params from `prepareLoveApiRecipientHandoff`, measures it on the same full-schema SQLite file with 100/1k/10k matching held members, and compares a count-only anti-control. Production query uses bounded indexed `EXISTS`; full bench file passes 79/79. | scoped pass for F2 query; broader whole-decision matrix remains |
 | Restore | approved offline fixture chain `5ce00e1` → `e311061` → corrected `31f4772`, merged as `ce04893`; exact #209 schema56 producer SQL/metadata are checked in, normal restore test no longer needs Git history. All-eight unreadable-live cleanup, counts-only notice on refusal/acceptance, and mid-clear rollback are covered. Restore-owned files match accepted `e311061` except the two explicitly approved manifest-path strings in the manifest and regeneration script. | merged-candidate restore + inventory 29/29; focused manifest checks pass; exact-head full gate and hosted result pending |
 
@@ -1077,16 +1077,20 @@ outbox/receipts, deferred rows, and counters all roll back to the captured
 snapshot. A clean retry accepts both exact identities. This uses production
 `settleRows` with SENT outcomes as fixture terminal callbacks, not real remote
 delivery. The focused Astra CDB plus actual fake-service transport suites pass
-19/19. A separate
+20/20. A separate
 active-transport case signs absence while both API-love members are still
 queued, records the exact sealed aggregate with no selected SENT, then delivers
 the love rows through the real fake-service forwarder. The late SENT settlement
 selects an exact API operation, materialization queues the narrow Last.fm
 unlove, and the accepted broad ListenBrainz route completes one score zero;
 the rerun sends neither again. The fixture seeds ordinary import admission
-metadata (not L2 rows) to exercise Last.fm source exclusion. Cancelled-member
-caller reachability and every cross-lane permutation remain pending alongside
-the broader batch matrix.
+metadata (not L2 rows) to exercise Last.fm source exclusion. A separate
+pre-PDS control uses production `cancelUnsentForDid` (the helper called by
+account disconnect) against a queued API love. That operation has no accepted
+binding or SENT proof; after a signed deletion only the independently accepted
+broad effect reaches ListenBrainz, with no recipient aggregate, L2 decision,
+or narrow API effect. This is helper-level evidence; the HTTP disconnect route
+is not driven by this test. Remaining cross-lane permutations stay pending.
 
 One initial negative-control expectation in the delayed import case was
 corrected after it exposed the expected durable broad behavior: a

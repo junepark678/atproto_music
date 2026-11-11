@@ -17,6 +17,7 @@ import { settleRows } from '../../../src/forward/forward-outbox';
 import { reclaimLoveApiProofRows } from '../../../src/forward/love-api-maintenance';
 import { materializeLoveApiRecipientDecisions } from '../../../src/forward/love-api-materializer';
 import { enqueueLove } from '../../../src/outbox/love-ops';
+import { cancelUnsentForDid } from '../../../src/outbox/operations';
 import { authorizedLiveOptions } from '../../write/support';
 import { type Harness, LOVE, withHarness } from './support';
 
@@ -638,6 +639,72 @@ it.each([
     });
   },
 );
+
+it('does not treat a cancelled-before-PDS API admission as SENT proof', async () => {
+  await withHarness(async (h) => {
+    h.seedUser(h.alice);
+    h.link(h.alice, 'lastfm');
+    const listenbrainz = h.link(h.alice, 'listenbrainz');
+    const rkey = '3kcancelledapi';
+    const artist = 'Cancelled API artist';
+    const track = 'Cancelled before PDS';
+    h.db.run(
+      `INSERT INTO forward_admissions(did,identity_key,path,source_service,created_at_ms,admission_seq)
+       VALUES(?,?,'import','lastfm',?,111)`,
+      h.alice,
+      `love-uri:${h.alice}:${LOVE}:${rkey}`,
+      h.m.clock.nowMs(),
+    );
+    await h.kit.externalPut('Alice', LOVE, rkey, {
+      $type: LOVE,
+      artist,
+      track,
+      createdAt: '2026-01-15T11:00:00Z',
+    });
+    expect((await projectLove(h, rkey)).outcome).toBe('applied');
+    const uri = `at://${h.alice}/${LOVE}/${rkey}`;
+    const accepted = await enqueueLove(h.m, { did: h.alice, input: { artist, track }, origin: 'web' });
+    if (!accepted.ok) throw new Error(`API love refused: ${accepted.reason.code}`);
+    expect(h.op(accepted.operation.id)).toMatchObject({ state: 'queued' });
+    expect(h.db.one('SELECT uri FROM love_api_bindings WHERE operation_id=?', accepted.operation.id)).toBeNull();
+    expect(cancelUnsentForDid(h.db, h.alice, h.m.clock.nowMs())).toEqual([accepted.operation.id]);
+    expect(h.op(accepted.operation.id)).toMatchObject({ state: 'cancelled' });
+    expect(
+      h.db.one("SELECT 1 FROM forward_outbox WHERE kind='love' AND dedupe_key=?", accepted.operation.id),
+    ).toBeNull();
+
+    await h.kit.externalDelete('Alice', LOVE, rkey);
+    const proof = await verifyRecordProof(await h.kit.repos.Alice.getRecordCar(LOVE, rkey), {
+      did: h.alice,
+      collection: LOVE,
+      rkey,
+      signingKey: h.kit.users.Alice.key.didKey,
+    });
+    if (proof.state !== 'absent') throw new Error('expected signed deletion after cancellation');
+    recordLiveEvidence(
+      h.db,
+      { uri, did: h.alice, collection: LOVE, rkey, rev: proof.commit.rev, action: 'delete' },
+      h.m.clock.nowMs(),
+    );
+    expect((await projectLove(h, rkey, true)).outcome).toBe('absent');
+    expect(
+      h.db.all<{ link_id: string }>('SELECT link_id FROM love_api_recipients WHERE uri=? ORDER BY link_id', uri),
+    ).toEqual([]);
+    expect(h.db.one('SELECT 1 FROM love_api_unlove_decisions WHERE uri=?', uri)).toBeNull();
+    const incarnation = h.db.one<{ incarnation_key: string }>(
+      'SELECT incarnation_key FROM love_incarnations WHERE uri=?',
+      uri,
+    )!.incarnation_key;
+    expect(
+      h.db.all<{ link_id: string; dedupe_key: string }>(
+        "SELECT link_id,dedupe_key FROM forward_outbox WHERE kind='unlove' ORDER BY link_id",
+      ),
+    ).toEqual([{ link_id: listenbrainz, dedupe_key: `love-delete:${incarnation}:rev:${proof.commit.rev}` }]);
+    expect(
+      h.db.one("SELECT 1 FROM forward_outbox WHERE kind='unlove' AND dedupe_key LIKE '%:api-recipient'"),
+    ).toBeNull();
+  });
+});
 
 it('rolls back the first real recipient handoff when the second decision handoff throws', async () => {
   await withHarness(async (h) => {
