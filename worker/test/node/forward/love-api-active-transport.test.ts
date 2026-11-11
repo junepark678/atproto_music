@@ -25,6 +25,11 @@ import { ensureAccount } from '../../../src/credentials/accounts';
 import type { Db, SqlParam } from '../../../src/do/db';
 import { cachedIdentityResolver } from '../../../src/do/ingest/identity-cache';
 import { recordLiveEvidence } from '../../../src/do/ingest/live-evidence';
+import {
+  authorizePendingRemovals,
+  executeAuthorizedRemovals,
+  recordPendingRemovals,
+} from '../../../src/do/ingest/live-pending-removals';
 import type { MIGRATIONS } from '../../../src/do/schema';
 import { applyRecordProof } from '../../../src/do/write/apply-record';
 import { type ForwardRuntime, runForward } from '../../../src/forward/forwarder';
@@ -467,12 +472,13 @@ it.each([true, false])(
 );
 
 it.each([
-  { count: 1, sentBeforeAbsence: true },
-  { count: 2, sentBeforeAbsence: true },
-  { count: 2, sentBeforeAbsence: false },
+  { count: 1, sentBeforeAbsence: true, absencePath: 'direct' as const },
+  { count: 2, sentBeforeAbsence: true, absencePath: 'direct' as const },
+  { count: 2, sentBeforeAbsence: false, absencePath: 'direct' as const },
+  { count: 2, sentBeforeAbsence: false, absencePath: 'delayed' as const },
 ])(
   'sends one actual unlove per service after %o API operations reuse one snapshot incarnation',
-  async ({ count, sentBeforeAbsence }) => {
+  async ({ count, sentBeforeAbsence, absencePath }) => {
     const w = await world();
     const linkId = w.link();
     const sk = w.lastfm.addSession('alice_fm');
@@ -649,6 +655,38 @@ it.each([
       rkey,
       signingKey: keys.alice.didKey,
     });
+    const nowMs = w.clock.nowMs();
+    if (absencePath === 'delayed') {
+      const currentLove = wholeDecisionTrace.db.one<{
+        uri: string;
+        cid: string;
+        artist_key: string;
+        track_key: string;
+        artist: string;
+        track: string;
+        recording_mbid: string | null;
+      }>('SELECT uri,cid,artist_key,track_key,artist,track,recording_mbid FROM loves WHERE uri=?', binding!.uri);
+      if (currentLove === null) throw new Error('imported projection missing before delayed API absence');
+      recordPendingRemovals(wholeDecisionTrace.db, [
+        {
+          did: ALICE,
+          uri: binding!.uri,
+          kind: 'love',
+          row: {
+            ...currentLove,
+            listened_at: new Date(nowMs).toISOString(),
+            record_uri: null,
+            listen_id: null,
+          },
+          identityKey: binding!.incarnation_key,
+          windowLo: presentProof.commit.rev,
+          windowHi: absentProof.commit.rev,
+          replacedByCid: null,
+          loveSourceService: 'lastfm',
+          nowMs,
+        },
+      ]);
+    }
     recordLiveEvidence(
       wholeDecisionTrace.db,
       {
@@ -659,9 +697,9 @@ it.each([
         rev: absentProof.commit.rev,
         action: 'delete',
       },
-      w.clock.nowMs(),
+      nowMs,
     );
-    const absentNs = fromMs(w.clock.nowMs());
+    const absentNs = fromMs(nowMs);
     const applyOptions = authorizedLiveOptions(wholeDecisionTrace.db, absentProof, w.rt.random);
     const absentResult = wholeDecisionTrace.db.tx(() =>
       applyRecordProof(wholeDecisionTrace.db, absentProof, {
@@ -671,6 +709,25 @@ it.each([
       }),
     );
     expect(absentResult.outcome).toBe('absent');
+    if (absencePath === 'delayed') {
+      wholeDecisionTrace.db.tx(() =>
+        authorizePendingRemovals(
+          wholeDecisionTrace.db,
+          { uri: binding!.uri, rev: absentProof.commit.rev, action: 'delete' },
+          nowMs,
+        ),
+      );
+      expect(
+        wholeDecisionTrace.db.tx(() =>
+          executeAuthorizedRemovals(wholeDecisionTrace.db, {
+            uri: binding!.uri,
+            nowMs,
+            random: w.rt.random,
+            limit: 1,
+          }),
+        ).groups,
+      ).toBe(1);
+    }
 
     const unloveRowsBeforeDispatch = w.app.db.all(
       "SELECT link_id,kind,dedupe_key,state FROM forward_outbox WHERE kind='unlove'",
