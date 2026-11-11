@@ -243,6 +243,118 @@ export function recordLoveApiComparisonFact(
   });
 }
 
+type AcceptedDecisionMinimum = {
+  did: string;
+  uri: string;
+  incarnationKey: string;
+  linkId: string;
+  generation: number;
+  authorizationUri: string;
+  authorizationRev: string;
+  factAction: string;
+  factCid: string;
+  expiresAtMs: number;
+  dueAtMs: number;
+  originalAction: string | null;
+  originalCid: string | null;
+  originalHorizonMs: number | null;
+  originalConflicted: number | null;
+};
+
+/** Persist only a minimum supported by the immutable decision's exact clean fact. */
+function persistAcceptedDecisionMinimum(
+  db: Db,
+  decision: AcceptedDecisionMinimum,
+  incoming: { uri: string; rev: string; action: string; cid: string; horizonMs: number; conflicted: number } | null,
+  nowMs: number,
+): void {
+  if (
+    decision.originalAction !== decision.factAction ||
+    decision.originalCid !== decision.factCid ||
+    decision.originalConflicted !== 0 ||
+    decision.originalHorizonMs === null ||
+    !Number.isSafeInteger(decision.originalHorizonMs) ||
+    decision.originalHorizonMs <= 0 ||
+    !Number.isSafeInteger(decision.expiresAtMs) ||
+    decision.expiresAtMs <= 0
+  )
+    return;
+  const incomingHorizon =
+    incoming !== null &&
+    incoming.uri === decision.uri &&
+    incoming.action === decision.factAction &&
+    incoming.cid === decision.factCid &&
+    incoming.conflicted === 0 &&
+    Number.isSafeInteger(incoming.horizonMs) &&
+    incoming.horizonMs > 0
+      ? incoming.horizonMs
+      : Number.MAX_SAFE_INTEGER;
+  const minimumHorizon = Math.min(decision.expiresAtMs, decision.originalHorizonMs, incomingHorizon);
+  if (minimumHorizon >= decision.expiresAtMs && decision.dueAtMs <= nowMs) return;
+  db.run(
+    `UPDATE love_api_unlove_decisions SET expires_at_ms=?,due_at_ms=min(due_at_ms,?)
+     WHERE did=? AND uri=? AND incarnation_key=? AND link_id=? AND generation=?
+       AND authorization_uri=? AND authorization_rev=? AND fact_action=? AND fact_cid=? AND expires_at_ms=?`,
+    minimumHorizon,
+    nowMs,
+    decision.did,
+    decision.uri,
+    decision.incarnationKey,
+    decision.linkId,
+    decision.generation,
+    decision.authorizationUri,
+    decision.authorizationRev,
+    decision.factAction,
+    decision.factCid,
+    decision.expiresAtMs,
+  );
+}
+
+function decisionMinimumFromRow(row: {
+  did: string;
+  uri: string;
+  incarnation_key: string;
+  link_id: string;
+  generation: number;
+  decision_authorization_uri: string | null;
+  decision_authorization_rev: string | null;
+  decision_fact_action: string | null;
+  decision_fact_cid: string | null;
+  decision_expires_at_ms: number | null;
+  decision_due_at_ms: number | null;
+  original_action: string | null;
+  original_cid: string | null;
+  original_horizon_ms: number | null;
+  original_conflicted: number | null;
+}): AcceptedDecisionMinimum | null {
+  if (
+    row.decision_authorization_uri === null ||
+    row.decision_authorization_rev === null ||
+    row.decision_fact_action === null ||
+    row.decision_fact_cid === null ||
+    row.decision_expires_at_ms === null ||
+    row.decision_due_at_ms === null
+  )
+    return null;
+  return {
+    did: row.did,
+    uri: row.uri,
+    incarnationKey: row.incarnation_key,
+    linkId: row.link_id,
+    generation: row.generation,
+    authorizationUri: row.decision_authorization_uri,
+    authorizationRev: row.decision_authorization_rev,
+    factAction: row.decision_fact_action,
+    factCid: row.decision_fact_cid,
+    expiresAtMs: row.decision_expires_at_ms,
+    dueAtMs: row.decision_due_at_ms,
+    originalAction: row.original_action,
+    originalCid: row.original_cid,
+    originalHorizonMs: row.original_horizon_ms,
+    originalConflicted: row.original_conflicted,
+  };
+}
+
 /** Compare an authenticated live tuple before A2 authorization and retain every negative result. */
 export function compareLoveApiComparisonFact(
   db: Db,
@@ -293,6 +405,9 @@ export function prepareLoveApiDirectAbsence(
   )
     return null;
   const rows = db.all<{
+    did: string;
+    uri: string;
+    incarnation_key: string;
     link_id: string;
     generation: number;
     sent_operation_id: string | null;
@@ -309,8 +424,18 @@ export function prepareLoveApiDirectAbsence(
     binding_origin: string | null;
     pending_api_operation_id: string | null;
     pending_api_origin: string | null;
+    decision_authorization_uri: string | null;
+    decision_authorization_rev: string | null;
+    decision_fact_action: string | null;
+    decision_fact_cid: string | null;
+    decision_expires_at_ms: number | null;
+    decision_due_at_ms: number | null;
+    original_action: string | null;
+    original_cid: string | null;
+    original_horizon_ms: number | null;
+    original_conflicted: number | null;
   }>(
-    `SELECT r.link_id,r.generation,r.sent_operation_id,r.state,
+    `SELECT r.did,r.uri,r.incarnation_key,r.link_id,r.generation,r.sent_operation_id,r.state,
             e.did AS evidence_did,e.collection AS evidence_collection,e.rkey AS evidence_rkey,
             e.del_rev AS evidence_del_rev,e.conflict_rev AS evidence_conflict_rev,
             e.expires_at_ms AS evidence_expires_at_ms,
@@ -327,10 +452,19 @@ export function prepareLoveApiDirectAbsence(
                JOIN love_api_bindings b2 ON b2.did=m2.did AND b2.operation_id=m2.operation_id
                WHERE m2.did=r.did AND m2.uri=r.uri AND m2.incarnation_key=r.incarnation_key
                  AND m2.link_id=r.link_id AND m2.generation=r.generation
-                 AND b2.uri=r.uri AND b2.incarnation_key=r.incarnation_key LIMIT 1) AS pending_api_origin
+                 AND b2.uri=r.uri AND b2.incarnation_key=r.incarnation_key LIMIT 1) AS pending_api_origin,
+            d.authorization_uri AS decision_authorization_uri,d.authorization_rev AS decision_authorization_rev,
+            d.fact_action AS decision_fact_action,d.fact_cid AS decision_fact_cid,
+            d.expires_at_ms AS decision_expires_at_ms,d.due_at_ms AS decision_due_at_ms,
+            original.action AS original_action,original.cid AS original_cid,
+            original.horizon_ms AS original_horizon_ms,original.conflicted AS original_conflicted
      FROM love_api_recipients r JOIN linked_accounts l ON l.id=r.link_id AND l.generation=r.generation
      JOIN live_record_evidence e ON e.uri=r.uri
      LEFT JOIN love_api_bindings b ON b.did=r.did AND b.operation_id=r.sent_operation_id
+     LEFT JOIN love_api_unlove_decisions d ON d.did=r.did AND d.uri=r.uri AND d.incarnation_key=r.incarnation_key
+       AND d.link_id=r.link_id AND d.generation=r.generation
+     LEFT JOIN love_api_comparison_facts original
+       ON original.authorization_uri=d.authorization_uri AND original.authorization_rev=d.authorization_rev
      WHERE r.did=? AND r.uri=? AND r.incarnation_key=? AND r.state IN ('present','sealed')`,
     args.did,
     args.uri,
@@ -358,21 +492,36 @@ export function prepareLoveApiDirectAbsence(
     },
     args.nowMs,
   );
-  if (!active) return 'conflicted';
   const retainedFact = db.one<{ action: LoveApiFactAction; cid: string; horizon_ms: number; conflicted: number }>(
     'SELECT action,cid,horizon_ms,conflicted FROM love_api_comparison_facts WHERE authorization_uri=? AND authorization_rev=?',
     args.uri,
     args.rev,
   );
-  if (
-    retainedFact === null ||
-    retainedFact.action !== 'delete' ||
-    retainedFact.cid !== '' ||
-    retainedFact.conflicted !== 0 ||
-    !Number.isSafeInteger(retainedFact.horizon_ms) ||
-    retainedFact.horizon_ms <= args.nowMs
-  )
+  const acceptedIncoming =
+    retainedFact !== null
+      ? {
+          uri: args.uri,
+          rev: args.rev,
+          action: retainedFact.action,
+          cid: retainedFact.cid,
+          horizonMs: retainedFact.horizon_ms,
+          conflicted: retainedFact.conflicted,
+        }
+      : null;
+  const factValid =
+    retainedFact !== null &&
+    retainedFact.action === 'delete' &&
+    retainedFact.cid === '' &&
+    retainedFact.conflicted === 0 &&
+    Number.isSafeInteger(retainedFact.horizon_ms) &&
+    retainedFact.horizon_ms > 0;
+  if (!active || !factValid || retainedFact === null || retainedFact.horizon_ms <= args.nowMs) {
+    for (const row of rows) {
+      const decision = decisionMinimumFromRow(row);
+      if (decision !== null) persistAcceptedDecisionMinimum(db, decision, acceptedIncoming, args.nowMs);
+    }
     return 'conflicted';
+  }
   const horizonMs = Math.min(first.evidence_expires_at_ms, retainedFact.horizon_ms);
   const recipients: PreparedLoveApiAbsence['recipients'] = [];
   for (const row of rows) {
@@ -493,8 +642,37 @@ export function prepareLoveApiWindowAbsence(
     args.generation,
   );
   if (owner === null || event.conflicted !== 0) return event.conflicted ? 'conflicted' : null;
-  const recipient = db.one<{ sent_operation_id: string | null; state: string }>(
-    `SELECT sent_operation_id,state FROM love_api_recipients WHERE ${RECIPIENT_KEY}`,
+  const recipient = db.one<{
+    did: string;
+    uri: string;
+    incarnation_key: string;
+    link_id: string;
+    generation: number;
+    sent_operation_id: string | null;
+    state: string;
+    decision_authorization_uri: string | null;
+    decision_authorization_rev: string | null;
+    decision_fact_action: string | null;
+    decision_fact_cid: string | null;
+    decision_expires_at_ms: number | null;
+    decision_due_at_ms: number | null;
+    original_action: string | null;
+    original_cid: string | null;
+    original_horizon_ms: number | null;
+    original_conflicted: number | null;
+  }>(
+    `SELECT r.did,r.uri,r.incarnation_key,r.link_id,r.generation,r.sent_operation_id,r.state,
+            d.authorization_uri AS decision_authorization_uri,d.authorization_rev AS decision_authorization_rev,
+            d.fact_action AS decision_fact_action,d.fact_cid AS decision_fact_cid,
+            d.expires_at_ms AS decision_expires_at_ms,d.due_at_ms AS decision_due_at_ms,
+            original.action AS original_action,original.cid AS original_cid,
+            original.horizon_ms AS original_horizon_ms,original.conflicted AS original_conflicted
+     FROM love_api_recipients r
+     LEFT JOIN love_api_unlove_decisions d ON d.did=r.did AND d.uri=r.uri AND d.incarnation_key=r.incarnation_key
+       AND d.link_id=r.link_id AND d.generation=r.generation
+     LEFT JOIN love_api_comparison_facts original
+       ON original.authorization_uri=d.authorization_uri AND original.authorization_rev=d.authorization_rev
+     WHERE r.did=? AND r.uri=? AND r.incarnation_key=? AND r.link_id=? AND r.generation=?`,
     args.did,
     args.uri,
     args.incarnationKey,
@@ -542,28 +720,46 @@ export function prepareLoveApiWindowAbsence(
       args.generation,
     ) !== null;
   const proposedHorizonMs = Math.min(args.windowExpiresAtMs, event.expires_at_ms);
+  const retainedDecision = decisionMinimumFromRow(recipient);
   const retainedHorizon = { value: null as number | null };
-  if (
-    !recordLoveApiComparisonFact(
-      db,
-      {
-        uri: args.uri,
-        rev: args.rev,
-        action: args.action as LoveApiFactAction,
-        cid: args.cid,
-        horizonMs: proposedHorizonMs,
-      },
-      args.nowMs,
-      retainedHorizon,
-    )
-  )
+  const recorded = recordLoveApiComparisonFact(
+    db,
+    {
+      uri: args.uri,
+      rev: args.rev,
+      action: args.action as LoveApiFactAction,
+      cid: args.cid,
+      horizonMs: proposedHorizonMs,
+    },
+    args.nowMs,
+    retainedHorizon,
+  );
+  if (!recorded) {
+    if (retainedDecision !== null) persistAcceptedDecisionMinimum(db, retainedDecision, null, args.nowMs);
     return 'conflicted';
+  }
   if (
     retainedHorizon.value === null ||
     !Number.isSafeInteger(retainedHorizon.value) ||
+    retainedHorizon.value <= 0 ||
     retainedHorizon.value <= args.nowMs
-  )
+  ) {
+    if (retainedDecision !== null && retainedHorizon.value !== null && Number.isSafeInteger(retainedHorizon.value))
+      persistAcceptedDecisionMinimum(
+        db,
+        retainedDecision,
+        {
+          uri: args.uri,
+          rev: args.rev,
+          action: args.action,
+          cid: args.cid,
+          horizonMs: retainedHorizon.value,
+          conflicted: 0,
+        },
+        args.nowMs,
+      );
     return 'conflicted';
+  }
   const horizonMs = Math.min(proposedHorizonMs, retainedHorizon.value);
   return {
     did: args.did,
@@ -665,32 +861,43 @@ export function sealLoveApiDirectAbsence(
     }
     const payload = JSON.stringify(lovePayload(love, recipient.sentOrigin ?? recipient.pendingApiOrigin ?? undefined));
     const retained = db.one<{
-      retained_action: string;
-      retained_cid: string;
-      retained_horizon_ms: number;
-      retained_conflicted: number;
+      retained_action: string | null;
+      retained_cid: string | null;
+      retained_horizon_ms: number | null;
+      retained_conflicted: number | null;
       decision_did: string | null;
       authorization_uri: string | null;
       authorization_rev: string | null;
       fact_action: string | null;
       fact_cid: string | null;
       expires_at_ms: number | null;
+      due_at_ms: number | null;
       payload_json: string | null;
+      original_action: string | null;
+      original_cid: string | null;
+      original_horizon_ms: number | null;
+      original_conflicted: number | null;
     }>(
-      `SELECT f.action AS retained_action,f.cid AS retained_cid,f.horizon_ms AS retained_horizon_ms,
-              f.conflicted AS retained_conflicted,d.did AS decision_did,
-              d.authorization_uri,d.authorization_rev,d.fact_action,d.fact_cid,d.expires_at_ms,d.payload_json
-       FROM love_api_comparison_facts f
+      `SELECT incoming.action AS retained_action,incoming.cid AS retained_cid,
+              incoming.horizon_ms AS retained_horizon_ms,incoming.conflicted AS retained_conflicted,
+              d.did AS decision_did,d.authorization_uri,d.authorization_rev,d.fact_action,d.fact_cid,
+              d.expires_at_ms,d.due_at_ms,d.payload_json,
+              original.action AS original_action,original.cid AS original_cid,
+              original.horizon_ms AS original_horizon_ms,original.conflicted AS original_conflicted
+       FROM (SELECT 1) seed
+       LEFT JOIN love_api_comparison_facts incoming
+         ON incoming.authorization_uri=? AND incoming.authorization_rev=?
        LEFT JOIN love_api_unlove_decisions d
          ON d.did=? AND d.uri=? AND d.incarnation_key=? AND d.link_id=? AND d.generation=?
-       WHERE f.authorization_uri=? AND f.authorization_rev=?`,
+       LEFT JOIN love_api_comparison_facts original
+         ON original.authorization_uri=d.authorization_uri AND original.authorization_rev=d.authorization_rev`,
+      prepared.uri,
+      prepared.rev,
       prepared.did,
       prepared.uri,
       prepared.incarnationKey,
       recipient.linkId,
       recipient.generation,
-      prepared.uri,
-      prepared.rev,
     );
     if (retained === null) return false;
     const hasDecision = retained.decision_did !== null;
@@ -701,18 +908,43 @@ export function sealLoveApiDirectAbsence(
           fact_action: retained.fact_action!,
           fact_cid: retained.fact_cid!,
           expires_at_ms: retained.expires_at_ms!,
+          due_at_ms: retained.due_at_ms!,
           payload_json: retained.payload_json!,
         }
       : null;
-    const minimumHorizon = Math.min(
-      prepared.horizonMs,
-      retained.retained_horizon_ms,
-      existing?.expires_at_ms ?? Number.MAX_SAFE_INTEGER,
-    );
-    if (existing !== null && minimumHorizon < existing.expires_at_ms)
+    const incomingValid =
+      retained.retained_action === prepared.action &&
+      retained.retained_cid === prepared.cid &&
+      retained.retained_conflicted === 0 &&
+      retained.retained_horizon_ms !== null &&
+      Number.isSafeInteger(retained.retained_horizon_ms) &&
+      retained.retained_horizon_ms > 0;
+    const originalValid =
+      existing === null ||
+      (retained.original_action === existing.fact_action &&
+        retained.original_cid === existing.fact_cid &&
+        retained.original_conflicted === 0 &&
+        retained.original_horizon_ms !== null &&
+        Number.isSafeInteger(retained.original_horizon_ms) &&
+        retained.original_horizon_ms > 0);
+    const minimumHorizon =
+      existing === null
+        ? incomingValid
+          ? Math.min(prepared.horizonMs, retained.retained_horizon_ms!)
+          : Number.MAX_SAFE_INTEGER
+        : originalValid
+          ? Math.min(
+              existing.expires_at_ms,
+              retained.original_horizon_ms!,
+              incomingValid ? Math.min(prepared.horizonMs, retained.retained_horizon_ms!) : Number.MAX_SAFE_INTEGER,
+            )
+          : existing.expires_at_ms;
+    if (existing !== null && originalValid && Number.isSafeInteger(minimumHorizon))
       db.run(
         `UPDATE love_api_unlove_decisions SET expires_at_ms=?,due_at_ms=min(due_at_ms,?)
-         WHERE did=? AND uri=? AND incarnation_key=? AND link_id=? AND generation=? AND expires_at_ms>?`,
+         WHERE did=? AND uri=? AND incarnation_key=? AND link_id=? AND generation=?
+           AND authorization_uri=? AND authorization_rev=? AND fact_action=? AND fact_cid=?
+           AND (expires_at_ms>? OR due_at_ms>?)`,
         minimumHorizon,
         prepared.nowMs,
         prepared.did,
@@ -720,15 +952,14 @@ export function sealLoveApiDirectAbsence(
         prepared.incarnationKey,
         recipient.linkId,
         recipient.generation,
+        existing.authorization_uri,
+        existing.authorization_rev,
+        existing.fact_action,
+        existing.fact_cid,
         minimumHorizon,
+        prepared.nowMs,
       );
-    if (
-      retained.retained_action !== prepared.action ||
-      retained.retained_cid !== prepared.cid ||
-      retained.retained_conflicted !== 0 ||
-      !Number.isSafeInteger(retained.retained_horizon_ms) ||
-      retained.retained_horizon_ms <= prepared.nowMs
-    )
+    if (!originalValid || !incomingValid || !Number.isSafeInteger(minimumHorizon) || minimumHorizon <= prepared.nowMs)
       return false;
     if (
       existing !== null &&
@@ -785,13 +1016,13 @@ export function sealLoveApiDirectAbsence(
         prepared.rev,
         prepared.action,
         prepared.cid,
-        prepared.horizonMs,
+        minimumHorizon,
         prepared.nowMs,
         prepared.nowMs,
       );
       continue;
     }
-    const expiry = Math.min(existing.expires_at_ms, prepared.horizonMs);
+    const expiry = minimumHorizon;
     const payloadChanged = existing.payload_json !== payload;
     if (expiry !== existing.expires_at_ms || payloadChanged)
       db.run(

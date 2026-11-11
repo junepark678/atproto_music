@@ -12,6 +12,7 @@ import {
   prepareLoveApiDirectAbsence,
   prepareLoveApiRecipientHandoff,
   prepareLoveApiWindowAbsence,
+  recordLoveApiComparisonFact,
   sealLoveApiDirectAbsence,
 } from '../../src/forward/love-api-recipients';
 import {
@@ -967,6 +968,310 @@ it('delayed preparation and the shared sealer persist the retained minimum befor
       }),
     ).toBe(true);
     expect(db.one('SELECT expires_at_ms FROM love_api_unlove_decisions')).toEqual({ expires_at_ms: 50 });
+  }));
+
+it.each([30, 50, 60])('persists an accepted direct minimum before expiry refusal at now=%s', async (nowMs) =>
+  withMigratedDb((db) => {
+    seed(db, 1);
+    const uri = `at://${DID}/com.example.atmusic.love/r1`;
+    db.run('UPDATE love_api_comparison_facts SET horizon_ms=50 WHERE authorization_uri=?', uri);
+    db.run(
+      `INSERT INTO live_record_evidence(uri,did,collection,rkey,del_rev,received_ms,expires_at_ms)
+       VALUES(?,?,'com.example.atmusic.love','r1',?,20,500)`,
+      uri,
+      DID,
+      REV,
+    );
+    const prepared = prepareLoveApiDirectAbsence(db, { did: DID, uri, incarnationKey: 'inc1', rev: REV, nowMs });
+    if (prepared !== null && prepared !== 'conflicted')
+      sealLoveApiDirectAbsence(db, prepared, { artist: 'Artist', track: 'Track 1', album: null, recordingMbid: null });
+    expect(prepared === 'conflicted').toBe(nowMs >= 50);
+    expect(db.one('SELECT expires_at_ms FROM love_api_unlove_decisions')).toEqual({ expires_at_ms: 50 });
+    expect(
+      db.one('SELECT horizon_ms,conflicted FROM love_api_comparison_facts WHERE authorization_uri=?', uri),
+    ).toEqual({
+      horizon_ms: 50,
+      conflicted: 0,
+    });
+    expect(db.one('SELECT 1 FROM forward_deferred_love_witnesses')).toBeNull();
+    expect(db.one("SELECT 1 FROM forward_outbox WHERE kind='unlove'")).toBeNull();
+  }),
+);
+
+it.each([30, 50, 60])('persists an accepted delayed minimum before expiry refusal at now=%s', async (nowMs) =>
+  withMigratedDb((db) => {
+    seed(db, 1);
+    const uri = `at://${DID}/com.example.atmusic.love/r1`;
+    db.run('UPDATE love_api_comparison_facts SET horizon_ms=50 WHERE authorization_uri=?', uri);
+    db.run(
+      `INSERT INTO live_pending_removals(
+         uri,member_uri,removed_cid,kind,window_lo,window_hi,replaced_by_cid,identity_key,
+         artist_key,track_key,artist,track,authorized_rev,created_at_ms,expires_at_ms)
+       VALUES(?,?,'cid','love','',?,'','inc1','artist','track','Artist','Track',?,1,500)`,
+      uri,
+      uri,
+      REV,
+      REV,
+    );
+    db.run(
+      `INSERT INTO love_api_window_owners(
+         uri,member_uri,removed_cid,window_lo,window_hi,replaced_by_cid,did,incarnation_key,link_id,generation,created_at_ms)
+       VALUES(?,?,'cid','',?,'',?,'inc1','link',1,1)`,
+      uri,
+      uri,
+      REV,
+      DID,
+    );
+    db.run(
+      `INSERT INTO live_pending_removal_events(uri,rev,action,cid,created_at_ms,expires_at_ms)
+       VALUES(?,?,'delete','',1,500)`,
+      uri,
+      REV,
+    );
+    const args = {
+      did: DID,
+      uri,
+      incarnationKey: 'inc1',
+      linkId: 'link',
+      generation: 1,
+      memberUri: uri,
+      removedCid: 'cid',
+      windowLo: '',
+      windowHi: REV,
+      replacedByCid: '',
+      rev: REV,
+      action: 'delete',
+      cid: '',
+      windowExpiresAtMs: 500,
+      nowMs,
+    };
+    const prepared = prepareLoveApiWindowAbsence(db, args);
+    if (prepared !== null && prepared !== 'conflicted')
+      sealLoveApiDirectAbsence(db, prepared, { artist: 'Artist', track: 'Track 1', album: null, recordingMbid: null });
+    expect(prepared === 'conflicted').toBe(nowMs >= 50);
+    expect(db.one('SELECT expires_at_ms FROM love_api_unlove_decisions')).toEqual({ expires_at_ms: 50 });
+    expect(
+      db.one('SELECT horizon_ms,conflicted FROM love_api_comparison_facts WHERE authorization_uri=?', uri),
+    ).toEqual({
+      horizon_ms: 50,
+      conflicted: 0,
+    });
+    expect(db.one('SELECT 1 FROM forward_deferred_love_witnesses')).toBeNull();
+    expect(db.one("SELECT 1 FROM forward_outbox WHERE kind='unlove'")).toBeNull();
+  }),
+);
+
+it.each(['insert', 'same', 'mismatch'] as const)('uses reloaded minimum for prepared replay %s', async (mode) =>
+  withMigratedDb((db) => {
+    seed(db, 1);
+    const uri = `at://${DID}/com.example.atmusic.love/r1`;
+    db.run(
+      `INSERT INTO live_record_evidence(uri,did,collection,rkey,del_rev,received_ms,expires_at_ms)
+       VALUES(?,?,'com.example.atmusic.love','r1',?,20,500)`,
+      uri,
+      DID,
+      REV,
+    );
+    const prepared = prepareLoveApiDirectAbsence(db, { did: DID, uri, incarnationKey: 'inc1', rev: REV, nowMs: 30 });
+    if (prepared === null || prepared === 'conflicted') throw new Error('direct preparation failed');
+    expect(prepared.horizonMs).toBe(500);
+    recordLoveApiComparisonFact(db, { uri, rev: REV, action: 'delete', cid: '', horizonMs: 50 }, 30);
+    if (mode === 'insert') db.run('DELETE FROM love_api_unlove_decisions');
+    const sealed = sealLoveApiDirectAbsence(db, prepared, {
+      artist: mode === 'mismatch' ? 'Changed' : 'Artist',
+      track: 'Track 1',
+      album: null,
+      recordingMbid: null,
+    });
+    expect(sealed).toBe(mode !== 'mismatch');
+    expect(db.one('SELECT expires_at_ms FROM love_api_unlove_decisions')).toEqual({ expires_at_ms: 50 });
+    expect(db.one('SELECT authorization_uri,authorization_rev FROM love_api_unlove_decisions')).toEqual({
+      authorization_uri: uri,
+      authorization_rev: REV,
+    });
+  }),
+);
+
+it('uses the existing decision original fact before refusing a different verified revision', async () =>
+  withMigratedDb((db) => {
+    seed(db, 1);
+    const uri = `at://${DID}/com.example.atmusic.love/r1`;
+    const nextRev = '3lbcdefghijmv';
+    db.run(
+      'UPDATE love_api_comparison_facts SET horizon_ms=50 WHERE authorization_uri=? AND authorization_rev=?',
+      uri,
+      REV,
+    );
+    db.run(
+      `INSERT INTO live_record_evidence(uri,did,collection,rkey,del_rev,received_ms,expires_at_ms)
+       VALUES(?,?,'com.example.atmusic.love','r1',?,20,500)`,
+      uri,
+      DID,
+      nextRev,
+    );
+    const original = db.one('SELECT payload_json,authorization_uri,authorization_rev FROM love_api_unlove_decisions');
+    const prepared = prepareLoveApiDirectAbsence(db, {
+      did: DID,
+      uri,
+      incarnationKey: 'inc1',
+      rev: nextRev,
+      nowMs: 30,
+    });
+    if (prepared === null || prepared === 'conflicted') throw new Error('new revision preparation failed');
+    expect(prepared.horizonMs).toBe(500);
+    expect(
+      sealLoveApiDirectAbsence(db, prepared, { artist: 'Artist', track: 'Track 1', album: null, recordingMbid: null }),
+    ).toBe(false);
+    expect(db.one('SELECT expires_at_ms FROM love_api_unlove_decisions')).toEqual({ expires_at_ms: 50 });
+    expect(db.one('SELECT payload_json,authorization_uri,authorization_rev FROM love_api_unlove_decisions')).toEqual(
+      original,
+    );
+    expect(
+      db.all(
+        'SELECT authorization_rev,horizon_ms,conflicted FROM love_api_comparison_facts ORDER BY authorization_rev',
+      ),
+    ).toEqual([
+      { authorization_rev: REV, horizon_ms: 50, conflicted: 0 },
+      { authorization_rev: nextRev, horizon_ms: 500, conflicted: 0 },
+    ]);
+  }));
+
+it('does not borrow a shorter fact from another URI when refusing a different revision', async () =>
+  withMigratedDb((db) => {
+    seed(db, 2);
+    const uri = `at://${DID}/com.example.atmusic.love/r1`;
+    const unrelatedUri = `at://${DID}/com.example.atmusic.love/r2`;
+    const nextRev = '3lbcdefghijmv';
+    db.run(
+      'UPDATE love_api_comparison_facts SET horizon_ms=50 WHERE authorization_uri=? AND authorization_rev=?',
+      uri,
+      REV,
+    );
+    db.run(
+      'UPDATE love_api_comparison_facts SET horizon_ms=10 WHERE authorization_uri=? AND authorization_rev=?',
+      unrelatedUri,
+      REV,
+    );
+    db.run(
+      `INSERT INTO live_record_evidence(uri,did,collection,rkey,del_rev,received_ms,expires_at_ms)
+       VALUES(?,?,'com.example.atmusic.love','r1',?,20,500)`,
+      uri,
+      DID,
+      nextRev,
+    );
+    const prepared = prepareLoveApiDirectAbsence(db, {
+      did: DID,
+      uri,
+      incarnationKey: 'inc1',
+      rev: nextRev,
+      nowMs: 30,
+    });
+    if (prepared === null || prepared === 'conflicted') throw new Error('new revision preparation failed');
+    expect(
+      sealLoveApiDirectAbsence(db, prepared, { artist: 'Artist', track: 'Track 1', album: null, recordingMbid: null }),
+    ).toBe(false);
+    expect(db.one('SELECT expires_at_ms,authorization_rev FROM love_api_unlove_decisions WHERE uri=?', uri)).toEqual({
+      expires_at_ms: 50,
+      authorization_rev: REV,
+    });
+    expect(db.one('SELECT expires_at_ms FROM love_api_unlove_decisions WHERE uri=?', unrelatedUri)).toEqual({
+      expires_at_ms: 10_000,
+    });
+    expect(
+      db.one(
+        'SELECT horizon_ms,conflicted FROM love_api_comparison_facts WHERE authorization_uri=? AND authorization_rev=?',
+        unrelatedUri,
+        REV,
+      ),
+    ).toEqual({
+      horizon_ms: 10,
+      conflicted: 0,
+    });
+  }));
+
+it('fails closed when the accepted original fact is conflicted', async () =>
+  withMigratedDb((db) => {
+    seed(db, 1);
+    const uri = `at://${DID}/com.example.atmusic.love/r1`;
+    const nextRev = '3lbcdefghijmv';
+    db.run(
+      `INSERT INTO live_record_evidence(uri,did,collection,rkey,del_rev,received_ms,expires_at_ms)
+       VALUES(?,?,'com.example.atmusic.love','r1',?,20,500)`,
+      uri,
+      DID,
+      nextRev,
+    );
+    const prepared = prepareLoveApiDirectAbsence(db, {
+      did: DID,
+      uri,
+      incarnationKey: 'inc1',
+      rev: nextRev,
+      nowMs: 30,
+    });
+    if (prepared === null || prepared === 'conflicted') throw new Error('new revision preparation failed');
+    db.run(
+      'UPDATE love_api_comparison_facts SET conflicted=1 WHERE authorization_uri=? AND authorization_rev=?',
+      uri,
+      REV,
+    );
+    expect(
+      sealLoveApiDirectAbsence(db, prepared, { artist: 'Artist', track: 'Track 1', album: null, recordingMbid: null }),
+    ).toBe(false);
+    expect(db.one('SELECT expires_at_ms,authorization_rev FROM love_api_unlove_decisions')).toEqual({
+      expires_at_ms: 10_000,
+      authorization_rev: REV,
+    });
+    expect(db.one('SELECT authorization_rev FROM love_api_unlove_decisions')).not.toEqual({
+      authorization_rev: nextRev,
+    });
+  }));
+
+it('fails closed when the exact original-fact lookup is missing', async () =>
+  withMigratedDb((db) => {
+    seed(db, 1);
+    const uri = `at://${DID}/com.example.atmusic.love/r1`;
+    db.run(
+      `INSERT INTO live_record_evidence(uri,did,collection,rkey,del_rev,received_ms,expires_at_ms)
+       VALUES(?,?,'com.example.atmusic.love','r1',?,20,500)`,
+      uri,
+      DID,
+      REV,
+    );
+    const prepared = prepareLoveApiDirectAbsence(db, { did: DID, uri, incarnationKey: 'inc1', rev: REV, nowMs: 30 });
+    if (prepared === null || prepared === 'conflicted') throw new Error('direct preparation failed');
+    recordLoveApiComparisonFact(db, { uri, rev: REV, action: 'delete', cid: '', horizonMs: 50 }, 30);
+    const incomplete: Db = {
+      all: <T>(sql: string, ...params: SqlParam[]) => db.all<T>(sql, ...params),
+      one: <T>(sql: string, ...params: SqlParam[]) => {
+        const row = db.one<Record<string, unknown>>(sql, ...params);
+        if (row === null || !sql.includes('original.action AS original_action')) return row as T | null;
+        return {
+          ...row,
+          original_action: null,
+          original_cid: null,
+          original_horizon_ms: null,
+          original_conflicted: null,
+        } as T;
+      },
+      run: (sql: string, ...params: SqlParam[]) => db.run(sql, ...params),
+      tx: <T>(fn: () => T extends Promise<unknown> ? never : T) => db.tx(fn),
+    };
+    expect(
+      sealLoveApiDirectAbsence(incomplete, prepared, {
+        artist: 'Artist',
+        track: 'Track 1',
+        album: null,
+        recordingMbid: null,
+      }),
+    ).toBe(false);
+    expect(db.one('SELECT expires_at_ms,authorization_rev FROM love_api_unlove_decisions')).toEqual({
+      expires_at_ms: 10_000,
+      authorization_rev: REV,
+    });
+    expect(db.one('SELECT horizon_ms,conflicted FROM love_api_comparison_facts')).toEqual({
+      horizon_ms: 50,
+      conflicted: 0,
+    });
   }));
 
 it('validates owned pending members by durable cursor before awaiting a selected SENT proof', async () =>
