@@ -1,14 +1,17 @@
 import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { trackKey } from '@atmusic/core/music-key';
 import { seededRandom } from '@atmusic/core/test-support/random';
 import { expect, it } from 'vitest';
 import type { Db, SqlParam } from '../../src/do/db';
+import { settleRowsReturning } from '../../src/forward/forward-outbox';
 import type { ForwardRuntime } from '../../src/forward/forwarder';
 import { reclaimLoveApiProofRows } from '../../src/forward/love-api-maintenance';
 import { materializeLoveApiRecipientDecisions } from '../../src/forward/love-api-materializer';
 import {
   prepareLoveApiDirectAbsence,
   prepareLoveApiRecipientHandoff,
+  prepareLoveApiWindowAbsence,
   sealLoveApiDirectAbsence,
 } from '../../src/forward/love-api-recipients';
 import {
@@ -79,6 +82,47 @@ function seed(db: Db, n: number, pending = 0) {
   }
 }
 const total = (db: Db) => db.one<{ n: number }>('SELECT total_changes() n')!.n;
+const GEN2_URI = `at://${DID}/com.example.atmusic.love/r1`;
+function seedGenerationTwoPending(db: Db, outboxState: 'queued' | 'held' | 'sent', storedKey = 'g2:op1') {
+  seed(db, 1);
+  const [artistKey, trackKeyValue] = trackKey('Artist', 'Track 1');
+  db.run('DELETE FROM love_api_recipients');
+  db.run("UPDATE linked_accounts SET generation=2 WHERE id='link'");
+  db.run(
+    `INSERT INTO love_api_recipients(
+       did,uri,incarnation_key,link_id,generation,aggregate_seq,state,sent_operation_id,next_member_seq,created_at_ms,updated_at_ms)
+     VALUES(?,?,'inc1','link',2,1,'sealed',NULL,2,1,1)`,
+    DID,
+    GEN2_URI,
+  );
+  db.run(
+    `INSERT INTO love_api_unlove_decisions(
+       did,uri,incarnation_key,link_id,generation,artist,track,artist_key,track_key,payload_json,
+       authorization_uri,authorization_rev,fact_action,fact_cid,expires_at_ms,due_at_ms,created_at_ms)
+     VALUES(?,?,'inc1','link',2,'Artist','Track 1',?,?,?,? ,?,'delete','',10000,1,1)`,
+    DID,
+    GEN2_URI,
+    artistKey,
+    trackKeyValue,
+    JSON.stringify({ artist: 'Artist', track: 'Track 1', origin: 'web' }),
+    GEN2_URI,
+    REV,
+  );
+  db.run(
+    `INSERT INTO love_api_recipient_members(link_id,generation,operation_id,did,uri,incarnation_key,member_seq,created_at_ms)
+     VALUES('link',2,'op1',?,?,'inc1',1,1)`,
+    DID,
+    GEN2_URI,
+  );
+  db.run(
+    `INSERT INTO forward_outbox(
+       id,link_id,did,kind,dedupe_key,payload_json,state,attempts,due_at,created_at_ms,updated_at_ms,generation)
+     VALUES('current-member','link',?,'love',?,'{}',?,0,1,1,1,2)`,
+    DID,
+    storedKey,
+    outboxState,
+  );
+}
 it('trips the production invocation and decision budget guards at each bound', () => {
   expect(() => assertLoveApiInvocationBudget(96n, 16)).not.toThrow();
   expect(() => assertLoveApiInvocationBudget(97n, 0)).toThrow(/changed-row bound exceeded/);
@@ -103,16 +147,110 @@ it('commits an actual decision at 128 full-transaction reads, including all mete
       `INSERT INTO live_pending_removal_events(uri,rev,action,cid,created_at_ms,expires_at_ms)
        SELECT authorization_uri,authorization_rev,action,cid,1,10000 FROM love_api_comparison_facts`,
     );
-    // Frozen full-transaction baseline: 63 production reads including both
+    // Current full-transaction baseline: 64 production reads including both
     // total_changes() endpoints, coverage accounting and the final report meter.
-    const result = runLoveApiMaintenance(db, 100, seededRandom(5), 'audit', injectDecisionReads(65));
+    const result = runLoveApiMaintenance(db, 100, seededRandom(5), 'audit', injectDecisionReads(64));
     const decision = result.lanes.find((unit) => unit.lane === 'decision');
     const transaction = result.transactions.find((unit) => unit.phase === 'l2-decision');
     expect(decision).toMatchObject({ reads: 128, visits: 1 });
     expect(transaction).toMatchObject({ reads: 128, changedRows: decision!.changedRows });
-    expect(decision!.returnedRows).toBeGreaterThanOrEqual(65);
+    expect(decision!.returnedRows).toBeGreaterThanOrEqual(64);
     expect(result.decisions.deferred).toBe(1);
     expect(db.one('SELECT 1 FROM love_api_unlove_decisions')).toBeNull();
+  }));
+
+it.each(['queued', 'held'] as const)(
+  'retains an exactly bound generation-2 %s member while it is not SENT',
+  async (state) =>
+    withMigratedDb((db) => {
+      seedGenerationTwoPending(db, state);
+      let positiveAcks = 0;
+      for (let tick = 0; tick < 8; tick++) {
+        const result = runLoveApiMaintenance(db, 100 + tick, seededRandom(51), `generation-two-${state}`);
+        positiveAcks += result.decisions.queued + result.decisions.deferred + result.decisions.replay;
+      }
+      expect(positiveAcks).toBe(0);
+      expect(
+        db.one('SELECT operation_id FROM love_api_recipient_members WHERE link_id=? AND generation=?', 'link', 2),
+      ).toEqual({
+        operation_id: 'op1',
+      });
+      expect(
+        db.one('SELECT sent_operation_id FROM love_api_recipients WHERE link_id=? AND generation=?', 'link', 2),
+      ).toEqual({
+        sent_operation_id: null,
+      });
+    }),
+);
+
+it('promotes a generation-2 SENT row using its stored key and canonical binding operation id', async () =>
+  withMigratedDb((db) => {
+    seedGenerationTwoPending(db, 'sent');
+    const result = runLoveApiMaintenance(db, 100, seededRandom(52), 'generation-two-sent');
+    expect(result.decisions.queued + result.decisions.deferred + result.decisions.replay).toBe(0);
+    expect(
+      db.one('SELECT sent_operation_id FROM love_api_recipients WHERE link_id=? AND generation=?', 'link', 2),
+    ).toEqual({
+      sent_operation_id: 'op1',
+    });
+    expect(
+      db.one('SELECT operation_id FROM love_api_recipient_members WHERE link_id=? AND generation=?', 'link', 2),
+    ).toBeNull();
+  }));
+
+it.each([
+  'wrong-stored-key',
+  'wrong-outbox-did',
+  'wrong-binding-did',
+  'wrong-binding-uri',
+  'wrong-incarnation',
+] as const)('does not promote generation-2 SENT with %s identity', async (mismatch) =>
+  withMigratedDb((db) => {
+    seedGenerationTwoPending(db, 'sent', mismatch === 'wrong-stored-key' ? 'op1' : 'g2:op1');
+    if (mismatch === 'wrong-outbox-did')
+      db.run("UPDATE forward_outbox SET did='did:plc:bbbbbbbbbbbbbbbbbbbbbbbb' WHERE id='current-member'");
+    if (mismatch === 'wrong-binding-did')
+      db.run("UPDATE love_api_bindings SET did='did:plc:bbbbbbbbbbbbbbbbbbbbbbbb' WHERE operation_id='op1'");
+    if (mismatch === 'wrong-binding-uri')
+      db.run(
+        "UPDATE love_api_bindings SET uri='at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.love/other' WHERE operation_id='op1'",
+      );
+    if (mismatch === 'wrong-incarnation')
+      db.run("UPDATE love_api_bindings SET incarnation_key='other' WHERE operation_id='op1'");
+    let positiveAcks = 0;
+    for (let tick = 0; tick < 8; tick++) {
+      const result = runLoveApiMaintenance(db, 100 + tick, seededRandom(53), `generation-two-${mismatch}`);
+      positiveAcks += result.decisions.queued + result.decisions.deferred + result.decisions.replay;
+    }
+    expect(positiveAcks).toBe(0);
+    expect(
+      db.one('SELECT sent_operation_id FROM love_api_recipients WHERE link_id=? AND generation=?', 'link', 2),
+    ).toEqual({
+      sent_operation_id: null,
+    });
+  }),
+);
+
+it('accepts a late generation-2 SENT through the real RETURNING settlement contract', async () =>
+  withMigratedDb((db) => {
+    seedGenerationTwoPending(db, 'queued');
+    runLoveApiMaintenance(db, 100, seededRandom(54), 'generation-two-before-settlement');
+    expect(
+      db.one('SELECT operation_id FROM love_api_recipient_members WHERE link_id=? AND generation=?', 'link', 2),
+    ).toEqual({
+      operation_id: 'op1',
+    });
+    const settled = settleRowsReturning(db, ['current-member'], 'sent', 200, null, true, 2);
+    expect(settled).toHaveLength(1);
+    expect(settled[0]).toMatchObject({ dedupe_key: 'g2:op1', generation: 2, state: 'sent' });
+    expect(
+      db.one('SELECT sent_operation_id FROM love_api_recipients WHERE link_id=? AND generation=?', 'link', 2),
+    ).toEqual({
+      sent_operation_id: 'op1',
+    });
+    expect(
+      db.one('SELECT operation_id FROM love_api_recipient_members WHERE link_id=? AND generation=?', 'link', 2),
+    ).toBeNull();
   }));
 
 it('rolls back a whole decision when its actual metered SQL reaches 129 reads', async () =>
@@ -147,7 +285,7 @@ it('keeps cold singleton initialization separately metered while bounding the co
       `INSERT INTO live_pending_removal_events(uri,rev,action,cid,created_at_ms,expires_at_ms)
        SELECT authorization_uri,authorization_rev,action,cid,1,10000 FROM love_api_comparison_facts`,
     );
-    const accepted = runLoveApiMaintenance(db, 100, seededRandom(5), 'cold-boundary', injectDecisionReads(65));
+    const accepted = runLoveApiMaintenance(db, 100, seededRandom(5), 'cold-boundary', injectDecisionReads(64));
     expect(accepted.transactions.find((row) => row.phase === 'l2-cold-singleton-init')).toMatchObject({
       changedRows: 1,
       visits: 0,
@@ -286,6 +424,44 @@ it('charges complete eight-decision and eight-orphan maintenance across shared i
     expect(db.one("SELECT 1 FROM love_api_bindings WHERE operation_id LIKE 'orphan-%' LIMIT 1")).toBeNull();
     expect(acknowledgements).toBe(8);
   }));
+
+it('reserves the mandatory lane turn after stale cleanup with an unexpired comparison fact', async () =>
+  withMigratedDb((db) => {
+    seed(db, 1, 15);
+    db.run('UPDATE love_api_recipients SET next_member_seq=16');
+    db.run("UPDATE linked_accounts SET generation=2 WHERE id='link'");
+    db.run('UPDATE love_api_unlove_decisions SET due_at_ms=1000');
+    const frames: Array<{ committed: boolean; changes: number }> = [];
+    let depth = 0;
+    const observed: Db = {
+      all: <T>(sql: string, ...params: SqlParam[]) => db.all<T>(sql, ...params),
+      one: <T>(sql: string, ...params: SqlParam[]) => db.one<T>(sql, ...params),
+      run: (sql: string, ...params: SqlParam[]) => db.run(sql, ...params),
+      tx: <T>(fn: () => T extends Promise<unknown> ? never : T) => {
+        const outer = depth === 0;
+        const before = outer ? total(db) : 0;
+        let committed = false;
+        depth++;
+        try {
+          const result = db.tx(fn);
+          committed = true;
+          return result;
+        } finally {
+          depth--;
+          if (outer) frames.push({ committed, changes: total(db) - before });
+        }
+      },
+    };
+    const result = runLoveApiMaintenance(observed, 100, seededRandom(57), 'metadata-tail');
+    expect(result.writes).toBeLessThanOrEqual(96);
+    expect(result.visits).toBeLessThanOrEqual(16);
+    expect(result.transactions.at(-1)?.phase).toBe('l2-lane-turn');
+    expect(db.one('SELECT lane_turn FROM love_api_proof_state WHERE singleton=1')).toEqual({ lane_turn: 1 });
+    expect(db.one('SELECT horizon_ms FROM love_api_comparison_facts')).toEqual({ horizon_ms: 10_000 });
+    expect(frames.length).toBeGreaterThan(0);
+    expect(frames.every((frame) => frame.committed)).toBe(true);
+    expect(frames.reduce((sum, frame) => sum + frame.changes, 0)).toBe(result.writes);
+  }));
 it('rolls back a production reclaim page when its actual row scan exceeds reserved visits', async () =>
   withMigratedDb((db) => {
     seed(db, 0);
@@ -365,6 +541,56 @@ it('releases stale generations through the aggregate cursor while preserving a l
     expect(db.one("SELECT 1 FROM love_api_recipient_members WHERE operation_id='old-member'")).toBeNull();
     expect(db.one('SELECT state FROM love_api_recipients WHERE generation=2')).toEqual({ state: 'present' });
   }));
+
+it.each([15, 16] as const)(
+  'drains stale generation-%s decision cascades within each17-row sweep unit',
+  async (members) =>
+    withMigratedDb((db) => {
+      seed(db, 1, members);
+      const uri = `at://${DID}/com.example.atmusic.love/r1`;
+      db.run('UPDATE love_api_recipients SET next_member_seq=? WHERE uri=?', members + 1, uri);
+      db.run("UPDATE linked_accounts SET generation=2 WHERE id='link'");
+      db.run('UPDATE love_api_unlove_decisions SET due_at_ms=1000 WHERE uri=?', uri);
+      let falsePositiveAcks = 0;
+      const sweepUnits: number[] = [];
+      for (let tick = 0; tick < 8; tick++) {
+        const result = runLoveApiMaintenance(db, 100 + tick, seededRandom(55), `stale-sweep-${members}`);
+        falsePositiveAcks += result.decisions.queued + result.decisions.deferred + result.decisions.replay;
+        sweepUnits.push(...result.lanes.filter((lane) => lane.lane === 'sweep').map((lane) => lane.changedRows));
+        expect(result.writes).toBeLessThanOrEqual(96);
+        expect(result.visits).toBeLessThanOrEqual(16);
+        if (db.one('SELECT 1 FROM love_api_recipients WHERE uri=?', uri) === null) break;
+      }
+      expect(falsePositiveAcks).toBe(0);
+      expect(sweepUnits.every((rows) => rows <= 17)).toBe(true);
+      expect(sweepUnits).toContain(members === 15 ? 17 : 16);
+      if (members === 16) expect(sweepUnits).toContain(2);
+      expect(db.one('SELECT 1 FROM love_api_recipient_members WHERE uri=?', uri)).toBeNull();
+      expect(db.one('SELECT 1 FROM love_api_recipients WHERE uri=?', uri)).toBeNull();
+      expect(db.one('SELECT 1 FROM love_api_unlove_decisions WHERE uri=?', uri)).toBeNull();
+    }),
+);
+
+it.each([50, 10_000] as const)('keeps the stale-sweep fact horizon intact at %s', async (horizon) =>
+  withMigratedDb((db) => {
+    seed(db, 1, 16);
+    const uri = `at://${DID}/com.example.atmusic.love/r1`;
+    db.run('UPDATE love_api_comparison_facts SET horizon_ms=? WHERE authorization_uri=?', horizon, uri);
+    db.run('UPDATE love_api_recipients SET next_member_seq=17 WHERE uri=?', uri);
+    db.run("UPDATE linked_accounts SET generation=2 WHERE id='link'");
+    db.run('UPDATE love_api_unlove_decisions SET due_at_ms=1000 WHERE uri=?', uri);
+    for (let tick = 0; tick < 8; tick++)
+      runLoveApiMaintenance(db, 100 + tick, seededRandom(56), `fact-horizon-${horizon}`);
+    expect(db.one('SELECT 1 FROM love_api_recipients WHERE uri=?', uri)).toBeNull();
+    expect(db.one('SELECT 1 FROM love_api_bindings WHERE operation_id=?', 'op1')).toBeNull();
+    if (horizon <= 100)
+      expect(db.one('SELECT 1 FROM love_api_comparison_facts WHERE authorization_uri=?', uri)).toBeNull();
+    else
+      expect(db.one('SELECT horizon_ms FROM love_api_comparison_facts WHERE authorization_uri=?', uri)).toEqual({
+        horizon_ms: 10_000,
+      });
+  }),
+);
 
 it('reclaims an ownerless sealed aggregate and its last binding/fact dependency', async () =>
   withMigratedDb((db) => {
@@ -466,6 +692,58 @@ it('bounds production binding-delete work for matching old-generation history at
   expect(traces.at(-1)!.matching.vm_steps).toBeLessThanOrEqual(traces[0]!.matching.vm_steps * 2);
   expect(traces.at(-1)!.nonmatching.vm_steps).toBeLessThanOrEqual(traces[0]!.nonmatching.vm_steps * 2);
   expect(traces.at(-1)!.oldMatching.vm_steps).toBeGreaterThan(traces[0]!.oldMatching.vm_steps * 50);
+});
+
+it('uses indexed current-link aggregate seeks for broad release on the full Node schema', async () =>
+  withMigratedDb((db) => {
+    const source = readFileSync(new URL('../../src/forward/love-api-recipients.ts', import.meta.url), 'utf8');
+    const query = source.match(/`(SELECT r\.link_id,r\.generation,d\.artist_key[\s\S]*?)`/)?.[1];
+    expect(query).toBeTruthy();
+    const plan = db.all<{ detail: string }>(
+      `EXPLAIN QUERY PLAN ${query}`,
+      DID,
+      `at://${DID}/com.example.atmusic.love/r1`,
+      'inc1',
+      DID,
+      `at://${DID}/com.example.atmusic.love/r1`,
+      REV,
+      'artist-key',
+      'track-key',
+    );
+    const details = plan.map((row) => row.detail).join('\n');
+    expect(details).toMatch(/SEARCH l/);
+    expect(details).toMatch(/SEARCH r/);
+    expect(details).not.toMatch(/\bSCAN\b|TEMP B-TREE/i);
+  }));
+
+it('keeps broad-candidate production SQL flat across old-generation match and miss history', () => {
+  const run = spawnSync('python3', ['worker/test/bench/love-api-broad-candidate-growth.py'], {
+    cwd: process.cwd(),
+    encoding: 'utf8',
+  });
+  expect(run.status, run.stderr || run.stdout).toBe(0);
+  const traces = JSON.parse(run.stdout) as Array<{
+    size: number;
+    old_generations_only: { steps: number; rows: number };
+    current_hit_after_history: { steps: number; rows: number };
+    incarnation_miss: { steps: number; rows: number };
+    did_miss: { steps: number; rows: number };
+    uri_miss: { steps: number; rows: number };
+    current_incarnation_miss: { steps: number; rows: number };
+    old_prefix_control: { steps: number; rows: number };
+  }>;
+  expect(traces.map(({ size }) => size)).toEqual([100, 1000, 10000]);
+  for (const key of [
+    'old_generations_only',
+    'current_hit_after_history',
+    'incarnation_miss',
+    'did_miss',
+    'uri_miss',
+    'current_incarnation_miss',
+  ] as const)
+    expect(traces.at(-1)![key].steps).toBeLessThanOrEqual(traces[0]![key].steps * 2);
+  expect(traces.map(({ current_hit_after_history }) => current_hit_after_history.rows)).toEqual([1, 1, 1]);
+  expect(traces.at(-1)!.old_prefix_control.steps).toBeGreaterThan(traces[0]!.old_prefix_control.steps * 20);
 });
 it('audit mismatched replay must shorten stored decision', async () =>
   withMigratedDb((db) => {
@@ -608,6 +886,87 @@ it('persists retained-fact minimum before refusing a mismatched direct replay', 
     expect(db.one<{ expires_at_ms: number }>('SELECT expires_at_ms FROM love_api_unlove_decisions')).toEqual({
       expires_at_ms: 50,
     });
+  }));
+
+it('delayed preparation and the shared sealer persist the retained minimum before mismatch refusal', async () =>
+  withMigratedDb((db) => {
+    seed(db, 1);
+    const uri = `at://${DID}/com.example.atmusic.love/r1`;
+    db.run('UPDATE love_api_comparison_facts SET horizon_ms=50 WHERE authorization_uri=?', uri);
+    db.run(
+      `INSERT INTO live_pending_removals(
+         uri,member_uri,removed_cid,kind,window_lo,window_hi,replaced_by_cid,identity_key,
+         artist_key,track_key,artist,track,authorized_rev,created_at_ms,expires_at_ms)
+       VALUES(?,?,'cid','love','',?,'','inc1','artist','track','Artist','Track',?,1,500)`,
+      uri,
+      uri,
+      REV,
+      REV,
+    );
+    db.run(
+      `INSERT INTO love_api_window_owners(
+         uri,member_uri,removed_cid,window_lo,window_hi,replaced_by_cid,did,incarnation_key,link_id,generation,created_at_ms)
+       VALUES(?,?,'cid','',?,'',?,'inc1','link',1,1)`,
+      uri,
+      uri,
+      REV,
+      DID,
+    );
+    db.run(
+      `INSERT INTO live_pending_removal_events(uri,rev,action,cid,created_at_ms,expires_at_ms)
+       VALUES(?,?,'delete','',1,500)`,
+      uri,
+      REV,
+    );
+    const args = {
+      did: DID,
+      uri,
+      incarnationKey: 'inc1',
+      linkId: 'link',
+      generation: 1,
+      memberUri: uri,
+      removedCid: 'cid',
+      windowLo: '',
+      windowHi: REV,
+      replacedByCid: '',
+      rev: REV,
+      action: 'delete',
+      cid: '',
+      windowExpiresAtMs: 500,
+      nowMs: 30,
+    };
+    const prepared = prepareLoveApiWindowAbsence(db, args);
+    expect(prepared).not.toBeNull();
+    if (prepared === null || prepared === 'conflicted') throw new Error('delayed preparation failed');
+    expect(prepared.horizonMs).toBe(50);
+    const originalPayload = db.one('SELECT payload_json FROM love_api_unlove_decisions');
+    expect(
+      sealLoveApiDirectAbsence(db, prepared, {
+        artist: 'Changed',
+        track: 'Track 1',
+        album: null,
+        recordingMbid: null,
+      }),
+    ).toBe(false);
+    expect(db.one('SELECT expires_at_ms FROM love_api_unlove_decisions')).toEqual({ expires_at_ms: 50 });
+    expect(db.one('SELECT payload_json FROM love_api_unlove_decisions')).toEqual(originalPayload);
+    expect(db.one('SELECT horizon_ms,conflicted FROM love_api_comparison_facts')).toEqual({
+      horizon_ms: 50,
+      conflicted: 0,
+    });
+    const wider = prepareLoveApiWindowAbsence(db, { ...args, nowMs: 40 });
+    expect(wider).not.toBeNull();
+    if (wider === null || wider === 'conflicted') throw new Error('wider delayed replay failed');
+    expect(wider.horizonMs).toBe(50);
+    expect(
+      sealLoveApiDirectAbsence(db, wider, {
+        artist: 'Artist',
+        track: 'Track 1',
+        album: null,
+        recordingMbid: null,
+      }),
+    ).toBe(true);
+    expect(db.one('SELECT expires_at_ms FROM love_api_unlove_decisions')).toEqual({ expires_at_ms: 50 });
   }));
 
 it('validates owned pending members by durable cursor before awaiting a selected SENT proof', async () =>

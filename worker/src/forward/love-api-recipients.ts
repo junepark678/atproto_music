@@ -175,7 +175,12 @@ export function bumpLoveApiIntentEpoch(db: Db, did: string): number {
 }
 
 /** Retain an exact verified A2 fact before its source event/evidence can be cleaned up. */
-export function recordLoveApiComparisonFact(db: Db, fact: LoveApiAuthorizationFact, nowMs: number): boolean {
+export function recordLoveApiComparisonFact(
+  db: Db,
+  fact: LoveApiAuthorizationFact,
+  nowMs: number,
+  retainedHorizon?: { value: number | null },
+): boolean {
   if (!validFact(fact) || !Number.isSafeInteger(nowMs) || nowMs < 0) return false;
   return db.tx(() => {
     const existing = db.one<{ action: LoveApiFactAction; cid: string; conflicted: number; horizon_ms: number }>(
@@ -204,11 +209,13 @@ export function recordLoveApiComparisonFact(db: Db, fact: LoveApiAuthorizationFa
           { action: fact.action, cid: fact.cid, conflicted: true },
           nowMs,
         );
+      if (retainedHorizon !== undefined) retainedHorizon.value = fact.horizonMs;
       return !fact.conflicted;
     }
     const mismatch = existing.action !== fact.action || existing.cid !== fact.cid;
     if (mismatch || fact.conflicted) {
       const nextHorizon = Math.min(existing.horizon_ms, fact.horizonMs);
+      if (retainedHorizon !== undefined) retainedHorizon.value = nextHorizon;
       if (existing.conflicted === 0 || nextHorizon !== existing.horizon_ms)
         db.run(
           'UPDATE love_api_comparison_facts SET conflicted=1,horizon_ms=? WHERE authorization_uri=? AND authorization_rev=?',
@@ -224,6 +231,7 @@ export function recordLoveApiComparisonFact(db: Db, fact: LoveApiAuthorizationFa
       );
       return false;
     }
+    if (retainedHorizon !== undefined) retainedHorizon.value = Math.min(existing.horizon_ms, fact.horizonMs);
     if (fact.horizonMs < existing.horizon_ms)
       db.run(
         'UPDATE love_api_comparison_facts SET horizon_ms=? WHERE authorization_uri=? AND authorization_rev=?',
@@ -533,7 +541,8 @@ export function prepareLoveApiWindowAbsence(
       args.linkId,
       args.generation,
     ) !== null;
-  const horizonMs = Math.min(args.windowExpiresAtMs, event.expires_at_ms);
+  const proposedHorizonMs = Math.min(args.windowExpiresAtMs, event.expires_at_ms);
+  const retainedHorizon = { value: null as number | null };
   if (
     !recordLoveApiComparisonFact(
       db,
@@ -542,12 +551,20 @@ export function prepareLoveApiWindowAbsence(
         rev: args.rev,
         action: args.action as LoveApiFactAction,
         cid: args.cid,
-        horizonMs,
+        horizonMs: proposedHorizonMs,
       },
       args.nowMs,
+      retainedHorizon,
     )
   )
     return 'conflicted';
+  if (
+    retainedHorizon.value === null ||
+    !Number.isSafeInteger(retainedHorizon.value) ||
+    retainedHorizon.value <= args.nowMs
+  )
+    return 'conflicted';
+  const horizonMs = Math.min(proposedHorizonMs, retainedHorizon.value);
   return {
     did: args.did,
     uri: args.uri,
@@ -647,35 +664,72 @@ export function sealLoveApiDirectAbsence(
       continue;
     }
     const payload = JSON.stringify(lovePayload(love, recipient.sentOrigin ?? recipient.pendingApiOrigin ?? undefined));
-    const existing = db.one<{
-      authorization_uri: string;
-      authorization_rev: string;
-      fact_action: string;
-      fact_cid: string;
-      expires_at_ms: number;
-      payload_json: string;
+    const retained = db.one<{
+      retained_action: string;
+      retained_cid: string;
+      retained_horizon_ms: number;
+      retained_conflicted: number;
+      decision_did: string | null;
+      authorization_uri: string | null;
+      authorization_rev: string | null;
+      fact_action: string | null;
+      fact_cid: string | null;
+      expires_at_ms: number | null;
+      payload_json: string | null;
     }>(
-      `SELECT authorization_uri,authorization_rev,fact_action,fact_cid,expires_at_ms,payload_json
-       FROM love_api_unlove_decisions WHERE did=? AND uri=? AND incarnation_key=? AND link_id=? AND generation=?`,
+      `SELECT f.action AS retained_action,f.cid AS retained_cid,f.horizon_ms AS retained_horizon_ms,
+              f.conflicted AS retained_conflicted,d.did AS decision_did,
+              d.authorization_uri,d.authorization_rev,d.fact_action,d.fact_cid,d.expires_at_ms,d.payload_json
+       FROM love_api_comparison_facts f
+       LEFT JOIN love_api_unlove_decisions d
+         ON d.did=? AND d.uri=? AND d.incarnation_key=? AND d.link_id=? AND d.generation=?
+       WHERE f.authorization_uri=? AND f.authorization_rev=?`,
       prepared.did,
       prepared.uri,
       prepared.incarnationKey,
       recipient.linkId,
       recipient.generation,
+      prepared.uri,
+      prepared.rev,
     );
-    if (existing !== null && prepared.horizonMs < existing.expires_at_ms)
+    if (retained === null) return false;
+    const hasDecision = retained.decision_did !== null;
+    const existing = hasDecision
+      ? {
+          authorization_uri: retained.authorization_uri!,
+          authorization_rev: retained.authorization_rev!,
+          fact_action: retained.fact_action!,
+          fact_cid: retained.fact_cid!,
+          expires_at_ms: retained.expires_at_ms!,
+          payload_json: retained.payload_json!,
+        }
+      : null;
+    const minimumHorizon = Math.min(
+      prepared.horizonMs,
+      retained.retained_horizon_ms,
+      existing?.expires_at_ms ?? Number.MAX_SAFE_INTEGER,
+    );
+    if (existing !== null && minimumHorizon < existing.expires_at_ms)
       db.run(
         `UPDATE love_api_unlove_decisions SET expires_at_ms=?,due_at_ms=min(due_at_ms,?)
          WHERE did=? AND uri=? AND incarnation_key=? AND link_id=? AND generation=? AND expires_at_ms>?`,
-        prepared.horizonMs,
+        minimumHorizon,
         prepared.nowMs,
         prepared.did,
         prepared.uri,
         prepared.incarnationKey,
         recipient.linkId,
         recipient.generation,
-        prepared.horizonMs,
+        minimumHorizon,
       );
+    if (
+      retained.retained_action !== prepared.action ||
+      retained.retained_cid !== prepared.cid ||
+      retained.retained_conflicted !== 0 ||
+      !Number.isSafeInteger(retained.retained_horizon_ms) ||
+      retained.retained_horizon_ms <= prepared.nowMs
+    )
+      return false;
     if (
       existing !== null &&
       (existing.authorization_uri !== prepared.uri ||
@@ -795,15 +849,17 @@ export function releaseBroadCoveredLoveApiRecipients(
       authorization_rev: string | null;
     }>(
       `SELECT r.link_id,r.generation,d.artist_key,d.track_key,d.authorization_uri,d.authorization_rev
-       FROM love_api_recipients r
-       JOIN linked_accounts l ON l.id=r.link_id AND l.did=r.did AND l.generation=r.generation
+       FROM linked_accounts l
+       CROSS JOIN love_api_recipients r
+         ON r.did=? AND r.uri=? AND r.incarnation_key=? AND r.link_id=l.id AND r.generation=l.generation
        LEFT JOIN love_api_unlove_decisions d ON d.did=r.did AND d.uri=r.uri AND d.incarnation_key=r.incarnation_key
          AND d.link_id=r.link_id AND d.generation=r.generation
-       WHERE r.did=? AND r.uri=? AND r.incarnation_key=? AND r.state IN ('present','sealed')
+       WHERE l.did=? AND r.state IN ('present','sealed')
          AND (d.did IS NULL OR (d.authorization_uri=? AND d.authorization_rev=? AND d.artist_key=? AND d.track_key=?))`,
       args.did,
       args.uri,
       args.incarnationKey,
+      args.did,
       args.uri,
       args.rev,
       keys.artistKey,

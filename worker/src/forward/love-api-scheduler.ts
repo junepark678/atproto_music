@@ -1,5 +1,6 @@
 import type { Random } from '@atmusic/core/deps';
 import type { Db, SqlParam } from '../do/db';
+import { storedForwardDedupeKey } from '../outbox/forward-identity';
 import { countLinkCoverage } from './coverage';
 import { LOVE_API_RECLAIM_PAGE, reclaimLoveApiProofRows } from './love-api-maintenance';
 import { materializeLoveApiRecipientDecisions } from './love-api-materializer';
@@ -209,11 +210,17 @@ function validateOwnedMember(
   }>(
     `SELECT f.id,f.did,f.link_id,f.generation,f.kind,f.dedupe_key,f.state,
             b.uri AS binding_uri,b.incarnation_key AS binding_incarnation_key,b.api_origin AS binding_origin
-     FROM forward_outbox f LEFT JOIN love_api_bindings b ON b.did=f.did AND b.operation_id=f.dedupe_key
-     WHERE f.link_id=? AND f.generation=? AND f.kind='love' AND f.dedupe_key=? LIMIT 1`,
+     FROM forward_outbox f
+     LEFT JOIN love_api_bindings b ON b.did=? AND b.operation_id=? AND b.uri=? AND b.incarnation_key=?
+     WHERE f.did=? AND f.link_id=? AND f.generation=? AND f.kind='love' AND f.dedupe_key=? LIMIT 1`,
+    key[0],
+    member.operation_id,
+    key[1],
+    key[2],
+    key[0],
     key[3],
     key[4],
-    member.operation_id,
+    storedForwardDedupeKey(key[4], member.operation_id),
   );
   const validBinding =
     effect?.did === key[0] &&
@@ -372,6 +379,9 @@ function sweepOne(db: Db, state: LaneState, nowMs: number): UnitResult {
         `SELECT 1 FROM love_api_recipient_members WHERE did=? AND uri=? AND incarnation_key=? AND link_id=? AND generation=? LIMIT 1`,
         ...key,
       ) === null;
+    // A full member page can consume16 rows; defer the parent so its exact
+    // decision cascade is charged to a later bounded visit.
+    if (done && decisionOwned && members.length === 16) done = false;
     if (done) {
       work += checkedUpdate(
         db,
@@ -413,6 +423,7 @@ function runLanePhase(
   visitsLimit: number,
   observer: ReturnType<typeof observedDb>,
   transactions: TransactionReport[],
+  turnTail: { value: boolean },
   decisionReadProbe?: LoveApiDecisionReadProbe,
 ): { useful: boolean; units: number; visits: number } {
   if (stopped.has(lane)) return { useful: false, units: 0, visits: 0 };
@@ -431,6 +442,12 @@ function runLanePhase(
   db.tx(() => {
     changesBefore = totalChanges(db);
     while (budget.laneUnits[lane] < LOVE_API_LANE_UNITS[lane]) {
+      const metadataBeforeUnit = Number(totalChanges(db) - invocationStart) - budget.work;
+      const reservedTail = lane === 'reclaim' ? 4 : lane === 'sweep' ? 3 : 2;
+      if (metadataBeforeUnit + reservedTail > LOVE_API_METADATA_RESERVE) {
+        stopped.add(lane);
+        break;
+      }
       const cost =
         lane === 'decision' ? LOVE_API_DECISION_COST : lane === 'sweep' ? LOVE_API_SWEEP_COST : LOVE_API_RECLAIM_COST;
       const maxVisits =
@@ -477,7 +494,10 @@ function runLanePhase(
         decisions.awaiting += result.awaiting;
         decisions.expired += result.expired;
         const useful = result.queued + result.deferred + result.replay + result.refused + result.expired > 0;
-        if (useful) phaseUseful++;
+        if (useful) {
+          phaseUseful++;
+          turnTail.value = true;
+        }
         decisionLaneReport = {
           lane,
           reserved: cost,
@@ -513,7 +533,10 @@ function runLanePhase(
         phaseVisits++;
         budget.laneUnits.sweep++;
         units++;
-        if (result.useful) phaseUseful++;
+        if (result.useful) {
+          phaseUseful++;
+          turnTail.value = true;
+        }
         laneReports.push({
           lane,
           reserved: cost,
@@ -540,7 +563,7 @@ function runLanePhase(
         if (delta !== BigInt(work + metadata)) throw new Error(`L2 RECLAIM changed-row accounting mismatch: ${delta}`);
         budget.work += work;
         phaseWork += work;
-        if (result.visited === 0 && delta === 0n) {
+        if (result.visited === 0 && work === 0) {
           budget.reserved -= cost;
           phase.writes -= cost;
           phase.visits -= maxVisits;
@@ -552,7 +575,10 @@ function runLanePhase(
         phaseVisits += result.visited;
         budget.laneUnits.reclaim++;
         units++;
-        if (work > 0) phaseUseful++;
+        if (work > 0) {
+          phaseUseful++;
+          turnTail.value = true;
+        }
         laneReports.push({
           lane,
           reserved: cost,
@@ -605,6 +631,10 @@ function runLanePhase(
     assertLoveApiInvocationBudget(invocationDelta, budget.visits);
     if (invocationDelta - BigInt(budget.work) > BigInt(LOVE_API_METADATA_RESERVE))
       throw new Error('L2 invocation metadata reserve exceeded');
+    const turnReserve = turnTail.value ? 1 : 0;
+    assertLoveApiInvocationBudget(invocationDelta + BigInt(turnReserve), budget.visits);
+    if (Number(invocationDelta) - budget.work + turnReserve > LOVE_API_METADATA_RESERVE)
+      throw new Error('L2 mandatory lane-turn metadata was not reserved');
     if (budget.visits > LOVE_API_VISITS) throw new Error('L2 invocation visit budget exceeded');
     if (lane === 'decision' && decisionLaneReport !== null && decisionUnitMetricStart !== null) {
       const completeReads = observer.metric().reads - decisionUnitMetricStart.reads;
@@ -701,6 +731,7 @@ export function runLoveApiMaintenance(
   };
   const lanes: LaneReport[] = [];
   const stopped = new Set<Lane>();
+  const turnTail = { value: false };
   let useful = false;
   const order: Lane[] = ['decision', 'sweep', 'reclaim'];
   for (const phase of ['guaranteed', 'leftover'] as const) {
@@ -725,12 +756,17 @@ export function runLoveApiMaintenance(
         visitsLimit,
         observed,
         transactions,
+        turnTail,
         decisionReadProbe,
       );
       useful ||= report.useful;
     }
   }
   if (useful) {
+    const beforeTurn = totalChanges(workDb) - invocationStart;
+    assertLoveApiInvocationBudget(beforeTurn + 1n, budget.visits);
+    if (Number(beforeTurn) - budget.work + 1 > LOVE_API_METADATA_RESERVE)
+      throw new Error('L2 mandatory lane-turn metadata reservation exceeded before commit');
     const changeStart = totalChanges(workDb);
     const metricStart = observed.metric();
     workDb.tx(() => updateLaneTurn(workDb, nowMs, initial.lane_turn, budget, invocationStart));
