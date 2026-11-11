@@ -308,10 +308,16 @@ function sweepOne(db: Db, state: LaneState, nowMs: number): UnitResult {
       `SELECT 1 FROM love_api_window_owners WHERE did=? AND uri=? AND incarnation_key=? AND link_id=? AND generation=? LIMIT 1`,
       ...key,
     ) !== null;
-  const decision = db.one<{ validate_after_seq: number }>(
-    `SELECT validate_after_seq FROM love_api_recipients WHERE did=? AND uri=? AND incarnation_key=? AND link_id=? AND generation=? LIMIT 1`,
+  const ownership = db.one<{ validate_after_seq: number; decision_did: string | null }>(
+    `SELECT r.validate_after_seq,d.did AS decision_did
+     FROM love_api_recipients r
+     LEFT JOIN love_api_unlove_decisions d
+       ON d.did=r.did AND d.uri=r.uri AND d.incarnation_key=r.incarnation_key
+       AND d.link_id=r.link_id AND d.generation=r.generation
+     WHERE r.did=? AND r.uri=? AND r.incarnation_key=? AND r.link_id=? AND r.generation=? LIMIT 1`,
     ...key,
   );
+  const decisionOwned = ownership?.decision_did !== null && ownership?.decision_did !== undefined;
   const link = db.one<{ generation: number }>('SELECT generation FROM linked_accounts WHERE id=?', row.link_id);
   const incarnation = db.one<{ incarnation_key: string; state: string }>(
     'SELECT incarnation_key,state FROM love_incarnations WHERE uri=?',
@@ -321,11 +327,11 @@ function sweepOne(db: Db, state: LaneState, nowMs: number): UnitResult {
     incarnation !== null && incarnation.incarnation_key === row.incarnation_key && incarnation.state === 'present';
   const staleAggregate =
     row.state === 'released' ||
-    (row.state === 'sealed' && decision === null) ||
+    (row.state === 'sealed' && !decisionOwned) ||
     (link !== null && link.generation > row.generation) ||
     (row.state === 'present' && !currentPresent);
-  if (decision !== null && !staleAggregate) {
-    const validated = validateOwnedMember(db, key, decision.validate_after_seq, nowMs);
+  if (decisionOwned && !staleAggregate) {
+    const validated = validateOwnedMember(db, key, ownership!.validate_after_seq, nowMs);
     state.sweep_cursor = seq;
     return {
       work: validated.work,

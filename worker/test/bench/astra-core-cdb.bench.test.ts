@@ -365,6 +365,67 @@ it('releases stale generations through the aggregate cursor while preserving a l
     expect(db.one("SELECT 1 FROM love_api_recipient_members WHERE operation_id='old-member'")).toBeNull();
     expect(db.one('SELECT state FROM love_api_recipients WHERE generation=2')).toEqual({ state: 'present' });
   }));
+
+it('reclaims an ownerless sealed aggregate and its last binding/fact dependency', async () =>
+  withMigratedDb((db) => {
+    seed(db, 1, 1);
+    const uri = `at://${DID}/com.example.atmusic.love/r1`;
+    db.run('DELETE FROM love_api_unlove_decisions WHERE uri=?', uri);
+    db.run('UPDATE love_api_comparison_facts SET horizon_ms=50 WHERE authorization_uri=?', uri);
+    let falsePositiveAcks = 0;
+    for (let tick = 0; tick < 16; tick++) {
+      const result = runLoveApiMaintenance(db, 100 + tick, seededRandom(19), 'ownerless-cleanup');
+      falsePositiveAcks += result.decisions.queued + result.decisions.deferred + result.decisions.replay;
+      if (
+        db.one('SELECT 1 FROM love_api_recipients WHERE uri=?', uri) === null &&
+        db.one('SELECT 1 FROM love_api_bindings WHERE operation_id=?', 'op1') === null &&
+        db.one('SELECT 1 FROM love_api_comparison_facts WHERE authorization_uri=?', uri) === null
+      )
+        break;
+    }
+    expect(falsePositiveAcks).toBe(0);
+    expect(db.one('SELECT 1 FROM love_api_recipient_members WHERE uri=?', uri)).toBeNull();
+    expect(db.one('SELECT 1 FROM love_api_recipients WHERE uri=?', uri)).toBeNull();
+    expect(db.one('SELECT 1 FROM love_api_bindings WHERE operation_id=?', 'op1')).toBeNull();
+    expect(db.one('SELECT 1 FROM love_api_comparison_facts WHERE authorization_uri=?', uri)).toBeNull();
+  }));
+
+it('preserves an ownerless sealed aggregate while a live window owns it', async () =>
+  withMigratedDb((db) => {
+    seed(db, 1, 1);
+    const uri = `at://${DID}/com.example.atmusic.love/r1`;
+    db.run('DELETE FROM love_api_unlove_decisions WHERE uri=?', uri);
+    db.run(
+      `INSERT INTO live_pending_removals(
+         uri,member_uri,removed_cid,kind,window_lo,window_hi,replaced_by_cid,identity_key,
+         artist_key,track_key,artist,track,authorized_rev,created_at_ms,expires_at_ms)
+       VALUES(?,?,'cid','love',? ,?,'','inc1','artist','track','Artist','Track',?,1,10000)`,
+      uri,
+      uri,
+      REV,
+      REV,
+      REV,
+    );
+    db.run(
+      `INSERT INTO love_api_window_owners(
+         uri,member_uri,removed_cid,window_lo,window_hi,replaced_by_cid,did,incarnation_key,link_id,generation,created_at_ms)
+       VALUES(?,?,'cid',?,?,'',?,'inc1','link',1,1)`,
+      uri,
+      uri,
+      REV,
+      REV,
+      DID,
+    );
+    let falsePositiveAcks = 0;
+    for (let tick = 0; tick < 8; tick++) {
+      const result = runLoveApiMaintenance(db, 100 + tick, seededRandom(20), 'window-owned');
+      falsePositiveAcks += result.decisions.queued + result.decisions.deferred + result.decisions.replay;
+    }
+    expect(falsePositiveAcks).toBe(0);
+    expect(db.one('SELECT 1 FROM love_api_recipients WHERE uri=?', uri)).not.toBeNull();
+    expect(db.one('SELECT 1 FROM love_api_recipient_members WHERE uri=?', uri)).not.toBeNull();
+    expect(db.one('SELECT 1 FROM love_api_window_owners WHERE uri=?', uri)).not.toBeNull();
+  }));
 it('reclaims an initialized eight-binding page with measured changes', async () =>
   withMigratedDb((db) => {
     seed(db, 8);
