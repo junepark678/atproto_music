@@ -756,7 +756,7 @@ Sol's reconciliation of Astra's full `pr210-astra-core-dfa1e73.md` confirms scop
 
 Current scoped evidence: full scheduler/accounting worker-bench60/60; direct+delayed/replay/original-fact focused controls12/12 (within that suite); Node lifecycle/handoff/module-boundary/outbox/active transport83/83; actual producer-derived restore case1/1; typecheck and scoped Biome pass. Existing measured decision bounds remain unchanged. The archived dfa defect probe showed five prior retained-minimum failures before this repair; its red receipt is preserved. These current controls are not fresh Astra source acceptance.
 
-Fresh independent review of this retained-minimum repair remains pending. Broader whole-decision outcome matrix, schema56 producer-derived restore and full CLI restore/rollback/accept-loss matrix remain queued. No readiness or whole-L2 acceptance is claimed. The 128-read cap and derivation `96 + (25 - 13) + 20 = 128`, 96 changed rows,16 visits, reserve12, DECISION28, SWEEP17 and RECLAIM8 remain unchanged. The prior 229-read lifecycle receipt remains informational wrong-unit evidence.
+The later schema-56 producer-derived restore test/docs checkpoint is recorded below. Full CLI restore/rollback/accept-loss coverage remains queued. Fresh Astra review `pr210-astra-core-333e8ae.md` reports the earlier dfa A/B/C and tracked restore count as passing, while requesting the direct/window/event early-expiry and sibling batch-minimum repairs recorded next. No readiness or whole-L2 acceptance is claimed. The 128-read cap and derivation `96 + (25 - 13) + 20 = 128`, 96 changed rows,16 visits, reserve12, DECISION28, SWEEP17 and RECLAIM8 remain unchanged. The prior 229-read lifecycle receipt remains informational wrong-unit evidence.
 
 ## Schema-56 producer-derived restore checkpoint
 
@@ -796,3 +796,43 @@ typecheck, scoped Biome, `git diff --check`, the secret-scan test, and a
 credential-shaped scan of added lines also passed; the scan reported no
 matches. The test-only source delta was checked against `worker/src` and
 `worker/migrations`, with no changes in either tree.
+
+## Astra 333 retained-minimum repair checkpoint (fresh review pending)
+
+The independently pinned `pr210-astra-core-333e8ae.md` review closed the
+earlier dfa preparation/sealer minimum defects and the tracked restore-count
+regression, with the scoped budget, generation, cascade, metadata, growth and
+source-exclusion controls still passing. It identified two remaining source
+obligations. Direct evidence expiry, and exact delayed-window/event expiry,
+now persist a minimum derived from the exact accepted decision and its clean
+original fact before refusal. Wrong identity or owner fences still return
+without updating an unrelated decision; expired inputs return no prepared
+proof and create no B2 authority, witness, or unlove outbox effect.
+
+The shared sealer now preflights all exact recipient decisions before a
+batch-wide refusal. Each recipient minimum is persisted before returning for
+a sibling payload mismatch, while immutable envelope fields, fact state, and
+handoff state remain unchanged. The test matrix covers each position in a
+two-recipient batch, reversed order, a matching-batch control, and rollback
+through the caller-owned transaction. Exact source-expiry controls cover
+direct evidence, delayed window, and delayed event at the expired boundary.
+The full scoped `astra-core-cdb.bench.test.ts` suite passed69/69; the focused
+Node recipient lifecycle/handoff suites passed51/51; the two producer-derived
+restore cases passed2/2. Project typecheck, scoped Biome, and the secret-scan
+test passed. A sanitized credential-shaped added-line scan returned no
+matches.
+The archived pre-fix red receipt remains at
+`/tmp/pr210-655be27-astra333-repro.log`; its five failures are historical
+evidence and are not described as current failures. The source and targeted
+regressions are now pending fresh independent review; they do not establish
+that upstream callers reach every seam or close the full producer-batch
+matrix.
+
+Schema57 remains frozen at SHA-256
+`54dc2d344097763e055b0f8f7f10d8f85993ccdaf0e31620b699726c35256a96`, and
+migrations1–56 remain byte-identical. The read128, changed-row96, visits16,
+reserve12, DECISION28, SWEEP17 and RECLAIM8 limits are unchanged. Whole-decision
+scenario/cost acceptance, over-128 production control, complete producer
+batching, and the broader CLI restore/rollback/accept-loss matrix remain
+pending. This is a scoped repair checkpoint, not readiness or whole-L2
+acceptance.

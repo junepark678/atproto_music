@@ -1061,6 +1061,268 @@ it.each([30, 50, 60])('persists an accepted delayed minimum before expiry refusa
   }),
 );
 
+it.each(['direct', 'window', 'event'] as const)(
+  'persists the exact accepted decision minimum before earlier %s expiry refusal',
+  async (expirySource) =>
+    withMigratedDb((db) => {
+      seed(db, 1);
+      const uri = `${GEN2_URI}`;
+      db.run('UPDATE love_api_comparison_facts SET horizon_ms=50 WHERE authorization_uri=?', uri);
+      if (expirySource === 'direct') {
+        db.run(
+          `INSERT INTO live_record_evidence(uri,did,collection,rkey,del_rev,received_ms,expires_at_ms)
+           VALUES(?,?,'com.example.atmusic.love','r1',?,20,50)`,
+          uri,
+          DID,
+          REV,
+        );
+        expect(
+          prepareLoveApiDirectAbsence(db, { did: DID, uri, incarnationKey: 'inc1', rev: REV, nowMs: 60 }),
+        ).toBeNull();
+      } else {
+        db.run(
+          `INSERT INTO live_pending_removals(
+             uri,member_uri,removed_cid,kind,window_lo,window_hi,replaced_by_cid,identity_key,
+             artist_key,track_key,artist,track,authorized_rev,created_at_ms,expires_at_ms)
+           VALUES(?,?,'cid','love','',?,'','inc1','artist','track','Artist','Track',?,1,?)`,
+          uri,
+          uri,
+          REV,
+          REV,
+          expirySource === 'window' ? 50 : 500,
+        );
+        db.run(
+          `INSERT INTO love_api_window_owners(
+             uri,member_uri,removed_cid,window_lo,window_hi,replaced_by_cid,did,incarnation_key,link_id,generation,created_at_ms)
+           VALUES(?,?,'cid','',?,'',?,'inc1','link',1,1)`,
+          uri,
+          uri,
+          REV,
+          DID,
+        );
+        db.run(
+          `INSERT INTO live_pending_removal_events(uri,rev,action,cid,created_at_ms,expires_at_ms)
+           VALUES(?,?,'delete','',1,?)`,
+          uri,
+          REV,
+          expirySource === 'event' ? 50 : 500,
+        );
+        const prepared = prepareLoveApiWindowAbsence(db, {
+          did: DID,
+          uri,
+          incarnationKey: 'inc1',
+          linkId: 'link',
+          generation: 1,
+          memberUri: uri,
+          removedCid: 'cid',
+          windowLo: '',
+          windowHi: REV,
+          replacedByCid: '',
+          rev: REV,
+          action: 'delete',
+          cid: '',
+          windowExpiresAtMs: expirySource === 'window' ? 50 : 500,
+          nowMs: 60,
+        });
+        expect(prepared).toBeNull();
+      }
+      expect(db.one('SELECT expires_at_ms FROM love_api_unlove_decisions')).toEqual({ expires_at_ms: 50 });
+      expect(db.one('SELECT horizon_ms,conflicted FROM love_api_comparison_facts')).toEqual({
+        horizon_ms: 50,
+        conflicted: 0,
+      });
+      expect(db.one('SELECT 1 FROM forward_deferred_love_witnesses')).toBeNull();
+      expect(db.one("SELECT 1 FROM forward_outbox WHERE kind='unlove'")).toBeNull();
+    }),
+);
+
+it.each([
+  [0, false],
+  [1, false],
+  [0, true],
+  [1, true],
+] as const)(
+  'preflights every batch minimum before refusal at position %s reversed=%s',
+  async (refusalPosition, reversed) =>
+    withMigratedDb((db) => {
+      seed(db, 1);
+      const uri = GEN2_URI;
+      db.run(
+        `INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,generation,status,
+        forward_scrobbles,backfill_state,created_at_ms,updated_at_ms)
+       VALUES('link2',?,'listenbrainz','remote2',X'00','e1',1,'active',0,'done',1,1)`,
+        DID,
+      );
+      db.run(
+        `INSERT INTO love_api_recipients(did,uri,incarnation_key,link_id,generation,aggregate_seq,state,
+        sent_operation_id,created_at_ms,updated_at_ms) VALUES(?,?,'inc1','link2',1,2,'sealed','op1',1,1)`,
+        DID,
+        uri,
+      );
+      db.run(
+        `INSERT INTO love_api_unlove_decisions(
+        did,uri,incarnation_key,link_id,generation,artist,track,artist_key,track_key,payload_json,
+        authorization_uri,authorization_rev,fact_action,fact_cid,expires_at_ms,due_at_ms,created_at_ms)
+       SELECT did,uri,incarnation_key,'link2',generation,artist,track,artist_key,track_key,payload_json,
+        authorization_uri,authorization_rev,fact_action,fact_cid,expires_at_ms,due_at_ms,created_at_ms
+       FROM love_api_unlove_decisions WHERE link_id='link'`,
+      );
+      db.run('UPDATE love_api_proof_state SET next_aggregate_seq=3');
+      db.run('UPDATE love_api_comparison_facts SET horizon_ms=50');
+      db.run(
+        `INSERT INTO live_record_evidence(uri,did,collection,rkey,del_rev,received_ms,expires_at_ms)
+       VALUES(?,?,'com.example.atmusic.love','r1',?,20,500)`,
+        uri,
+        DID,
+        REV,
+      );
+      const prepared = prepareLoveApiDirectAbsence(db, { did: DID, uri, incarnationKey: 'inc1', rev: REV, nowMs: 30 });
+      if (prepared === null || prepared === 'conflicted') throw new Error('exact absence preparation failed');
+      const linkOrder = reversed ? ['link2', 'link'] : ['link', 'link2'];
+      const refusedLink = linkOrder.splice(refusalPosition, 1)[0]!;
+      db.run(
+        'UPDATE love_api_unlove_decisions SET payload_json=? WHERE did=? AND uri=? AND link_id=?',
+        JSON.stringify({ artist: 'Older', track: 'Track 1', origin: 'web' }),
+        DID,
+        uri,
+        refusedLink,
+      );
+      if (reversed) prepared.recipients.reverse();
+      const before = db.all(
+        'SELECT did,uri,incarnation_key,link_id,generation,authorization_uri,authorization_rev,fact_action,fact_cid,payload_json FROM love_api_unlove_decisions ORDER BY link_id',
+      );
+      expect(
+        sealLoveApiDirectAbsence(db, prepared, {
+          artist: 'Artist',
+          track: 'Track 1',
+          album: null,
+          recordingMbid: null,
+        }),
+      ).toBe(false);
+      expect(db.all('SELECT link_id,expires_at_ms FROM love_api_unlove_decisions ORDER BY link_id')).toEqual([
+        { link_id: 'link', expires_at_ms: 50 },
+        { link_id: 'link2', expires_at_ms: 50 },
+      ]);
+      expect(
+        db.all(
+          'SELECT did,uri,incarnation_key,link_id,generation,authorization_uri,authorization_rev,fact_action,fact_cid,payload_json FROM love_api_unlove_decisions ORDER BY link_id',
+        ),
+      ).toEqual(before);
+      expect(db.one('SELECT horizon_ms,conflicted FROM love_api_comparison_facts')).toEqual({
+        horizon_ms: 50,
+        conflicted: 0,
+      });
+      expect(db.one("SELECT 1 FROM forward_outbox WHERE kind='unlove'")).toBeNull();
+    }),
+);
+
+it('seals a matching two-recipient batch after both exact minima are applied', async () =>
+  withMigratedDb((db) => {
+    seed(db, 1);
+    const uri = GEN2_URI;
+    db.run(
+      `INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,generation,status,
+        forward_scrobbles,backfill_state,created_at_ms,updated_at_ms)
+       VALUES('link2',?,'listenbrainz','remote2',X'00','e1',1,'active',0,'done',1,1)`,
+      DID,
+    );
+    db.run(
+      `INSERT INTO love_api_recipients(did,uri,incarnation_key,link_id,generation,aggregate_seq,state,
+        sent_operation_id,created_at_ms,updated_at_ms) VALUES(?,?,'inc1','link2',1,2,'sealed','op1',1,1)`,
+      DID,
+      uri,
+    );
+    db.run(
+      `INSERT INTO love_api_unlove_decisions(
+        did,uri,incarnation_key,link_id,generation,artist,track,artist_key,track_key,payload_json,
+        authorization_uri,authorization_rev,fact_action,fact_cid,expires_at_ms,due_at_ms,created_at_ms)
+       SELECT did,uri,incarnation_key,'link2',generation,artist,track,artist_key,track_key,payload_json,
+        authorization_uri,authorization_rev,fact_action,fact_cid,expires_at_ms,due_at_ms,created_at_ms
+       FROM love_api_unlove_decisions WHERE link_id='link'`,
+    );
+    db.run('UPDATE love_api_proof_state SET next_aggregate_seq=3');
+    db.run('UPDATE love_api_comparison_facts SET horizon_ms=50');
+    db.run(
+      `INSERT INTO live_record_evidence(uri,did,collection,rkey,del_rev,received_ms,expires_at_ms)
+       VALUES(?,?,'com.example.atmusic.love','r1',?,20,500)`,
+      uri,
+      DID,
+      REV,
+    );
+    const prepared = prepareLoveApiDirectAbsence(db, { did: DID, uri, incarnationKey: 'inc1', rev: REV, nowMs: 30 });
+    if (prepared === null || prepared === 'conflicted') throw new Error('exact absence preparation failed');
+    expect(
+      sealLoveApiDirectAbsence(db, prepared, {
+        artist: 'Artist',
+        track: 'Track 1',
+        album: null,
+        recordingMbid: null,
+      }),
+    ).toBe(true);
+    expect(db.all('SELECT link_id,expires_at_ms FROM love_api_unlove_decisions ORDER BY link_id')).toEqual([
+      { link_id: 'link', expires_at_ms: 50 },
+      { link_id: 'link2', expires_at_ms: 50 },
+    ]);
+    expect(db.all('SELECT link_id,state FROM love_api_recipients ORDER BY link_id')).toEqual([
+      { link_id: 'link', state: 'sealed' },
+      { link_id: 'link2', state: 'sealed' },
+    ]);
+    const replay = prepareLoveApiDirectAbsence(db, { did: DID, uri, incarnationKey: 'inc1', rev: REV, nowMs: 30 });
+    if (replay === null || replay === 'conflicted') throw new Error('exact replay preparation failed');
+    db.run('UPDATE love_api_comparison_facts SET horizon_ms=20');
+    expect(
+      sealLoveApiDirectAbsence(db, replay, {
+        artist: 'Artist',
+        track: 'Track 1',
+        album: null,
+        recordingMbid: null,
+      }),
+    ).toBe(false);
+    expect(db.all('SELECT link_id,expires_at_ms FROM love_api_unlove_decisions ORDER BY link_id')).toEqual([
+      { link_id: 'link', expires_at_ms: 20 },
+      { link_id: 'link2', expires_at_ms: 20 },
+    ]);
+  }));
+
+it('rolls back every batch minimum when the owning transaction fails', async () =>
+  withMigratedDb((db) => {
+    seed(db, 1);
+    const uri = GEN2_URI;
+    db.run('UPDATE love_api_comparison_facts SET horizon_ms=50');
+    db.run(
+      `INSERT INTO live_record_evidence(uri,did,collection,rkey,del_rev,received_ms,expires_at_ms)
+       VALUES(?,?,'com.example.atmusic.love','r1',?,20,500)`,
+      uri,
+      DID,
+      REV,
+    );
+    const before = db.all('SELECT link_id,expires_at_ms FROM love_api_unlove_decisions ORDER BY link_id');
+    expect(() =>
+      db.tx(() => {
+        const prepared = prepareLoveApiDirectAbsence(db, {
+          did: DID,
+          uri,
+          incarnationKey: 'inc1',
+          rev: REV,
+          nowMs: 30,
+        });
+        if (prepared === null || prepared === 'conflicted') throw new Error('exact absence preparation failed');
+        expect(
+          sealLoveApiDirectAbsence(db, prepared, {
+            artist: 'Artist',
+            track: 'Track 1',
+            album: null,
+            recordingMbid: null,
+          }),
+        ).toBe(true);
+        throw new Error('owning transaction failure');
+      }),
+    ).toThrow('owning transaction failure');
+    expect(db.all('SELECT link_id,expires_at_ms FROM love_api_unlove_decisions ORDER BY link_id')).toEqual(before);
+    expect(db.one('SELECT 1 FROM forward_deferred_love_witnesses')).toBeNull();
+    expect(db.one("SELECT 1 FROM forward_outbox WHERE kind='unlove'")).toBeNull();
+  }));
+
 it.each(['insert', 'same', 'mismatch'] as const)('uses reloaded minimum for prepared replay %s', async (mode) =>
   withMigratedDb((db) => {
     seed(db, 1);

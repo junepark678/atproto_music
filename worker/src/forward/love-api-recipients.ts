@@ -476,10 +476,16 @@ export function prepareLoveApiDirectAbsence(
     first.evidence_did !== args.did ||
     first.evidence_collection !== parsed.collection ||
     first.evidence_rkey !== parsed.rkey ||
-    first.evidence_del_rev !== args.rev ||
-    first.evidence_expires_at_ms <= args.nowMs
+    first.evidence_del_rev !== args.rev
   )
     return null;
+  if (first.evidence_expires_at_ms <= args.nowMs) {
+    for (const row of rows) {
+      const decision = decisionMinimumFromRow(row);
+      if (decision !== null) persistAcceptedDecisionMinimum(db, decision, null, args.nowMs);
+    }
+    return null;
+  }
   const active = recordLoveApiComparisonFact(
     db,
     {
@@ -612,7 +618,7 @@ export function prepareLoveApiWindowAbsence(
     !Number.isSafeInteger(args.nowMs) ||
     args.nowMs < 0 ||
     !Number.isSafeInteger(args.windowExpiresAtMs) ||
-    args.windowExpiresAtMs <= args.nowMs
+    args.windowExpiresAtMs <= 0
   )
     return null;
   const event = db.one<{ action: string; cid: string; conflicted: number; expires_at_ms: number }>(
@@ -620,8 +626,7 @@ export function prepareLoveApiWindowAbsence(
     args.uri,
     args.rev,
   );
-  if (event === null || event.action !== args.action || event.cid !== args.cid || event.expires_at_ms <= args.nowMs)
-    return null;
+  if (event === null || event.action !== args.action || event.cid !== args.cid) return null;
   const owner = db.one(
     `SELECT 1 FROM love_api_window_owners o
      JOIN love_api_recipients r ON r.did=o.did AND r.uri=o.uri AND r.incarnation_key=o.incarnation_key
@@ -641,7 +646,7 @@ export function prepareLoveApiWindowAbsence(
     args.linkId,
     args.generation,
   );
-  if (owner === null || event.conflicted !== 0) return event.conflicted ? 'conflicted' : null;
+  if (owner === null) return null;
   const recipient = db.one<{
     did: string;
     uri: string;
@@ -709,6 +714,26 @@ export function prepareLoveApiWindowAbsence(
     }
     sentOrigin = binding.api_origin;
   }
+  const retainedDecision = decisionMinimumFromRow(recipient);
+  if (event.expires_at_ms <= args.nowMs || args.windowExpiresAtMs <= args.nowMs) {
+    if (event.conflicted === 0 && retainedDecision !== null)
+      persistAcceptedDecisionMinimum(
+        db,
+        retainedDecision,
+        {
+          uri: args.uri,
+          rev: args.rev,
+          action: args.action,
+          cid: args.cid,
+          horizonMs: Math.min(args.windowExpiresAtMs, event.expires_at_ms),
+          conflicted: 0,
+        },
+        args.nowMs,
+      );
+    else if (retainedDecision !== null) persistAcceptedDecisionMinimum(db, retainedDecision, null, args.nowMs);
+    return event.conflicted !== 0 ? 'conflicted' : null;
+  }
+  if (event.conflicted !== 0) return 'conflicted';
   const hasPendingMembers =
     db.one(
       `SELECT 1 FROM love_api_recipient_members WHERE did=? AND uri=? AND incarnation_key=?
@@ -720,7 +745,6 @@ export function prepareLoveApiWindowAbsence(
       args.generation,
     ) !== null;
   const proposedHorizonMs = Math.min(args.windowExpiresAtMs, event.expires_at_ms);
-  const retainedDecision = decisionMinimumFromRow(recipient);
   const retainedHorizon = { value: null as number | null };
   const recorded = recordLoveApiComparisonFact(
     db,
@@ -844,40 +868,63 @@ export function sealLoveApiDirectAbsence(
 ): boolean {
   const keys = loveApiTrackKeys(love.artist, love.track);
   if (keys === null) return false;
+  type RetainedSealRow = {
+    retained_action: string | null;
+    retained_cid: string | null;
+    retained_horizon_ms: number | null;
+    retained_conflicted: number | null;
+    decision_did: string | null;
+    authorization_uri: string | null;
+    authorization_rev: string | null;
+    fact_action: string | null;
+    fact_cid: string | null;
+    expires_at_ms: number | null;
+    due_at_ms: number | null;
+    payload_json: string | null;
+    original_action: string | null;
+    original_cid: string | null;
+    original_horizon_ms: number | null;
+    original_conflicted: number | null;
+  };
+  type ExistingDecision = {
+    authorization_uri: string;
+    authorization_rev: string;
+    fact_action: string;
+    fact_cid: string;
+    expires_at_ms: number;
+    due_at_ms: number;
+    payload_json: string;
+  };
+  type SealItem = {
+    recipient: PreparedLoveApiAbsence['recipients'][number];
+    hasProof: boolean;
+    payload: string;
+    retained: RetainedSealRow | null;
+    existing: ExistingDecision | null;
+    minimumHorizon: number;
+    refusal: 'missing-row' | 'invalid-fact' | 'expired' | 'envelope' | 'fact-conflict' | null;
+  };
+  const items: SealItem[] = [];
+  let firstRefusal: SealItem['refusal'] = null;
+
+  // Preflight every exact recipient before any batch refusal. This makes each
+  // independently valid stored deadline monotonic even when a sibling refuses.
   for (const recipient of prepared.recipients) {
     const hasProof = recipient.sentOperationId !== null || recipient.pendingApiOperationId !== null;
     if (!hasProof && !recipient.hasPendingMembers) {
-      db.run(
-        `UPDATE love_api_recipients SET state='released',updated_at_ms=?
-         WHERE did=? AND uri=? AND incarnation_key=? AND link_id=? AND generation=? AND state IN ('present','sealed')`,
-        prepared.nowMs,
-        prepared.did,
-        prepared.uri,
-        prepared.incarnationKey,
-        recipient.linkId,
-        recipient.generation,
-      );
+      items.push({
+        recipient,
+        hasProof,
+        payload: '',
+        retained: null,
+        existing: null,
+        minimumHorizon: 0,
+        refusal: null,
+      });
       continue;
     }
     const payload = JSON.stringify(lovePayload(love, recipient.sentOrigin ?? recipient.pendingApiOrigin ?? undefined));
-    const retained = db.one<{
-      retained_action: string | null;
-      retained_cid: string | null;
-      retained_horizon_ms: number | null;
-      retained_conflicted: number | null;
-      decision_did: string | null;
-      authorization_uri: string | null;
-      authorization_rev: string | null;
-      fact_action: string | null;
-      fact_cid: string | null;
-      expires_at_ms: number | null;
-      due_at_ms: number | null;
-      payload_json: string | null;
-      original_action: string | null;
-      original_cid: string | null;
-      original_horizon_ms: number | null;
-      original_conflicted: number | null;
-    }>(
+    const retained = db.one<RetainedSealRow>(
       `SELECT incoming.action AS retained_action,incoming.cid AS retained_cid,
               incoming.horizon_ms AS retained_horizon_ms,incoming.conflicted AS retained_conflicted,
               d.did AS decision_did,d.authorization_uri,d.authorization_rev,d.fact_action,d.fact_cid,
@@ -899,7 +946,20 @@ export function sealLoveApiDirectAbsence(
       recipient.linkId,
       recipient.generation,
     );
-    if (retained === null) return false;
+    if (retained === null) {
+      const item: SealItem = {
+        recipient,
+        hasProof,
+        payload,
+        retained,
+        existing: null,
+        minimumHorizon: 0,
+        refusal: 'missing-row',
+      };
+      items.push(item);
+      firstRefusal ??= item.refusal;
+      continue;
+    }
     const hasDecision = retained.decision_did !== null;
     const existing = hasDecision
       ? {
@@ -939,6 +999,15 @@ export function sealLoveApiDirectAbsence(
               incomingValid ? Math.min(prepared.horizonMs, retained.retained_horizon_ms!) : Number.MAX_SAFE_INTEGER,
             )
           : existing.expires_at_ms;
+    const item: SealItem = {
+      recipient,
+      hasProof,
+      payload,
+      retained,
+      existing,
+      minimumHorizon,
+      refusal: null,
+    };
     if (existing !== null && originalValid && Number.isSafeInteger(minimumHorizon))
       db.run(
         `UPDATE love_api_unlove_decisions SET expires_at_ms=?,due_at_ms=min(due_at_ms,?)
@@ -959,17 +1028,30 @@ export function sealLoveApiDirectAbsence(
         minimumHorizon,
         prepared.nowMs,
       );
-    if (!originalValid || !incomingValid || !Number.isSafeInteger(minimumHorizon) || minimumHorizon <= prepared.nowMs)
-      return false;
+    if (!originalValid || !incomingValid || !Number.isSafeInteger(minimumHorizon)) item.refusal = 'invalid-fact';
+    else if (minimumHorizon <= prepared.nowMs) item.refusal = 'expired';
     if (
+      item.refusal === null &&
       existing !== null &&
       (existing.authorization_uri !== prepared.uri ||
         existing.authorization_rev !== prepared.rev ||
         !sameLovePayload(existing.payload_json, love) ||
         (recipient.sentOrigin !== null && JSON.parse(existing.payload_json).origin !== recipient.sentOrigin))
     )
-      return false;
-    if (existing !== null && (existing.fact_action !== prepared.action || existing.fact_cid !== prepared.cid)) {
+      item.refusal = 'envelope';
+    if (
+      item.refusal === null &&
+      existing !== null &&
+      (existing.fact_action !== prepared.action || existing.fact_cid !== prepared.cid)
+    )
+      item.refusal = 'fact-conflict';
+    items.push(item);
+    firstRefusal ??= item.refusal;
+  }
+
+  if (firstRefusal !== null) {
+    const conflict = items.find((item) => item.refusal === firstRefusal && item.refusal === 'fact-conflict');
+    if (conflict !== undefined) {
       recordLoveApiComparisonFact(
         db,
         {
@@ -982,7 +1064,24 @@ export function sealLoveApiDirectAbsence(
         },
         prepared.nowMs,
       );
-      return false;
+    }
+    return false;
+  }
+
+  for (const item of items) {
+    const { recipient, hasProof, payload, existing, minimumHorizon } = item;
+    if (!hasProof && !recipient.hasPendingMembers) {
+      db.run(
+        `UPDATE love_api_recipients SET state='released',updated_at_ms=?
+         WHERE did=? AND uri=? AND incarnation_key=? AND link_id=? AND generation=? AND state IN ('present','sealed')`,
+        prepared.nowMs,
+        prepared.did,
+        prepared.uri,
+        prepared.incarnationKey,
+        recipient.linkId,
+        recipient.generation,
+      );
+      continue;
     }
     db.run(
       `UPDATE love_api_recipients SET state='sealed',updated_at_ms=?
