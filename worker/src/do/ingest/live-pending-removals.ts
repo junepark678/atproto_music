@@ -5,6 +5,7 @@ import { executeListenRemovals, type LiveRemovedListen } from '../../forward/liv
 import {
   prepareLoveApiWindowAbsence,
   recordLoveApiComparisonFact,
+  releaseBroadCoveredLoveApiRecipients,
   sealLoveApiDirectAbsence,
 } from '../../forward/love-api-recipients';
 import { conflictDeferredLoveAuthority } from '../../forward/love-coverage-authority';
@@ -832,6 +833,7 @@ function processGroup(db: Db, group: PendingGroup, nowMs: number, random: Random
       return 0;
     }
     const identity = `love-delete:${row.identity_key}`;
+    const broadOperationId = `${identity}:rev:${group.authorized_rev}`;
     tombstoneLove(db, {
       did,
       identity: `live:${row.uri}:${row.removed_cid}`,
@@ -851,7 +853,7 @@ function processGroup(db: Db, group: PendingGroup, nowMs: number, random: Random
       sources.add(row.love_source_service);
     enqueueLiveUnlove(db, {
       did,
-      operationId: `${identity}:rev:${group.authorized_rev}`,
+      operationId: broadOperationId,
       payload: {
         artist: row.artist,
         track: row.track,
@@ -862,6 +864,17 @@ function processGroup(db: Db, group: PendingGroup, nowMs: number, random: Random
       ...(sources.size ? { excludeSourceServices: [...sources] } : {}),
       now: nowMs,
       random,
+    });
+    releaseBroadCoveredLoveApiRecipients(db, {
+      did,
+      uri: row.uri,
+      incarnationKey: row.identity_key,
+      rev: group.authorized_rev,
+      operationId: broadOperationId,
+      artist: row.artist,
+      track: row.track,
+      recordingMbid: row.recording_mbid,
+      nowMs,
     });
   }
   deleteGroup(db, group);

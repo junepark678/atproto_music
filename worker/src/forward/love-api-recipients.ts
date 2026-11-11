@@ -5,7 +5,7 @@ import { MusicKeyError, trackKey } from '@atmusic/core/music-key';
 import { isDid, isTid, parseRecordUri } from '@atmusic/core/syntax';
 import type { Origin } from '../app/rows';
 import type { Db } from '../do/db';
-import { canonicalForwardDedupeKey } from '../outbox/forward-identity';
+import { canonicalForwardDedupeKey, storedForwardDedupeKey } from '../outbox/forward-identity';
 import { recordVerifiedDeferredLoveAuthority } from './love-coverage-authority';
 
 export type LoveApiFactAction = 'update' | 'delete';
@@ -351,6 +351,21 @@ export function prepareLoveApiDirectAbsence(
     args.nowMs,
   );
   if (!active) return 'conflicted';
+  const retainedFact = db.one<{ action: LoveApiFactAction; cid: string; horizon_ms: number; conflicted: number }>(
+    'SELECT action,cid,horizon_ms,conflicted FROM love_api_comparison_facts WHERE authorization_uri=? AND authorization_rev=?',
+    args.uri,
+    args.rev,
+  );
+  if (
+    retainedFact === null ||
+    retainedFact.action !== 'delete' ||
+    retainedFact.cid !== '' ||
+    retainedFact.conflicted !== 0 ||
+    !Number.isSafeInteger(retainedFact.horizon_ms) ||
+    retainedFact.horizon_ms <= args.nowMs
+  )
+    return 'conflicted';
+  const horizonMs = Math.min(first.evidence_expires_at_ms, retainedFact.horizon_ms);
   const recipients: PreparedLoveApiAbsence['recipients'] = [];
   for (const row of rows) {
     if (!Number.isSafeInteger(row.generation) || row.generation < 1 || row.state === 'released') return 'conflicted';
@@ -369,7 +384,7 @@ export function prepareLoveApiDirectAbsence(
             rev: args.rev,
             action: 'delete',
             cid: '',
-            horizonMs: first.evidence_expires_at_ms,
+            horizonMs,
             conflicted: true,
           },
           args.nowMs,
@@ -396,7 +411,7 @@ export function prepareLoveApiDirectAbsence(
     rev: args.rev,
     action: 'delete',
     cid: '',
-    horizonMs: first.evidence_expires_at_ms,
+    horizonMs,
     nowMs: args.nowMs,
     recipients,
   };
@@ -739,6 +754,190 @@ export function sealLoveApiDirectAbsence(
       );
   }
   return true;
+}
+
+/** Release a current-generation API aggregate only when its exact broad delete was durably accepted. */
+export function releaseBroadCoveredLoveApiRecipients(
+  db: Db,
+  args: {
+    did: string;
+    uri: string;
+    incarnationKey: string;
+    rev: string;
+    operationId: string;
+    artist: string;
+    track: string;
+    recordingMbid: string | null;
+    nowMs: number;
+  },
+): number {
+  const parsed = parseRecordUri(args.uri);
+  const keys = loveApiTrackKeys(args.artist, args.track);
+  const expectedOperationId = `love-delete:${args.incarnationKey}:rev:${args.rev}`;
+  if (
+    parsed === null ||
+    parsed.did !== args.did ||
+    !isTid(args.rev) ||
+    args.operationId !== expectedOperationId ||
+    keys === null ||
+    !Number.isSafeInteger(args.nowMs) ||
+    args.nowMs < 0
+  )
+    return 0;
+
+  return db.tx(() => {
+    const candidates = db.all<{
+      link_id: string;
+      generation: number;
+      artist_key: string | null;
+      track_key: string | null;
+      authorization_uri: string | null;
+      authorization_rev: string | null;
+    }>(
+      `SELECT r.link_id,r.generation,d.artist_key,d.track_key,d.authorization_uri,d.authorization_rev
+       FROM love_api_recipients r
+       JOIN linked_accounts l ON l.id=r.link_id AND l.did=r.did AND l.generation=r.generation
+       LEFT JOIN love_api_unlove_decisions d ON d.did=r.did AND d.uri=r.uri AND d.incarnation_key=r.incarnation_key
+         AND d.link_id=r.link_id AND d.generation=r.generation
+       WHERE r.did=? AND r.uri=? AND r.incarnation_key=? AND r.state IN ('present','sealed')
+         AND (d.did IS NULL OR (d.authorization_uri=? AND d.authorization_rev=? AND d.artist_key=? AND d.track_key=?))`,
+      args.did,
+      args.uri,
+      args.incarnationKey,
+      args.uri,
+      args.rev,
+      keys.artistKey,
+      keys.trackKey,
+    );
+    let released = 0;
+    for (const candidate of candidates) {
+      if (!Number.isSafeInteger(candidate.generation) || candidate.generation < 1) continue;
+      if (
+        (candidate.authorization_uri !== null && candidate.authorization_uri !== args.uri) ||
+        (candidate.authorization_rev !== null && candidate.authorization_rev !== args.rev) ||
+        (candidate.artist_key !== null && candidate.artist_key !== keys.artistKey) ||
+        (candidate.track_key !== null && candidate.track_key !== keys.trackKey)
+      )
+        continue;
+      const authorizationUri = candidate.authorization_uri ?? args.uri;
+      const authorizationRev = candidate.authorization_rev ?? args.rev;
+      const canonicalKey = args.operationId;
+      const storedKey = storedForwardDedupeKey(candidate.generation, canonicalKey);
+      const effect = db.one<{
+        did: string;
+        generation: number;
+        love_artist_key: string | null;
+        love_track_key: string | null;
+        authorization_uri: string | null;
+        authorization_rev: string | null;
+        payload_json: string;
+        state: string;
+      }>(
+        `SELECT did,generation,love_artist_key,love_track_key,authorization_uri,authorization_rev,payload_json,state
+         FROM forward_outbox WHERE link_id=? AND kind='unlove' AND dedupe_key=?`,
+        candidate.link_id,
+        storedKey,
+      );
+      let covered = false;
+      if (effect !== null) {
+        let parsedPayload: unknown;
+        try {
+          parsedPayload = JSON.parse(effect.payload_json);
+        } catch {
+          parsedPayload = null;
+        }
+        const payload =
+          parsedPayload !== null && typeof parsedPayload === 'object' && !Array.isArray(parsedPayload)
+            ? (parsedPayload as Record<string, unknown>)
+            : null;
+        covered =
+          effect.did === args.did &&
+          effect.generation === candidate.generation &&
+          effect.love_artist_key === keys.artistKey &&
+          effect.love_track_key === keys.trackKey &&
+          effect.authorization_uri === authorizationUri &&
+          effect.authorization_rev === authorizationRev &&
+          payload?.artist === args.artist &&
+          payload.track === args.track &&
+          payload.origin === 'web' &&
+          (args.recordingMbid === null
+            ? payload.recordingMbid === undefined
+            : payload.recordingMbid === args.recordingMbid) &&
+          ['queued', 'held', 'sent', 'ignored', 'failed', 'expired'].includes(effect.state);
+      } else {
+        const deferred = db.one<{ payload_json: string }>(
+          `SELECT i.payload_json FROM forward_deferred_love_intents i
+           JOIN forward_deferred_love_witnesses w ON w.link_id=i.link_id AND w.generation=i.generation
+             AND w.operation_id=i.operation_id AND w.kind=i.kind AND w.love_artist_key=i.love_artist_key
+             AND w.love_track_key=i.love_track_key AND w.authorization_uri=i.authorization_uri
+             AND w.authorization_rev=i.authorization_rev
+           JOIN forward_deferred_love_heads h ON h.link_id=i.link_id AND h.generation=i.generation
+             AND h.love_artist_key=i.love_artist_key AND h.love_track_key=i.love_track_key
+           WHERE i.link_id=? AND i.generation=? AND i.operation_id=? AND i.kind='unlove'
+             AND i.origin_class='authorized' AND i.love_artist_key=? AND i.love_track_key=?
+             AND i.authorization_uri=? AND i.authorization_rev=?`,
+          candidate.link_id,
+          candidate.generation,
+          canonicalKey,
+          keys.artistKey,
+          keys.trackKey,
+          authorizationUri,
+          authorizationRev,
+        );
+        if (deferred !== null) {
+          let parsedPayload: unknown;
+          try {
+            parsedPayload = JSON.parse(deferred.payload_json);
+          } catch {
+            parsedPayload = null;
+          }
+          const payload =
+            parsedPayload !== null && typeof parsedPayload === 'object' && !Array.isArray(parsedPayload)
+              ? (parsedPayload as Record<string, unknown>)
+              : null;
+          covered =
+            payload?.artist === args.artist &&
+            payload.track === args.track &&
+            payload.origin === 'web' &&
+            (args.recordingMbid === null
+              ? payload.recordingMbid === undefined
+              : payload.recordingMbid === args.recordingMbid);
+        } else
+          covered =
+            db.one(
+              `SELECT 1 FROM forward_receipts WHERE link_id=? AND generation=? AND kind='unlove'
+             AND dedupe_key=? AND retired_at_ms IS NOT NULL`,
+              candidate.link_id,
+              candidate.generation,
+              canonicalKey,
+            ) !== null;
+      }
+      if (!covered) continue;
+      db.run(
+        `DELETE FROM love_api_unlove_decisions WHERE did=? AND uri=? AND incarnation_key=? AND link_id=?
+         AND generation=? AND authorization_uri=? AND authorization_rev=?`,
+        args.did,
+        args.uri,
+        args.incarnationKey,
+        candidate.link_id,
+        candidate.generation,
+        authorizationUri,
+        authorizationRev,
+      );
+      db.run(
+        `UPDATE love_api_recipients SET state='released',updated_at_ms=? WHERE did=? AND uri=?
+         AND incarnation_key=? AND link_id=? AND generation=? AND state IN ('present','sealed')`,
+        args.nowMs,
+        args.did,
+        args.uri,
+        args.incarnationKey,
+        candidate.link_id,
+        candidate.generation,
+      );
+      released++;
+    }
+    return released;
+  });
 }
 
 function memberRows(db: Db, args: LoveApiBindingArgs): LoveApiRecipientMember[] {

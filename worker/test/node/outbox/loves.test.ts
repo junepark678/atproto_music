@@ -607,12 +607,12 @@ it('traces the actual API love partial-delete comparison hook transaction', asyn
     // The fact-owner hook has its own 2/3/2 charge; the complete source-file
     // total also includes prepare/seal decision effects and must stay visible.
     expect(factHook).toMatchObject({ reads: 1, mutationStatements: 3, changedRows: 2 });
-    expect(completeHook).toEqual({ reads: 3, mutationStatements: 5, changedRows: 4 });
+    expect(completeHook).toEqual({ reads: 4, mutationStatements: 5, changedRows: 4 });
     expect({
       reads: metric.reads - API_PARENT_PARTIAL_DELETE_TRACE.reads,
       mutationStatements: metric.mutationStatements - API_PARENT_PARTIAL_DELETE_TRACE.mutationStatements,
       changedRows: metric.changedRows - API_PARENT_PARTIAL_DELETE_TRACE.changedRows,
-    }).toEqual({ reads: 3, mutationStatements: 6, changedRows: 5 });
+    }).toEqual({ reads: 4, mutationStatements: 6, changedRows: 5 });
   });
 });
 
@@ -678,6 +678,25 @@ it('forwards a live deletion of an API-created love, and routes imported love de
     expect((await projectLove(h, apiRecord.rkey!, true)).outcome).toBe('applied');
     await h.kit.externalDelete('Alice', LOVE, apiRecord.rkey!);
     expect((await projectLove(h, apiRecord.rkey!, true)).outcome).toBe('absent');
+    expect(
+      h.db.all<{ link_id: string; kind: string }>(
+        "SELECT link_id,kind FROM forward_outbox WHERE kind='unlove' ORDER BY link_id",
+      ),
+    ).toEqual([
+      { link_id: lastfm, kind: 'unlove' },
+      { link_id: listenbrainz, kind: 'unlove' },
+    ]);
+    expect(h.db.all('SELECT state FROM love_api_recipients ORDER BY link_id')).toEqual([
+      { state: 'released' },
+      { state: 'released' },
+    ]);
+    expect(h.db.one('SELECT 1 FROM love_api_unlove_decisions')).toBeNull();
+    const broadCount = h.db.one<{ n: number }>("SELECT count(*) AS n FROM forward_outbox WHERE kind='unlove'")!.n;
+    expect(materializeLoveApiRecipientDecisions(h.db, h.m.clock.nowMs(), h.m.random, 'broad-covered')).toMatchObject({
+      visited: 0,
+      queued: 0,
+    });
+    expect(h.db.one<{ n: number }>("SELECT count(*) AS n FROM forward_outbox WHERE kind='unlove'")!.n).toBe(broadCount);
 
     const importedRkey = '3kimported01';
     await h.kit.externalPut('Alice', LOVE, importedRkey, love('Imported artist', 'Imported track'));
@@ -735,6 +754,20 @@ it('reconstructs API source and trusted authority from retained L2 after operati
   await withHarness(async (h) => {
     h.seedUser(h.alice);
     const linkId = h.link(h.alice, 'lastfm');
+    const rkey = '3kretainedproof1';
+    await h.kit.externalPut('Alice', LOVE, rkey, {
+      ...love('Proof artist', 'Proof track'),
+      album: 'Proof album',
+      recordingMbid: '12345678-1234-1234-1234-123456789abc',
+    });
+    h.db.run(
+      `INSERT INTO forward_admissions(did,identity_key,path,source_service,created_at_ms,admission_seq)
+       VALUES(?,?,'import','lastfm',?,101)`,
+      h.alice,
+      `love-uri:${h.alice}:${LOVE}:${rkey}`,
+      h.kit.clock.nowMs(),
+    );
+    expect((await projectLove(h, rkey, true)).outcome).toBe('applied');
     const created = await enqueueLove(h.m, {
       did: h.alice,
       input: {
@@ -743,13 +776,13 @@ it('reconstructs API source and trusted authority from retained L2 after operati
         album: 'Proof album',
         recordingMbid: '12345678-1234-1234-1234-123456789abc',
       },
-      origin: 'listenbrainz',
+      origin: 'lastfm',
     });
     if (!created.ok) throw new Error(JSON.stringify(created.reason));
     await h.runUntilIdle();
     const op = h.op(created.operation.id);
-    expect((await projectLove(h, op.rkey!, true)).outcome).toBe('applied');
-    const uri = `at://${h.alice}/${LOVE}/${op.rkey}`;
+    expect(op.result_uri).toBe(`at://${h.alice}/${LOVE}/${rkey}`);
+    const uri = `at://${h.alice}/${LOVE}/${rkey}`;
     const incarnation = h.db.one<{ incarnation_key: string }>(
       "SELECT incarnation_key FROM love_incarnations WHERE uri=? AND state='present'",
       uri,
@@ -757,14 +790,14 @@ it('reconstructs API source and trusted authority from retained L2 after operati
     expect(incarnation).not.toBeNull();
     expect(h.db.one('SELECT api_origin FROM love_api_bindings WHERE did=? AND operation_id=?', h.alice, op.id)).toEqual(
       {
-        api_origin: 'listenbrainz',
+        api_origin: 'lastfm',
       },
     );
     expect(
       h.db.one(
         'SELECT path FROM forward_admissions WHERE did=? AND identity_key=?',
         h.alice,
-        `love-uri:${h.alice}:${LOVE}:${op.rkey}`,
+        `love-uri:${h.alice}:${LOVE}:${rkey}`,
       ),
     ).toBeNull();
     const effect = h.db.one<{ id: string; generation: number; kind: string; state: string; dedupe_key: string }>(
@@ -782,25 +815,25 @@ it('reconstructs API source and trusted authority from retained L2 after operati
     expect(h.db.one('SELECT 1 FROM forward_outbox WHERE id=?', effect!.id)).toBeNull();
     expect(h.db.one('SELECT api_origin FROM love_api_bindings WHERE did=? AND operation_id=?', h.alice, op.id)).toEqual(
       {
-        api_origin: 'listenbrainz',
+        api_origin: 'lastfm',
       },
     );
 
-    await h.kit.externalDelete('Alice', LOVE, op.rkey!);
-    const car = await h.kit.repos.Alice.getRecordCar(LOVE, op.rkey!);
+    await h.kit.externalDelete('Alice', LOVE, rkey);
+    const car = await h.kit.repos.Alice.getRecordCar(LOVE, rkey);
     const proof = await verifyRecordProof(car, {
       did: h.alice,
       collection: LOVE,
-      rkey: op.rkey!,
+      rkey,
       signingKey: h.kit.users.Alice.key.didKey,
     });
     expect(proof.state).toBe('absent');
     recordLiveEvidence(
       h.db,
-      { uri, did: h.alice, collection: LOVE, rkey: op.rkey!, rev: proof.commit.rev, action: 'delete' },
+      { uri, did: h.alice, collection: LOVE, rkey, rev: proof.commit.rev, action: 'delete' },
       h.m.clock.nowMs(),
     );
-    expect((await projectLove(h, op.rkey!, true)).outcome).toBe('absent');
+    expect((await projectLove(h, rkey, true)).outcome).toBe('absent');
     expect(h.db.one('SELECT state FROM love_api_recipients')).toEqual({ state: 'sealed' });
     expect(
       h.db.one<{
@@ -819,13 +852,14 @@ it('reconstructs API source and trusted authority from retained L2 after operati
         track: 'Proof track',
         album: 'Proof album',
         recordingMbid: '12345678-1234-1234-1234-123456789abc',
-        origin: 'listenbrainz',
+        origin: 'lastfm',
       }),
     });
     expect(
       h.db.one('SELECT 1 FROM love_api_comparison_facts WHERE authorization_rev=?', proof.commit.rev),
     ).not.toBeNull();
     expect(h.db.one('SELECT 1 FROM linked_accounts WHERE id=?', linkId)).not.toBeNull();
+    expect(h.db.one("SELECT 1 FROM forward_outbox WHERE kind='unlove' AND link_id=?", linkId)).toBeNull();
     const candidate = {
       did: h.alice,
       uri,

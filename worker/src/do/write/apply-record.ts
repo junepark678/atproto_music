@@ -56,7 +56,11 @@ import { MAX_INGEST_CBOR_BYTES, validateScrobbleBatchRecord } from '@atmusic/cor
 import { isTid } from '@atmusic/core/syntax';
 import { toStorage } from '@atmusic/core/timestamp';
 import { executeListenRemovals } from '../../forward/live-removal-effects';
-import { prepareLoveApiDirectAbsence, sealLoveApiDirectAbsence } from '../../forward/love-api-recipients';
+import {
+  prepareLoveApiDirectAbsence,
+  releaseBroadCoveredLoveApiRecipients,
+  sealLoveApiDirectAbsence,
+} from '../../forward/love-api-recipients';
 import { ensureLegacyLoveIncarnation } from '../../forward/love-incarnation';
 import {
   admitForwardIdentity,
@@ -1220,10 +1224,11 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
         const importMayForward = importSources.size > 0;
         const eligiblePath = loveIncarnation.path === 'live' || loveIncarnation.path === 'api' || importMayForward;
         if (!unknownImportSource && eligiblePath && (local?.origin !== 'import' || importMayForward)) {
-          if (authRev !== null)
+          if (authRev !== null) {
+            const broadOperationId = `${identityKey}:rev:${authRev}`;
             enqueueLiveUnlove(db, {
               did: t.did,
-              operationId: `${identityKey}:rev:${authRev}`,
+              operationId: broadOperationId,
               payload: {
                 artist: priorLove.artist,
                 track: priorLove.track,
@@ -1235,7 +1240,18 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
               now,
               random: o.live!.random,
             });
-          else
+            releaseBroadCoveredLoveApiRecipients(db, {
+              did: t.did,
+              uri: t.uri,
+              incarnationKey: loveIncarnation.incarnation_key,
+              rev: authRev,
+              operationId: broadOperationId,
+              artist: priorLove.artist,
+              track: priorLove.track,
+              recordingMbid: priorLove.recording_mbid,
+              nowMs: now,
+            });
+          } else
             recordPendingRemoval(db, {
               did: t.did,
               uri: t.uri,

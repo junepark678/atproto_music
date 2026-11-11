@@ -771,6 +771,40 @@ async function produceApiLoveWithRealPds(db: SqliteDb, clock: FixedClock, label:
     },
   ).link.id;
   db.run("UPDATE operations SET state='cancelled' WHERE id IN ('op1','op2')");
+  const projectionRkey = `3kimport${label.toLowerCase()}001`;
+  const projectionUri = `at://${DID_A}/${LOVE_COLLECTION}/${projectionRkey}`;
+  await kit.externalPut('Alice', LOVE_COLLECTION, projectionRkey, {
+    $type: LOVE_COLLECTION,
+    artist: `Producer restore ${label}`,
+    track: 'SENT love',
+    album: 'Actual producer album',
+    recordingMbid: '12345678-1234-1234-1234-123456789abc',
+    createdAt: new Date(clock.nowMs()).toISOString(),
+  });
+  db.run(
+    `INSERT INTO forward_admissions(did,identity_key,path,source_service,created_at_ms,admission_seq)
+     VALUES(?,?,'import','lastfm',?,?)`,
+    DID_A,
+    `love-uri:${DID_A}:${LOVE_COLLECTION}:${projectionRkey}`,
+    clock.nowMs(),
+    101,
+  );
+  const importedCar = await kit.repos.Alice.getRecordCar(LOVE_COLLECTION, projectionRkey);
+  const importedProof = await verifyRecordProof(importedCar, {
+    did: DID_A,
+    collection: LOVE_COLLECTION,
+    rkey: projectionRkey,
+    signingKey: kit.users.Alice.key.didKey,
+  });
+  const importProofNow = fromMs(clock.nowMs());
+  db.tx(() =>
+    applyRecordProof(db, importedProof, {
+      prefix: PREFIX,
+      nowNs: importProofNow,
+      receiptNs: importProofNow,
+      live: authorizedLiveOptions(db, importedProof, random).live,
+    }),
+  );
   const created = await enqueueLove(m, {
     did: DID_A,
     input: {
@@ -794,12 +828,14 @@ async function produceApiLoveWithRealPds(db: SqliteDb, clock: FixedClock, label:
   );
   if (operation?.state !== 'succeeded' || operation.result_uri === null)
     throw new Error('restore producer PDS love did not reach SENT success');
+  expect(operation.result_uri).toBe(projectionUri);
   return {
     kit,
     m,
     operationId: created.operation.id,
     uri: operation.result_uri,
-    rkey: operation.rkey,
+    rkey: projectionRkey,
+    requestRkey: operation.rkey,
     listenbrainzLink,
   };
 }
@@ -1610,6 +1646,7 @@ describe('restore.ts', () => {
     let absenceRev = '';
     try {
       source = await produceApiLoveWithRealPds(db, world.clock, 'Live');
+      expect(source.requestRkey).not.toBe(source.rkey);
       const firstDelivery = await dispatchRestoreLoveTransports(db, world.clock.nowMs());
       expect(firstDelivery.report.requests).toBe(2);
       expect(firstDelivery.lastfmRequests).toEqual(['track.love']);
@@ -1733,7 +1770,14 @@ describe('restore.ts', () => {
         }),
       );
       expect(db.one('SELECT count(*) AS n FROM love_api_window_owners')).toEqual({ n: 2 });
-      expect(db.one('SELECT count(*) AS n FROM love_api_unlove_decisions')).toEqual({ n: 2 });
+      expect(db.one('SELECT count(*) AS n FROM love_api_unlove_decisions')).toEqual({ n: 1 });
+      expect(
+        db.one<{ service: string }>(
+          `SELECT l.service FROM love_api_unlove_decisions d JOIN linked_accounts l ON l.id=d.link_id
+           WHERE d.uri=?`,
+          source.uri,
+        ),
+      ).toEqual({ service: 'lastfm' });
       expect(
         db.one('SELECT count(*) AS n FROM love_api_comparison_facts WHERE authorization_rev=?', absenceRev),
       ).toEqual({
@@ -1772,7 +1816,7 @@ describe('restore.ts', () => {
     expect(
       restored.one("SELECT 1 FROM forward_outbox WHERE kind='love' AND dedupe_key=?", source!.operationId),
     ).toBeNull();
-    expect(restored.one('SELECT count(*) AS n FROM love_api_unlove_decisions')).toEqual({ n: 2 });
+    expect(restored.one('SELECT count(*) AS n FROM love_api_unlove_decisions')).toEqual({ n: 1 });
     const restoredProof = restored.all<{
       did: string;
       uri: string;
@@ -1800,15 +1844,20 @@ describe('restore.ts', () => {
        FROM love_api_recipients r
        JOIN linked_accounts l ON l.id=r.link_id AND l.did=r.did
        JOIN love_api_bindings b ON b.did=r.did AND b.operation_id=r.sent_operation_id
-       JOIN love_api_unlove_decisions d ON d.did=r.did AND d.uri=r.uri AND d.incarnation_key=r.incarnation_key
+       LEFT JOIN love_api_unlove_decisions d ON d.did=r.did AND d.uri=r.uri AND d.incarnation_key=r.incarnation_key
          AND d.link_id=r.link_id AND d.generation=r.generation
-       JOIN love_api_comparison_facts f ON f.authorization_uri=d.authorization_uri AND f.authorization_rev=d.authorization_rev
+       LEFT JOIN love_api_comparison_facts f ON f.authorization_uri=d.authorization_uri AND f.authorization_rev=d.authorization_rev
        WHERE r.uri=? ORDER BY l.service`,
       source!.uri,
     );
     expect(restoredProof).toHaveLength(2);
     expect(restoredProof.map((row) => row.service)).toEqual(['lastfm', 'listenbrainz']);
     for (const row of restoredProof) {
+      if (row.service === 'listenbrainz') {
+        expect(row.decision_action).toBeNull();
+        expect(row.fact_action).toBeNull();
+        continue;
+      }
       expect(row).toMatchObject({
         did: DID_A,
         uri: source!.uri,
@@ -1889,8 +1938,8 @@ describe('restore.ts', () => {
     expect(restoredMaintenance.visits).toBeLessThanOrEqual(16);
     const restoredDecisionPhases = restoredMaintenance.transactions.filter((row) => row.phase === 'l2-decision');
     expect(restoredDecisionPhases.map(({ reads, changedRows, visits }) => ({ reads, changedRows, visits }))).toEqual([
-      { reads: 63, changedRows: 8, visits: 1 },
-      { reads: 2, changedRows: 0, visits: 0 },
+      { reads: 69, changedRows: 12, visits: 1 },
+      { reads: 3, changedRows: 0, visits: 0 },
     ]);
     expect(restoredDecisionPhases.every((row) => row.reads <= 128 && row.changedRows <= 28 && row.visits <= 1)).toBe(
       true,
@@ -1978,7 +2027,7 @@ describe('restore.ts', () => {
          AND dedupe_key LIKE '%:api-recipient'`,
         source!.uri,
       ),
-    ).toEqual({ n: 2 });
+    ).toEqual({ n: 1 });
     const dispatchedLastfm: string[] = [];
     const dispatchedListenbrainz: unknown[] = [];
     let requestCount = 0;

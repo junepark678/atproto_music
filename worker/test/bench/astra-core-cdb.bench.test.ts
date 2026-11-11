@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { trackKey } from '@atmusic/core/music-key';
 import { seededRandom } from '@atmusic/core/test-support/random';
 import { expect, it } from 'vitest';
@@ -5,7 +6,11 @@ import type { Db, SqlParam } from '../../src/do/db';
 import type { ForwardRuntime } from '../../src/forward/forwarder';
 import { reclaimLoveApiProofRows } from '../../src/forward/love-api-maintenance';
 import { materializeLoveApiRecipientDecisions } from '../../src/forward/love-api-materializer';
-import { prepareLoveApiRecipientHandoff, sealLoveApiDirectAbsence } from '../../src/forward/love-api-recipients';
+import {
+  prepareLoveApiDirectAbsence,
+  prepareLoveApiRecipientHandoff,
+  sealLoveApiDirectAbsence,
+} from '../../src/forward/love-api-recipients';
 import {
   assertLoveApiDecisionBudget,
   assertLoveApiInvocationBudget,
@@ -75,11 +80,64 @@ function seed(db: Db, n: number, pending = 0) {
 }
 const total = (db: Db) => db.one<{ n: number }>('SELECT total_changes() n')!.n;
 it('trips the production invocation and decision budget guards at each bound', () => {
+  expect(() => assertLoveApiInvocationBudget(96n, 16)).not.toThrow();
   expect(() => assertLoveApiInvocationBudget(97n, 0)).toThrow(/changed-row bound exceeded/);
   expect(() => assertLoveApiInvocationBudget(96n, 17)).toThrow(/visit bound exceeded/);
+  expect(() => assertLoveApiDecisionBudget(128, 28n)).not.toThrow();
   expect(() => assertLoveApiDecisionBudget(129, 0n)).toThrow(/DECISION read bound exceeded/);
   expect(() => assertLoveApiDecisionBudget(128, 29n)).toThrow(/DECISION unit exceeded 28 changed rows/);
 });
+
+const injectDecisionReads =
+  (count: number) =>
+  (db: Db): void => {
+    for (let index = 0; index < count; index++) {
+      expect(db.one<{ probe: number }>('SELECT 1 AS probe')).toEqual({ probe: 1 });
+    }
+  };
+
+it('commits an actual decision at 128 full-transaction reads, including all meter and finalization SQL', async () =>
+  withMigratedDb((db) => {
+    seed(db, 1);
+    db.run(
+      `INSERT INTO live_pending_removal_events(uri,rev,action,cid,created_at_ms,expires_at_ms)
+       SELECT authorization_uri,authorization_rev,action,cid,1,10000 FROM love_api_comparison_facts`,
+    );
+    // Frozen full-transaction baseline: 63 production reads including both
+    // total_changes() endpoints, coverage accounting and the final report meter.
+    const result = runLoveApiMaintenance(db, 100, seededRandom(5), 'audit', injectDecisionReads(65));
+    const decision = result.lanes.find((unit) => unit.lane === 'decision');
+    const transaction = result.transactions.find((unit) => unit.phase === 'l2-decision');
+    expect(decision).toMatchObject({ reads: 128, visits: 1 });
+    expect(transaction).toMatchObject({ reads: 128, changedRows: decision!.changedRows });
+    expect(decision!.returnedRows).toBeGreaterThanOrEqual(65);
+    expect(result.decisions.deferred).toBe(1);
+    expect(db.one('SELECT 1 FROM love_api_unlove_decisions')).toBeNull();
+  }));
+
+it('rolls back a whole decision when its actual metered SQL reaches 129 reads', async () =>
+  withMigratedDb((db) => {
+    seed(db, 1);
+    db.run(
+      `INSERT INTO live_pending_removal_events(uri,rev,action,cid,created_at_ms,expires_at_ms)
+       SELECT authorization_uri,authorization_rev,action,cid,1,10000 FROM love_api_comparison_facts`,
+    );
+    const beforeOutbox = db.one<{ count: number }>('SELECT count(*) AS count FROM forward_outbox')!.count;
+    const beforeCoverage = db.all("SELECT name,label,value FROM counters WHERE name='link_coverage' ORDER BY label");
+    expect(() => runLoveApiMaintenance(db, 100, seededRandom(5), 'audit', injectDecisionReads(66))).toThrow(
+      /L2 DECISION read bound exceeded: 129\/128/,
+    );
+    expect(db.one<{ state: string }>('SELECT state FROM love_api_recipients')).toEqual({ state: 'sealed' });
+    expect(db.one('SELECT 1 FROM love_api_unlove_decisions')).not.toBeNull();
+    expect(db.one<{ count: number }>('SELECT count(*) AS count FROM forward_outbox')!.count).toBe(beforeOutbox);
+    expect(db.one('SELECT 1 FROM forward_deferred_love_authorities')).toBeNull();
+    expect(db.all("SELECT name,label,value FROM counters WHERE name='link_coverage' ORDER BY label")).toEqual(
+      beforeCoverage,
+    );
+    expect(db.one<{ lane_turn: number }>('SELECT lane_turn FROM love_api_proof_state WHERE singleton=1')).toEqual({
+      lane_turn: 0,
+    });
+  }));
 it.each([1, 8])('enforces combined invocation budget count=%i', async (n) =>
   withMigratedDb((db) => {
     seed(db, n);
@@ -99,6 +157,14 @@ it.each([1, 8])('enforces combined invocation budget count=%i', async (n) =>
     for (let invocation = 0; invocation < n + 8 && acknowledgements < n; invocation++) {
       const before = total(db);
       const result = runLoveApiMaintenance(db, 100, seededRandom(5), 'audit');
+      if (n === 1 && invocation === 0)
+        expect(result.transactions.find((transaction) => transaction.phase === 'l2-cold-singleton-init')).toMatchObject(
+          {
+            reads: 2,
+            mutationStatements: 1,
+            changedRows: 1,
+          },
+        );
       const observed = total(db) - before;
       expect(result.writes).toBe(observed);
       expect(observed).toBeLessThanOrEqual(96);
@@ -252,7 +318,7 @@ it('releases stale generations through the aggregate cursor while preserving a l
       `at://${DID}/com.example.atmusic.love/r1`,
       'inc1',
     );
-    for (let tick = 0; tick < 12; tick++) runLoveApiMaintenance(db, 100 + tick, seededRandom(5), 'audit');
+    for (let tick = 0; tick < 36; tick++) runLoveApiMaintenance(db, 100 + tick, seededRandom(5), 'audit');
     expect(db.one('SELECT 1 FROM love_api_recipients WHERE generation=1')).toBeNull();
     expect(db.one("SELECT 1 FROM love_api_recipient_members WHERE operation_id='old-member'")).toBeNull();
     expect(db.one('SELECT state FROM love_api_recipients WHERE generation=2')).toEqual({ state: 'present' });
@@ -268,6 +334,36 @@ it('reclaims an initialized eight-binding page with measured changes', async () 
     expect(r.visited).toBe(8);
     expect(changed).toBe(9);
   }));
+
+it('retains a binding through any same-incarnation decision, then releases it in bounded reclaim', async () =>
+  withMigratedDb((db) => {
+    seed(db, 1);
+    db.run("UPDATE love_api_recipients SET state='released',sent_operation_id=NULL");
+    reclaimLoveApiProofRows(db, 100);
+    expect(db.one("SELECT 1 FROM love_api_bindings WHERE operation_id='op1'")).not.toBeNull();
+    expect(db.one('SELECT 1 FROM love_api_unlove_decisions')).not.toBeNull();
+    db.run('DELETE FROM love_api_unlove_decisions');
+    for (let pass = 0; pass < 6; pass++) reclaimLoveApiProofRows(db, 100 + pass);
+    expect(db.one("SELECT 1 FROM love_api_bindings WHERE operation_id='op1'")).toBeNull();
+  }));
+
+it('bounds production binding-delete work for matching old-generation history at 100/1k/10k', () => {
+  const result = spawnSync('python3', ['worker/test/bench/love-api-binding-delete-growth.py'], {
+    cwd: process.cwd(),
+    encoding: 'utf8',
+  });
+  expect(result.status, result.stderr || result.stdout).toBe(0);
+  const traces = JSON.parse(result.stdout) as Array<{
+    decisions: number;
+    matching: { vm_steps: number; deleted: number };
+    nonmatching: { vm_steps: number; deleted: number };
+    oldMatching: { vm_steps: number; deleted: number };
+  }>;
+  expect(traces.map((trace) => trace.decisions)).toEqual([100, 1000, 10000]);
+  expect(traces.at(-1)!.matching.vm_steps).toBeLessThanOrEqual(traces[0]!.matching.vm_steps * 2);
+  expect(traces.at(-1)!.nonmatching.vm_steps).toBeLessThanOrEqual(traces[0]!.nonmatching.vm_steps * 2);
+  expect(traces.at(-1)!.oldMatching.vm_steps).toBeGreaterThan(traces[0]!.oldMatching.vm_steps * 50);
+});
 it('audit mismatched replay must shorten stored decision', async () =>
   withMigratedDb((db) => {
     seed(db, 1);
@@ -348,6 +444,156 @@ it('audit mismatched replay must shorten stored decision', async () =>
     });
   }));
 
+it('persists retained-fact minimum before refusing a mismatched direct replay', async () =>
+  withMigratedDb((db) => {
+    seed(db, 1);
+    const uri = `at://${DID}/com.example.atmusic.love/r1`;
+    db.run('UPDATE love_api_comparison_facts SET horizon_ms=50');
+    db.run(
+      `INSERT INTO live_record_evidence(uri,did,collection,rkey,up_rev,up_action,up_cid,del_rev,conflict_rev,received_ms,expires_at_ms)
+       VALUES(?,?,?,'r1',NULL,NULL,NULL,?,NULL,1,500)`,
+      uri,
+      DID,
+      'com.example.atmusic.love',
+      REV,
+    );
+    const prepared = prepareLoveApiDirectAbsence(db, {
+      did: DID,
+      uri,
+      incarnationKey: 'inc1',
+      rev: REV,
+      nowMs: 30,
+    });
+    expect(prepared).not.toBeNull();
+    if (prepared === null || prepared === 'conflicted') throw new Error('direct fact preparation failed');
+    expect(prepared.horizonMs).toBe(50);
+    expect(
+      sealLoveApiDirectAbsence(db, prepared, {
+        artist: 'Payload mismatch',
+        track: 'Track 1',
+        album: null,
+        recordingMbid: null,
+      }),
+    ).toBe(false);
+    expect(db.one<{ expires_at_ms: number }>('SELECT expires_at_ms FROM love_api_unlove_decisions')).toEqual({
+      expires_at_ms: 50,
+    });
+    expect(
+      db.one<{ horizon_ms: number; conflicted: number }>('SELECT horizon_ms,conflicted FROM love_api_comparison_facts'),
+    ).toEqual({
+      horizon_ms: 50,
+      conflicted: 0,
+    });
+    const widerReplay = prepareLoveApiDirectAbsence(db, {
+      did: DID,
+      uri,
+      incarnationKey: 'inc1',
+      rev: REV,
+      nowMs: 40,
+    });
+    expect(widerReplay).not.toBeNull();
+    if (widerReplay === null || widerReplay === 'conflicted') throw new Error('wider direct replay preparation failed');
+    expect(widerReplay.horizonMs).toBe(50);
+    expect(
+      sealLoveApiDirectAbsence(db, widerReplay, {
+        artist: 'Artist',
+        track: 'Track 1',
+        album: null,
+        recordingMbid: null,
+      }),
+    ).toBe(true);
+    expect(db.one<{ expires_at_ms: number }>('SELECT expires_at_ms FROM love_api_unlove_decisions')).toEqual({
+      expires_at_ms: 50,
+    });
+  }));
+
+it('validates owned pending members by durable cursor before awaiting a selected SENT proof', async () =>
+  withMigratedDb((db) => {
+    seed(db, 1, 1);
+    let accepted = 0;
+    for (let tick = 0; tick < 8; tick++) {
+      const result = runLoveApiMaintenance(db, 100 + tick * 1_000, seededRandom(5), 'audit');
+      accepted += result.decisions.queued + result.decisions.deferred + result.decisions.replay;
+    }
+    expect(db.one('SELECT 1 FROM love_api_recipient_members')).toBeNull();
+    expect(accepted).toBe(1);
+    expect(db.one('SELECT 1 FROM love_api_recipients')).toBeNull();
+  }));
+
+it('keeps a genuinely queued, exactly bound member awaiting during cursor validation', async () =>
+  withMigratedDb((db) => {
+    seed(db, 1, 1);
+    const uri = `at://${DID}/com.example.atmusic.love/r1`;
+    db.run(
+      `INSERT INTO love_api_bindings(did,operation_id,api_origin,uri,incarnation_key,binding_seq,created_at_ms)
+       VALUES(?,'pending-1-1','web',?,'inc1',2,1)`,
+      DID,
+      uri,
+    );
+    db.run(
+      `INSERT INTO forward_outbox(id,link_id,did,kind,dedupe_key,payload_json,state,attempts,due_at,created_at_ms,updated_at_ms,generation)
+       VALUES('queued-member','link',?,'love','pending-1-1','{}','queued',0,1,1,1,1)`,
+      DID,
+    );
+    for (let tick = 0; tick < 8; tick++) runLoveApiMaintenance(db, 100 + tick, seededRandom(5), 'audit');
+    expect(db.one('SELECT operation_id FROM love_api_recipient_members')).toEqual({ operation_id: 'pending-1-1' });
+    expect(db.one('SELECT 1 FROM love_api_unlove_decisions')).not.toBeNull();
+    expect(db.one('SELECT sent_operation_id FROM love_api_recipients')).toEqual({ sent_operation_id: 'op1' });
+  }));
+
+it('promotes an exact API SENT member before handoff and accepts it on the following pass', async () =>
+  withMigratedDb((db) => {
+    seed(db, 1, 1);
+    db.run('UPDATE love_api_recipients SET sent_operation_id=NULL');
+    const uri = `at://${DID}/com.example.atmusic.love/r1`;
+    db.run(
+      `INSERT INTO love_api_bindings(did,operation_id,api_origin,uri,incarnation_key,binding_seq,created_at_ms)
+       VALUES(?,'pending-1-1','web',?,'inc1',2,1)`,
+      DID,
+      uri,
+    );
+    db.run(
+      `INSERT INTO forward_outbox(id,link_id,did,kind,dedupe_key,payload_json,state,attempts,due_at,created_at_ms,updated_at_ms,generation)
+       VALUES('sent-member','link',?,'love','pending-1-1','{}','sent',1,1,1,1,1)`,
+      DID,
+    );
+    runLoveApiMaintenance(db, 100, seededRandom(5), 'audit');
+    expect(db.one('SELECT sent_operation_id FROM love_api_recipients')).toEqual({ sent_operation_id: 'pending-1-1' });
+    expect(db.one('SELECT 1 FROM love_api_recipient_members')).toBeNull();
+    let accepted = 0;
+    for (let tick = 0; tick < 7; tick++) {
+      const result = runLoveApiMaintenance(db, 1_100 + tick * 1_000, seededRandom(5), 'audit');
+      accepted += result.decisions.queued + result.decisions.deferred + result.decisions.replay;
+    }
+    expect(accepted).toBe(1);
+  }));
+
+it('discards a failed pending member without treating it as positive API delivery', async () =>
+  withMigratedDb((db) => {
+    seed(db, 1, 1);
+    db.run('UPDATE love_api_recipients SET sent_operation_id=NULL');
+    const uri = `at://${DID}/com.example.atmusic.love/r1`;
+    db.run(
+      `INSERT INTO love_api_bindings(did,operation_id,api_origin,uri,incarnation_key,binding_seq,created_at_ms)
+       VALUES(?,'pending-1-1','web',?,'inc1',2,1)`,
+      DID,
+      uri,
+    );
+    db.run(
+      `INSERT INTO forward_outbox(id,link_id,did,kind,dedupe_key,payload_json,state,attempts,due_at,created_at_ms,updated_at_ms,generation)
+       VALUES('failed-member','link',?,'love','pending-1-1','{}','failed',1,1,1,1,1)`,
+      DID,
+    );
+    let accepted = 0;
+    for (let tick = 0; tick < 8; tick++) {
+      const result = runLoveApiMaintenance(db, 100 + tick * 1_000, seededRandom(5), 'audit');
+      accepted += result.decisions.queued + result.decisions.deferred + result.decisions.replay;
+    }
+    expect(accepted).toBe(0);
+    expect(db.one('SELECT 1 FROM love_api_recipient_members')).toBeNull();
+    expect(db.one("SELECT 1 FROM forward_outbox WHERE kind='unlove'")).toBeNull();
+  }));
+
 it('audit retained fact without A2 source still authorizes handoff', async () =>
   withMigratedDb((db) => {
     seed(db, 1);
@@ -401,9 +647,57 @@ it('rolls back actual decision cascade amplification before the decision commit'
     expect(db.one<{ n: number }>('SELECT sum(value) AS n FROM l2_meter_amplifier')!.n).toBe(0);
     expect(db.one<{ n: number }>('SELECT count(*) AS n FROM forward_outbox')!.n).toBe(outboxBefore);
   }));
+
+it.each(['coverage counter', 'lane turn'])('rolls back actual %s metadata amplification', async (target) =>
+  withMigratedDb((db) => {
+    seed(db, 1);
+    db.run(
+      `INSERT INTO live_pending_removal_events(uri,rev,action,cid,created_at_ms,expires_at_ms)
+       SELECT authorization_uri,authorization_rev,action,cid,1,10000 FROM love_api_comparison_facts`,
+    );
+    db.run('CREATE TABLE l2_metadata_amplifier(id INTEGER PRIMARY KEY,value INTEGER NOT NULL)');
+    for (let id = 1; id <= 40; id++) db.run('INSERT INTO l2_metadata_amplifier VALUES(?,0)', id);
+    if (target === 'coverage counter')
+      db.raw.exec(`CREATE TRIGGER l2_metadata_amplify AFTER INSERT ON counters
+        WHEN NEW.name='link_coverage' AND NEW.label='api_love_maintenance_decision'
+        BEGIN UPDATE l2_metadata_amplifier SET value=value+1; END`);
+    else
+      db.raw.exec(`CREATE TRIGGER l2_metadata_amplify AFTER UPDATE OF lane_turn ON love_api_proof_state
+        BEGIN UPDATE l2_metadata_amplifier SET value=value+1; END`);
+
+    if (target === 'coverage counter') {
+      expect(() => runLoveApiMaintenance(db, 100, seededRandom(5), 'audit')).toThrow(
+        /L2 coverage counter exceeded metadata reservation/,
+      );
+      expect(db.one("SELECT 1 FROM counters WHERE name='link_coverage'")).toBeNull();
+      expect(db.one<{ state: string }>('SELECT state FROM love_api_recipients')).toEqual({ state: 'sealed' });
+      expect(db.one('SELECT 1 FROM love_api_unlove_decisions')).not.toBeNull();
+    } else {
+      expect(() => runLoveApiMaintenance(db, 100, seededRandom(5), 'audit')).toThrow(
+        /L2 lane turn exceeded its metadata reservation/,
+      );
+      expect(db.one<{ lane_turn: number }>('SELECT lane_turn FROM love_api_proof_state WHERE singleton=1')).toEqual({
+        lane_turn: 0,
+      });
+    }
+    expect(db.one<{ n: number }>('SELECT sum(value) AS n FROM l2_metadata_amplifier')!.n).toBe(0);
+  }),
+);
 it('audit metadata-only timer should wait thirty seconds', async () =>
   withMigratedDb(async (db) => {
     seed(db, 1, 1);
+    const uri = `at://${DID}/com.example.atmusic.love/r1`;
+    db.run(
+      `INSERT INTO love_api_bindings(did,operation_id,api_origin,uri,incarnation_key,binding_seq,created_at_ms)
+       VALUES(?,'pending-1-1','web',?,'inc1',2,1)`,
+      DID,
+      uri,
+    );
+    db.run(
+      `INSERT INTO forward_outbox(id,link_id,did,kind,dedupe_key,payload_json,state,attempts,due_at,created_at_ms,updated_at_ms,generation)
+       VALUES('queued-member','link',?,'love','pending-1-1','{}','queued',0,1,1,1,1)`,
+      DID,
+    );
     const { linkBackfillExtension } = await import('../../src/forward/backfill');
     const runtime = { db, random: seededRandom(3), log: { log() {} } } as unknown as ForwardRuntime;
     const ext = linkBackfillExtension(() => runtime);

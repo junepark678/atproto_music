@@ -3,6 +3,7 @@ import type { Db, SqlParam } from '../do/db';
 import { countLinkCoverage } from './coverage';
 import { LOVE_API_RECLAIM_PAGE, reclaimLoveApiProofRows } from './love-api-maintenance';
 import { materializeLoveApiRecipientDecisions } from './love-api-materializer';
+import { settleApiLoveRecipientRows } from './love-api-recipients';
 
 export const LOVE_API_WRITES = 96;
 export const LOVE_API_VISITS = 16;
@@ -32,6 +33,7 @@ type LaneReport = {
   lane: Lane;
   reserved: number;
   work: number;
+  changedRows: number;
   visits: number;
   units: number;
   reads: number;
@@ -46,6 +48,9 @@ type TransactionReport = {
   returnedRows: number;
   visits: number;
 };
+
+/** Synchronous SQL probe seam for exercising the actual decision transaction read meter. */
+export type LoveApiDecisionReadProbe = (db: Db) => void;
 
 export interface LoveApiMaintenanceResult {
   useful: boolean;
@@ -161,7 +166,107 @@ function checkedUpdate(db: Db, sql: string, ...params: SqlParam[]): number {
   return db.run(sql, ...params).rowsWritten;
 }
 
-function sweepOne(db: Db, state: LaneState): UnitResult {
+function validateOwnedMember(
+  db: Db,
+  key: readonly [string, string, string, string, number],
+  validateAfterSeq: number,
+  nowMs: number,
+): { work: number; useful: boolean } {
+  const cursor = safe(validateAfterSeq, 'member validation cursor');
+  const member = db.one<{ operation_id: string; member_seq: number }>(
+    `SELECT operation_id,member_seq FROM love_api_recipient_members
+     WHERE did=? AND uri=? AND incarnation_key=? AND link_id=? AND generation=? AND member_seq>?
+     ORDER BY member_seq LIMIT 1`,
+    ...key,
+    cursor,
+  );
+  let work = 0;
+  let useful = false;
+  if (member === null) {
+    if (cursor !== 0) {
+      work += checkedUpdate(
+        db,
+        `UPDATE love_api_recipients SET validate_after_seq=0
+         WHERE did=? AND uri=? AND incarnation_key=? AND link_id=? AND generation=? AND validate_after_seq=?`,
+        ...key,
+        cursor,
+      );
+    }
+    return { work, useful };
+  }
+  const seq = safe(member.member_seq, 'member sequence', 1);
+  const effect = db.one<{
+    id: string;
+    did: string;
+    link_id: string;
+    generation: number;
+    kind: string;
+    dedupe_key: string;
+    state: string;
+    binding_uri: string | null;
+    binding_incarnation_key: string | null;
+    binding_origin: string | null;
+  }>(
+    `SELECT f.id,f.did,f.link_id,f.generation,f.kind,f.dedupe_key,f.state,
+            b.uri AS binding_uri,b.incarnation_key AS binding_incarnation_key,b.api_origin AS binding_origin
+     FROM forward_outbox f LEFT JOIN love_api_bindings b ON b.did=f.did AND b.operation_id=f.dedupe_key
+     WHERE f.link_id=? AND f.generation=? AND f.kind='love' AND f.dedupe_key=? LIMIT 1`,
+    key[3],
+    key[4],
+    member.operation_id,
+  );
+  const validBinding =
+    effect?.did === key[0] &&
+    effect.binding_uri === key[1] &&
+    effect.binding_incarnation_key === key[2] &&
+    effect.binding_origin !== null &&
+    ['web', 'lastfm', 'listenbrainz'].includes(effect.binding_origin);
+  if (effect === null || !validBinding || !['queued', 'held'].includes(effect.state)) {
+    if (
+      effect?.state === 'sent' &&
+      effect.did === key[0] &&
+      effect.link_id === key[3] &&
+      effect.generation === key[4]
+    ) {
+      if (validBinding && effect.binding_origin !== null)
+        settleApiLoveRecipientRows(
+          db,
+          [
+            {
+              id: effect.id,
+              link_id: effect.link_id,
+              generation: effect.generation,
+              did: effect.did,
+              kind: 'love',
+              dedupe_key: effect.dedupe_key,
+              state: 'sent',
+            },
+          ],
+          nowMs,
+        );
+    }
+    work += checkedUpdate(
+      db,
+      `DELETE FROM love_api_recipient_members
+       WHERE did=? AND uri=? AND incarnation_key=? AND link_id=? AND generation=? AND operation_id=? AND member_seq=?`,
+      ...key,
+      member.operation_id,
+      seq,
+    );
+    useful = work > 0;
+  }
+  work += checkedUpdate(
+    db,
+    `UPDATE love_api_recipients SET validate_after_seq=?
+     WHERE did=? AND uri=? AND incarnation_key=? AND link_id=? AND generation=? AND validate_after_seq=?`,
+    seq,
+    ...key,
+    cursor,
+  );
+  return { work, useful };
+}
+
+function sweepOne(db: Db, state: LaneState, nowMs: number): UnitResult {
   let cursor = state.sweep_cursor;
   let frontier = state.sweep_frontier;
   let cursorProgress = false;
@@ -198,15 +303,15 @@ function sweepOne(db: Db, state: LaneState): UnitResult {
   const seq = safe(row.aggregate_seq, 'aggregate sequence', 1);
   if (seq <= cursor || seq > frontier) throw new Error('L2 sweep cursor escaped frontier');
   const key = [row.did, row.uri, row.incarnation_key, row.link_id, row.generation] as const;
-  const owned =
+  const windowOwned =
     db.one(
       `SELECT 1 FROM love_api_window_owners WHERE did=? AND uri=? AND incarnation_key=? AND link_id=? AND generation=? LIMIT 1`,
       ...key,
-    ) !== null ||
-    db.one(
-      `SELECT 1 FROM love_api_unlove_decisions WHERE did=? AND uri=? AND incarnation_key=? AND link_id=? AND generation=? LIMIT 1`,
-      ...key,
     ) !== null;
+  const decision = db.one<{ validate_after_seq: number }>(
+    `SELECT validate_after_seq FROM love_api_recipients WHERE did=? AND uri=? AND incarnation_key=? AND link_id=? AND generation=? LIMIT 1`,
+    ...key,
+  );
   const link = db.one<{ generation: number }>('SELECT generation FROM linked_accounts WHERE id=?', row.link_id);
   const incarnation = db.one<{ incarnation_key: string; state: string }>(
     'SELECT incarnation_key,state FROM love_incarnations WHERE uri=?',
@@ -214,6 +319,23 @@ function sweepOne(db: Db, state: LaneState): UnitResult {
   );
   const currentPresent =
     incarnation !== null && incarnation.incarnation_key === row.incarnation_key && incarnation.state === 'present';
+  const staleAggregate =
+    row.state === 'released' ||
+    (row.state === 'sealed' && decision === null) ||
+    (link !== null && link.generation > row.generation) ||
+    (row.state === 'present' && !currentPresent);
+  if (decision !== null && !staleAggregate) {
+    const validated = validateOwnedMember(db, key, decision.validate_after_seq, nowMs);
+    state.sweep_cursor = seq;
+    return {
+      work: validated.work,
+      visits: 1,
+      useful: validated.useful,
+      performed: true,
+      cursorProgress: true,
+    };
+  }
+  const owned = windowOwned;
   const eligible =
     !owned &&
     (row.state === 'released' ||
@@ -285,6 +407,7 @@ function runLanePhase(
   visitsLimit: number,
   observer: ReturnType<typeof observedDb>,
   transactions: TransactionReport[],
+  decisionReadProbe?: LoveApiDecisionReadProbe,
 ): { useful: boolean; units: number; visits: number } {
   if (stopped.has(lane)) return { useful: false, units: 0, visits: 0 };
   let phaseUseful = 0;
@@ -294,9 +417,13 @@ function runLanePhase(
   let metaReserved = 0;
   const phase = { writes: 0, visits: 0, writesLimit, visitsLimit };
   const cursorState: LaneState | null = lane === 'sweep' ? readLaneState(db) : null;
-  const changesBefore = totalChanges(db);
   const transactionMetricStart = observer.metric();
+  let changesBefore = 0n;
+  let decisionUnitMetricStart: Metric | null = null;
+  let decisionUnitChangesBefore = 0n;
+  let decisionLaneReport: LaneReport | null = null;
   db.tx(() => {
+    changesBefore = totalChanges(db);
     while (budget.laneUnits[lane] < LOVE_API_LANE_UNITS[lane]) {
       const cost =
         lane === 'decision' ? LOVE_API_DECISION_COST : lane === 'sweep' ? LOVE_API_SWEEP_COST : LOVE_API_RECLAIM_COST;
@@ -311,6 +438,8 @@ function runLanePhase(
       const unitReadStart = unitMetricStart.reads;
       const unitChangesBefore = totalChanges(db);
       if (lane === 'decision') {
+        decisionUnitMetricStart = transactionMetricStart;
+        decisionUnitChangesBefore = changesBefore;
         beginUnit(budget, lane, cost, 1, phase);
         const result = materializeLoveApiRecipientDecisions(db, nowMs, random, sessionToken, 1);
         if (result.visited === 0) {
@@ -320,9 +449,15 @@ function runLanePhase(
           stopped.add(lane);
           break;
         }
+        const probeResult: unknown = decisionReadProbe?.(observer.db);
+        if (
+          probeResult !== null &&
+          typeof probeResult === 'object' &&
+          'then' in probeResult &&
+          typeof probeResult.then === 'function'
+        )
+          throw new TypeError('L2 decision read probe must be synchronous');
         const delta = totalChanges(db) - unitChangesBefore;
-        const reads = observer.metric().reads - unitReadStart;
-        assertLoveApiDecisionBudget(reads, delta);
         budget.work += Number(delta);
         phaseWork += Number(delta);
         budget.visits++;
@@ -337,19 +472,20 @@ function runLanePhase(
         decisions.expired += result.expired;
         const useful = result.queued + result.deferred + result.replay + result.refused + result.expired > 0;
         if (useful) phaseUseful++;
-        laneReports.push({
+        decisionLaneReport = {
           lane,
           reserved: cost,
           work: Number(delta),
+          changedRows: Number(delta),
           visits: 1,
           units: 1,
-          reads,
+          reads: observer.metric().reads - unitReadStart,
           mutationStatements: observer.metric().mutations - unitMetricStart.mutations,
           returnedRows: observer.metric().returnedRows - unitMetricStart.returnedRows,
-        });
+        };
       } else if (lane === 'sweep') {
         beginUnit(budget, lane, cost, 1, phase);
-        const result = sweepOne(db, cursorState!);
+        const result = sweepOne(db, cursorState!, nowMs);
         if (result.cursorProgress) metaReserved = 1;
         if (!result.performed) {
           budget.reserved -= cost;
@@ -363,7 +499,7 @@ function runLanePhase(
           throw new Error(`L2 SWEEP unit exceeded ${cost} changed rows: ${delta}`);
         const reads = observer.metric().reads - unitReadStart;
         if (reads > 22) throw new Error(`L2 SWEEP read bound exceeded: ${reads}/22`);
-        if (result.work !== Number(delta))
+        if (result.work > Number(delta))
           throw new Error(`L2 SWEEP changed-row accounting mismatch: ${delta}/${result.work}`);
         budget.work += Number(delta);
         phaseWork += Number(delta);
@@ -376,6 +512,7 @@ function runLanePhase(
           lane,
           reserved: cost,
           work: Number(delta),
+          changedRows: Number(delta),
           visits: 1,
           units: 1,
           reads,
@@ -414,6 +551,7 @@ function runLanePhase(
           lane,
           reserved: cost,
           work,
+          changedRows: Number(delta),
           visits: result.visited,
           units: 1,
           reads,
@@ -423,6 +561,9 @@ function runLanePhase(
       }
       const currentDelta = totalChanges(db) - invocationStart;
       assertLoveApiInvocationBudget(currentDelta, budget.visits);
+      // One decision owns this entire transaction, including its final counters and
+      // every total_changes() meter query. Never split the cap across a phase tail.
+      if (lane === 'decision') break;
     }
 
     if (lane === 'sweep' && cursorState !== null && metaReserved > 0) {
@@ -459,12 +600,25 @@ function runLanePhase(
     if (invocationDelta - BigInt(budget.work) > BigInt(LOVE_API_METADATA_RESERVE))
       throw new Error('L2 invocation metadata reserve exceeded');
     if (budget.visits > LOVE_API_VISITS) throw new Error('L2 invocation visit budget exceeded');
+    if (lane === 'decision' && decisionLaneReport !== null && decisionUnitMetricStart !== null) {
+      const completeReads = observer.metric().reads - decisionUnitMetricStart.reads;
+      const completeChangedRows = totalChanges(db) - decisionUnitChangesBefore;
+      assertLoveApiDecisionBudget(completeReads, completeChangedRows);
+      decisionLaneReport.reads = completeReads;
+      decisionLaneReport.changedRows = Number(completeChangedRows);
+      decisionLaneReport.work = Number(completeChangedRows);
+      laneReports.push(decisionLaneReport);
+      // Include the changed-row meter read above in the same hard read boundary.
+      const finalReads = observer.metric().reads - decisionUnitMetricStart.reads;
+      assertLoveApiDecisionBudget(finalReads, completeChangedRows);
+      decisionLaneReport.reads = finalReads;
+    }
     const transactionMetricEnd = observer.metric();
     transactions.push({
       phase: `l2-${lane}`,
       reads: transactionMetricEnd.reads - transactionMetricStart.reads,
       mutationStatements: transactionMetricEnd.mutations - transactionMetricStart.mutations,
-      changedRows: Number(totalChanges(db) - changesBefore),
+      changedRows: Number(totalDelta),
       returnedRows: transactionMetricEnd.returnedRows - transactionMetricStart.returnedRows,
       visits: phaseVisits,
     });
@@ -496,6 +650,7 @@ export function runLoveApiMaintenance(
   nowMs: number,
   random: Random,
   sessionToken: string,
+  decisionReadProbe?: LoveApiDecisionReadProbe,
 ): LoveApiMaintenanceResult {
   if (!Number.isSafeInteger(nowMs) || nowMs < 0 || sessionToken.length === 0)
     throw new RangeError('invalid L2 maintenance invocation');
@@ -503,14 +658,15 @@ export function runLoveApiMaintenance(
   const workDb = observed.db;
   const transactions: TransactionReport[] = [];
   const invocationStart = totalChanges(workDb);
-  const initBefore = totalChanges(workDb);
   const initMetricStart = observed.metric();
+  let initDelta = 0n;
   workDb.tx(() => {
+    const initBefore = totalChanges(workDb);
     const changed = checkedUpdate(workDb, 'INSERT OR IGNORE INTO love_api_proof_state(singleton) VALUES(1)');
-    const delta = totalChanges(workDb) - initBefore;
-    if (delta < 0n || delta > 1n || delta !== BigInt(changed)) throw new Error('L2 singleton init exceeded reserve 1');
+    initDelta = totalChanges(workDb) - initBefore;
+    if (initDelta < 0n || initDelta > 1n || initDelta !== BigInt(changed))
+      throw new Error('L2 singleton init exceeded reserve 1');
   });
-  const initDelta = totalChanges(workDb) - initBefore;
   if (initDelta < 0n || initDelta > 1n) throw new Error('L2 singleton init exceeded reserve 1');
   const initMetricEnd = observed.metric();
   transactions.push({
@@ -563,6 +719,7 @@ export function runLoveApiMaintenance(
         visitsLimit,
         observed,
         transactions,
+        decisionReadProbe,
       );
       useful ||= report.useful;
     }

@@ -2,6 +2,10 @@ import type { Db } from '../do/db';
 
 export const LOVE_API_RECLAIM_PAGE = 8;
 
+export const LOVE_API_BINDING_RECLAIM_DELETE_SQL = `DELETE FROM love_api_bindings WHERE did=? AND operation_id=? AND binding_seq=?
+  AND NOT EXISTS(SELECT 1 FROM love_api_unlove_decisions d
+    WHERE d.did=? AND d.uri=? AND d.incarnation_key=? LIMIT 1)`;
+
 export interface LoveApiReclaimResult {
   visited: number;
   bindingsDeleted: number;
@@ -168,18 +172,13 @@ export function reclaimLoveApiProofRows(db: Db, nowMs: number, limit = LOVE_API_
         );
         if (used === null)
           bindingsDeleted += db.run(
-            `DELETE FROM love_api_bindings WHERE did=? AND operation_id=? AND binding_seq=?
-             AND NOT EXISTS(SELECT 1 FROM love_api_unlove_decisions d
-               JOIN love_api_recipients r ON r.did=d.did AND r.uri=d.uri AND r.incarnation_key=d.incarnation_key
-                 AND r.link_id=d.link_id AND r.generation=d.generation
-               WHERE d.did=? AND d.uri=? AND d.incarnation_key=? AND r.sent_operation_id=?)`,
+            LOVE_API_BINDING_RECLAIM_DELETE_SQL,
             row.did,
             row.operation_id,
             seq,
             row.did,
             row.uri,
             row.incarnation_key,
-            row.operation_id,
           ).rowsWritten;
         lastSeq = seq;
       }
