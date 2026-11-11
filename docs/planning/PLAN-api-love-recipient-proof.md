@@ -1,8 +1,8 @@
 # Finding 32: API love recipient proof (L2)
 
-## Current acceptance ledger (local source-fix candidate based on `a14de15`; review pending)
+## Current acceptance ledger (candidate includes restore merge `ce04893`; integrated review pending)
 
-The worktree is based on `a14de1508909684b06a45788dcdfc9783590b202`; two integrated-audit source repairs and their regressions are in progress here. No source acceptance is claimed for this candidate. Migration57 remains frozen at SHA-256 `54dc2d344097763e055b0f8f7f10d8f85993ccdaf0e31620b699726c35256a96`; migrations1–56 are unchanged.
+This candidate contains the two authorized integrated-audit source repairs and their producer/query regressions, plus the approved offline restore fixture chain merged normally at `ce04893dc27623914d0ff379d1e7e743cd7d841c`. No fresh source acceptance is claimed. Migration57 remains frozen at SHA-256 `54dc2d344097763e055b0f8f7f10d8f85993ccdaf0e31620b699726c35256a96`; migrations1–56 are unchanged.
 
 | Requirement | Current evidence | State |
 | --- | --- | --- |
@@ -12,11 +12,11 @@ The worktree is based on `a14de1508909684b06a45788dcdfc9783590b202`; two integra
 | Schema57 migration ledger and all-table reopen | `local-index.test.ts`: exact historical 1–56 prefix plus 57 tail; coherent rows in all eight non-derived L2 tables survive close/reopen with exact dump equality | scoped pass, 5/5 |
 | Same-incarnation multi-operation producer and transport | `astra-core-cdb.test.ts`: actual snapshot PDS record, two API admissions with different origins/rkeys, signed absence, operation/outbox GC before or after absence, selected SENT or all-ignored negative. `love-api-active-transport.test.ts`: real PDS/outbox and two fake services; one and two same-incarnation API operations both yield exactly one unlove per service and rerun zero; the second operation has a different persisted origin. | scoped pass for reproduced F1 shape; broader batch/status matrix remains |
 | Pending-member work growth | `astra-core-cdb.bench.test.ts`: captures the complete production handoff SELECT/params from `prepareLoveApiRecipientHandoff`, measures it on the same full-schema SQLite file with 100/1k/10k matching held members, and compares a count-only anti-control. Production query uses bounded indexed `EXISTS`; full bench file passes 79/79. | scoped pass for F2 query; broader whole-decision matrix remains |
-| Restore | exact-parent #209 schema56 producer archive has no L2 tables; real CLI 56→57 migration gives old API SENT/reuse no authority, then a new post-upgrade API admission reuses the legacy projection and proves new SENT. Producer-derived schema57 real-CLI restore covers operation/outbox GC, retained origin, exact rows, fresh composition/timer, paused/revoked zero egress and same-remote one-send/rerun-zero. Isolated restore worker owns the newly authorized literal all-eight cleanup and counts-only pending-proof-loss notice fixture; no restore files are edited here. Exact prior test mapping is in the Restore coverage ledger below | prior narrow receipts preserved; new accept-loss fixture pending |
+| Restore | approved offline fixture chain `5ce00e1` → `e311061` → corrected `31f4772`, merged as `ce04893`; exact #209 schema56 producer SQL/metadata are checked in, normal restore test no longer needs Git history. All-eight unreadable-live cleanup, counts-only notice on refusal/acceptance, and mid-clear rollback are covered. Restore-owned files match accepted `e311061` except the two explicitly approved manifest-path strings in the manifest and regeneration script. | merged-candidate restore + inventory 29/29; focused manifest checks pass; exact-head full gate and hosted result pending |
 
-The integrated audit on `f58fe8fd50b4802b1e2306104ed1e56652ee1cc1` found two source defects. Both repairs are now present in the local candidate: direct and delayed producer same-incarnation checks treat a completed bound sibling as a qualification only when that exact current-generation aggregate has positive SENT proof or a still-pending exact member; recipient positive proof continues to come only from `sent_operation_id`. The handoff presence predicate now uses exact-key `EXISTS` instead of scanning the full member prefix with `COUNT(*)`. No DDL, budget, route, or positive-proof rule changed. Targeted Node tests pass 108/108; `astra-core-cdb.bench.test.ts` passes 79/79; the full source typecheck and scoped Biome check pass. A snapshot PDS/API producer transport test proves two same-incarnation operations send exactly one Last.fm unlove and one ListenBrainz score-zero, then zero on rerun. Separate terminal-ignored/GC controls prove bindings alone do not create authority. Fresh independent source review and the broader batch matrix remain pending.
+The integrated audit on `f58fe8fd50b4802b1e2306104ed1e56652ee1cc1` found two source defects. Both repairs are present: direct and delayed producer same-incarnation checks treat a completed bound sibling as a qualification only when that exact current-generation aggregate has positive SENT proof or a still-pending exact member; recipient positive proof continues to come only from `sent_operation_id`. The handoff presence predicate now uses exact-key `EXISTS` instead of scanning the full member prefix with `COUNT(*)`. No DDL, budget, route, or positive-proof rule changed. Targeted Node producer/recipient, transport, and de-shim suites pass 112/112; restore plus test-inventory passes 29/29; local-index passes 5/5; `astra-core-cdb.bench.test.ts` passes 79/79. A snapshot PDS/API producer transport test proves two same-incarnation operations send exactly one Last.fm unlove and one ListenBrainz score-zero, then zero on rerun. The delayed source-excluded import fixture proves the exact Last.fm narrow effect while ListenBrainz is covered by the broad effect. Separate terminal-ignored/GC controls prove bindings alone do not create authority. Fresh independent source review and the broader batch matrix remain pending.
 
-The f58 root-owned full gate passed 2474/0/1, but is historical source evidence only. At `a14de15`, both hosted TypeScript jobs failed the same one offline schema56 restore fixture (2475 passed / 1 failed / 1 skipped; jobs `130302795988` and `130302779899`) because the shallow checkout lacks the historical #209 archive. This is a known reproducible environment limitation, not a flaky test or readiness result. No network fetch or CI depth change was made. Receipt: `/tmp/atproto-followup-sol/pr210-hosted-a14de15-planner.json`. The new restore fixture work is isolated elsewhere and has not yet been merged. Keep PR210 draft.
+The f58 root-owned full gate passed 2474/0/1, but is historical source evidence only. At `a14de15`, both hosted TypeScript jobs failed the same one offline schema56 restore fixture (2475 passed / 1 failed / 1 skipped; jobs `130302795988` and `130302779899`) because the shallow checkout lacked the historical #209 archive. This was a known reproducible environment limitation, not a flaky test. The approved offline fixture chain is now merged at `ce04893`; current hosted results have not been queried. No network fetch or CI depth change was made. Receipt: `/tmp/atproto-followup-sol/pr210-hosted-a14de15-planner.json`. Keep PR210 draft.
 
 The integrated audit's two source defects were reproduced on unchanged production
 source `f58fe8fd50b4802b1e2306104ed1e56652ee1cc1` using its archived, hash-checked
@@ -42,7 +42,7 @@ snapshot/import repro. Source repairs and fresh review remain pending.
 | All eight non-derived schema57 tables merge and survive a regular close/reopen | `local-index.test.ts`: coherent rows are populated across all eight tables, exact table dumps compared after reopen; `restores populated schema-57 API-love proof rows from live after operation and sent-outbox cleanup` also checks merged rows after real CLI restore | covered as fixture-arranged storage/merge plus separate producer-derived restore |
 | Merge failure atomicity | `keeps populated schema-56 live and backup state intact when the completed merge fails before the file swap`; actual restore CLI injection after merge and pre-swap snapshots of live and backup files, including populated L2 rows | covered for the labeled post-merge/pre-swap injection point; the fixture has already booted/migrated current runtime before arranging rows, so do not call every input file schema56 at CLI entry |
 | Readable live state wins where newer, foreign keys and fresh composition | `keeps the newest live evidence, candidate, and pending removal when a readable restore merges an older backup`; producer-derived restore assertions and `PRAGMA foreign_key_check` after restore | covered for those named live-merge invariants |
-| Unreadable live `--accept-loss`, revocation journal and L2 cleanup | `with --accept-loss on an unreadable live db...`; real CLI and journal assertions remove sessions/links/receipts/outbox and cascade recipient members/window owners/decisions; retained comparison fact, binding, epoch and singleton remain for bounded cleanup | covered for current cascade/reclaim behavior; literal clearing of all eight tables is not proved. Sol's new ruling also requires a pending-proof loss notice on both refusal and accepted paths; that test change is delegated to the isolated restore checkout and remains pending |
+| Unreadable live `--accept-loss`, revocation journal and L2 cleanup | The earlier restore test covered cascade/reclaim only. The accepted `e311061` restore slice now clears all eight non-derived L2 tables in the same staging transaction as session/revocation updates and verifies counts-only notice on refusal and accepted paths; injected mid-clear failure rolls back the entire staging transaction | scoped pass, 29/29 restore + inventory; exact-head full gate and hosted result pending |
 | Post-restore coverage, dispatch and timer resume | producer-derived schema57 restore and exact-parent schema56 post-upgrade positive case use fresh composition and actual fake Last.fm/ListenBrainz transports | covered for the named scenarios; integrated snapshot/import multiple-operation qualification and expanded producer-batch matrix remain in progress |
 
 The read cap is still a provisional relaxation: `96 + (25 - 13) + 20 = 128`; the20 is integration slack, not full-path measurement. Whole-decision<=128, changedRows<=28, invocation<=96 changed rows/16 visits, and metadata reserve12 are unchanged. The 229-read lifecycle receipt is informational wrong-unit evidence. PR210 is not ready and no full-L2 acceptance is claimed.
@@ -104,7 +104,7 @@ newer-unbound-love guards, and all fixed budgets/schema.
 | All eight non-derived schema57 tables merge and survive a regular close/reopen | `local-index.test.ts`: coherent rows are populated across all eight tables, exact table dumps compared after reopen; `restores populated schema-57 API-love proof rows from live after operation and sent-outbox cleanup` also checks merged rows after real CLI restore | covered as fixture-arranged storage/merge plus separate producer-derived restore |
 | Merge failure atomicity | `keeps populated schema-56 live and backup state intact when the completed merge fails before the file swap`; actual restore CLI injection after merge and pre-swap snapshots of live and backup files, including populated L2 rows | covered for the labeled post-merge/pre-swap injection point; the fixture has already booted/migrated current runtime before arranging rows, so do not call every input file schema56 at CLI entry |
 | Readable live state wins where newer, foreign keys and fresh composition | `keeps the newest live evidence, candidate, and pending removal when a readable restore merges an older backup`; producer-derived restore assertions and `PRAGMA foreign_key_check` after restore | covered for those specific live-merge invariants |
-| Unreadable live `--accept-loss`, revocation journal and L2 cleanup | `with --accept-loss on an unreadable live db...`; real CLI and journal assertions remove sessions/links/receipts/outbox and cascade recipient members/window owners/decisions; retained comparison fact, binding, epoch and singleton remain available for safe bounded cleanup | covered for current cascade/reclaim behavior; literal immediate clearing of all eight L2 tables is not proved and is not claimed |
+| Unreadable live `--accept-loss`, revocation journal and L2 cleanup | Historical pre-e311 fixture retained binding/fact/epoch/singleton rows for bounded cleanup and did not prove literal all-eight clearing. The subsequent accepted e311 case clears all eight tables transactionally, proves rollback after an injected mid-clear fault, and reports only counts on both refusal and accepted paths | current scoped pass in merged offline restore fixture; prior narrow receipt retained as superseded evidence |
 | Post-restore coverage, dispatch and timer resume | producer-derived schema57 restore and exact-parent schema56 post-upgrade positive case use fresh composition and actual fake Last.fm/ListenBrainz transports | covered for named scenarios; integrated snapshot/import multiple-operation qualification and expanded producer-batch matrix remain in progress |
 
 ## Scope and binding behavior
@@ -867,15 +867,14 @@ The later schema-56 producer-derived restore test/docs checkpoint is recorded be
 
 ## Schema-56 producer-derived restore checkpoint
 
-The scoped restore case now creates its pre-L2 database by extracting exact
-READY #209 source `5d573706bf07bb50e0c8b79cf1d34a3f6c56a975` with `git
-archive` into a temporary directory and running a generated test through that
-archive's Node harness. The parent producer performs an actual API love
-admission, sends it through the fake PDS, verifies and projects the signed
-record, then imports a separate snapshot and performs an API acceptance that
-reuses that projection without another PDS request. The captured DB reports
-schema56, has no `love_api_*` tables, and contains both succeeded operation
-rows plus the imported-source projection. No L2 rows are seeded.
+The schema56 producer fixture was generated once from exact READY #209 source
+`5d573706bf07bb50e0c8b79cf1d34a3f6c56a975`. Its checked-in SQL and metadata
+capture a real API love admission, fake-PDS send, signed record verification
+and projection, plus an imported snapshot and an API acceptance that reuses
+the projection without another PDS request. Normal tests load these immutable
+files offline and do not inspect Git history or run old source. The captured
+DB reports schema56, has no `love_api_*` tables, and contains both succeeded
+operation rows plus the imported-source projection. No L2 rows are seeded.
 
 The captured file is copied as both backup and stopped live state and passed
 through the real restore CLI. The CLI reports 56→57, checks all eight L2 tables
@@ -894,15 +893,22 @@ then a zero-request rerun. Foreign-key checks run after the current server
 closes.
 
 The selected schema56 case and the existing schema57 producer-derived restore
-case both passed together (2/2) with one worker on CPUs8–11. This checkpoint
-adds test code and this evidence only: production runtime, migration57, and
-migrations1–56 are unchanged from `333e8ae`. It does not close the queued
-whole-decision outcome/cost matrix, producer-batch matrix, or full restore
-acceptance matrix, and it makes no readiness or whole-L2 claim. Project
-typecheck, scoped Biome, `git diff --check`, the secret-scan test, and a
-credential-shaped scan of added lines also passed; the scan reported no
-matches. The test-only source delta was checked against `worker/src` and
-`worker/migrations`, with no changes in either tree.
+case passed together earlier (2/2); the offline fixture plus exact restore,
+inventory and de-shim tests passed 32/32 in the independent e311 review on a
+copy without `.git`. On the merged candidate, restore plus inventory passed
+29/29, the eight-file producer/recipient/de-shim suite passed 112/112, the
+local-index suite passed 5/5, and the Astra CDB bench passed 79/79. The restore
+merge changed no worker source or schema; F1/F2 production changes are a
+separate already-pushed commit. The prior 26-test accept-loss receipt is
+retained as historical behavior and superseded only for literal all-eight
+cleanup and counts-only notice proof. Exact offline fixture SHA-256 values are
+SQL SHA-256 `51c12dfc4fe1e679ebfd25f604f03736ac3d1469e9e366a72b5f35103094dbc6` and
+metadata SHA-256 `006c8dfa1b8361e4d60e73808ea1d947a919d71743cf0a88bfb79976c8d3306d`;
+normalized migrations1–56 DDL SHA-256 remains
+`2f41973103102185a479a93244091a5afc31fdd081d0d11119c0b0cd41761176`. The
+remaining producer-batch/outcome matrix, exact-head full gate, fresh
+integrated source review, and hosted green result are still pending. No
+readiness or whole-L2 acceptance is claimed.
 
 ## Astra 333 retained-minimum repair checkpoint (fresh review pending)
 
@@ -992,6 +998,11 @@ rkeys, both service links, actual PDS execution/SENT, signed absence,
 operation/outbox GC before or after absence, plus an all-ignored terminal
 negative whose binding alone yields no decision or effect. The actual fake
 Last.fm/ListenBrainz transport sends one unlove each and zero on rerun.
+The delayed source-excluded case seeds ordinary import-admission metadata
+before the actual signed projector (no L2 rows); it proves Last.fm gets its
+narrow API-recipient effect while ListenBrainz remains covered by the broad
+effect. A delayed case with no source exclusion correctly released both
+recipients under accepted broad coverage and is not treated as an L2 under-send.
 The Node settlement control groups exact terminal rows by operation and runs
 both older-first and newer-first through `settleRows`, asserting the selected
 SENT identity on both recipient links; the fake-transport path covers the
@@ -1004,14 +1015,43 @@ from the production handoff call, evaluates that query and the former
 Node handle, and checks full plans and FK integrity at 100/1,000/10,000
 matching members. Earlier measured production steps were 183/183/183 versus
 the old COUNT's 484/3,184/30,184; no elapsed-time or exact-opcode claim is
-made. Scoped evidence on this candidate: core producer/recipient suites
-108/108, the complete Astra CDB bench file 79/79, project typecheck, scoped
-Biome, and `git diff --check` pass. Secret scan and sanitized credential scan
-are required before push.
+made. Scoped evidence on the merged candidate: producer/recipient/de-shim
+suite112/112, restore plus inventory29/29, local-index5/5, the complete Astra
+CDB bench file79/79, project typecheck and scoped Biome pass. Secret and
+sanitized credential scans are repeated before the next push.
 
-Current source changes remain uncommitted and unreviewed independently. The
-accepted narrow 8a direct-expiry review does not pre-accept these integrated
-fixes. Broader mixed-status producer batches, all source-order/second-handoff
-rollback combinations, remaining restore work, fresh integrated Astra review,
-exact-candidate full gate, and host-green checks remain pending. PR210 stays
-draft; no whole-L2 acceptance or readiness is claimed.
+The production fixes are pushed in `4704f01`; the explicit settlement-order
+control is pushed in `6813023`. The offline restore chain
+`5ce00e1`→`e311061`→`31f4772` is normally merged as `ce04893`; its restore-owned
+files match accepted e311 except the two approved path strings. The old
+26-test accept-loss receipt is preserved as superseded for literal all-eight
+cleanup and counts-only notice proof; the exact a14de15 hosted archive failure
+is also retained, but the normal restore tests now load the offline fixture.
+Fresh integrated source review, broader mixed-status producer batches,
+source-order/second-handoff rollback combinations, exact-candidate full gate,
+and hosted-green checks remain pending. PR210 stays draft; no whole-L2
+acceptance or readiness is claimed.
+
+## Offline schema56 restore merge (`ce04893`)
+
+The offline producer-derived restore slice is now merged into this branch by a
+normal no-ff merge. Its accepted chain is `5ce00e1` (offline exact-parent
+schema56 producer fixture and history baselines), `e311061` (transactional
+all-eight cleanup, counts-only notice, and rollback coverage), and
+`31f4772` (two approved manifest path corrections). The restore-owned files
+match accepted `e311061` byte-for-byte except those two path strings. The
+fixture SQL SHA-256 is
+`51c12dfc4fe1e679ebfd25f604f03736ac3d1469e9e366a72b5f35103094dbc6`, metadata
+SHA-256 is
+`006c8dfa1b8361e4d60e73808ea1d947a919d71743cf0a88bfb79976c8d3306d`, and
+normalized schema1–56 DDL SHA-256 is
+`2f41973103102185a479a93244091a5afc31fdd081d0d11119c0b0cd41761176`.
+Restore and inventory tests pass 29/29 on the merged candidate; the two
+producer Node regressions pass 13/13, project typecheck and scoped Biome pass,
+and the secret scan passes. The earlier 26-test accept-loss receipt remains
+historical and is superseded only for literal all-eight clearing, mid-clear
+rollback, and counts-only notice coverage. The prior f58 full-gate local pass
+and a14de15 hosted archive-fixture failure remain exact historical receipts;
+this candidate has no new full-gate or host-green result. Offline provenance
+removes the restore test's Git-history dependency without fetching history or
+changing CI depth. Producer-batch and whole-L2 acceptance remain pending.

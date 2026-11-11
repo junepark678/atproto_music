@@ -348,15 +348,27 @@ it.each([
   { reverseSettlement: true, gcBeforeAbsence: false, allSent: true },
   { reverseSettlement: false, gcBeforeAbsence: false, allSent: false },
   { reverseSettlement: true, gcBeforeAbsence: true, allSent: false },
+  { reverseSettlement: true, gcBeforeAbsence: true, allSent: true, absencePath: 'delayed-import' as const },
 ])(
   'handles snapshot same-incarnation API operation bindings safely (%o)',
-  async ({ reverseSettlement, gcBeforeAbsence, allSent }) => {
+  async ({ reverseSettlement, gcBeforeAbsence, allSent, absencePath = 'direct' }) => {
     await withHarness(async (h) => {
       h.seedUser(h.alice);
       const lastfm = h.link(h.alice, 'lastfm');
       const listenbrainz = h.link(h.alice, 'listenbrainz');
       const rkey = '3ksnapshotmultio';
       const recordingMbid = '12345678-1234-1234-1234-123456789abc';
+      if (absencePath === 'delayed-import') {
+        // Seed the ordinary import admission; the signed projector persists
+        // its source service before the API operations reuse this incarnation.
+        h.db.run(
+          `INSERT INTO forward_admissions(did,identity_key,path,source_service,created_at_ms,admission_seq)
+           VALUES(?,?,'import','lastfm',?,101)`,
+          h.alice,
+          `love-uri:${h.alice}:${LOVE}:${rkey}`,
+          h.m.clock.nowMs(),
+        );
+      }
       await h.kit.externalPut('Alice', LOVE, rkey, {
         $type: LOVE,
         artist: 'Snapshot reuse artist',
@@ -366,7 +378,9 @@ it.each([
       });
       expect((await projectLove(h, rkey)).outcome).toBe('applied');
       const uri = `at://${h.alice}/${LOVE}/${rkey}`;
-      expect(h.db.one('SELECT path FROM love_incarnations WHERE uri=?', uri)).toEqual({ path: 'snapshot' });
+      expect(h.db.one('SELECT path FROM love_incarnations WHERE uri=?', uri)).toEqual({
+        path: absencePath === 'delayed-import' ? 'import' : 'snapshot',
+      });
 
       const operations: Array<{ id: string; rkey: string | null }> = [];
       for (const origin of ['web', 'lastfm'] as const) {
@@ -433,6 +447,12 @@ it.each([
       };
       if (gcBeforeAbsence) cleanApiHistory();
 
+      const presentProof = await verifyRecordProof(await h.kit.repos.Alice.getRecordCar(LOVE, rkey), {
+        did: h.alice,
+        collection: LOVE,
+        rkey,
+        signingKey: h.kit.users.Alice.key.didKey,
+      });
       await h.kit.externalDelete('Alice', LOVE, rkey);
       const absentProof = await verifyRecordProof(await h.kit.repos.Alice.getRecordCar(LOVE, rkey), {
         did: h.alice,
@@ -441,12 +461,75 @@ it.each([
         signingKey: h.kit.users.Alice.key.didKey,
       });
       if (absentProof.state !== 'absent') throw Error('expected signed snapshot absence');
-      recordLiveEvidence(
-        h.db,
-        { uri, did: h.alice, collection: LOVE, rkey, rev: absentProof.commit.rev, action: 'delete' },
-        h.kit.clock.nowMs(),
-      );
-      expect((await projectLove(h, rkey, true)).outcome).toBe('absent');
+      const liveDelete = {
+        uri,
+        did: h.alice,
+        collection: LOVE,
+        rkey,
+        rev: absentProof.commit.rev,
+        action: 'delete' as const,
+      };
+      if (absencePath === 'direct') {
+        recordLiveEvidence(h.db, liveDelete, h.kit.clock.nowMs());
+        expect((await projectLove(h, rkey, true)).outcome).toBe('absent');
+      } else {
+        const nowMs = h.kit.clock.nowMs();
+        const currentLove = h.db.one<{
+          uri: string;
+          cid: string;
+          artist_key: string;
+          track_key: string;
+          artist: string;
+          track: string;
+          recording_mbid: string | null;
+        }>('SELECT uri,cid,artist_key,track_key,artist,track,recording_mbid FROM loves WHERE uri=?', uri);
+        if (currentLove === null) throw new Error('snapshot love projection missing before delayed absence');
+        recordPendingRemovals(h.db, [
+          {
+            did: h.alice,
+            uri,
+            kind: 'love',
+            row: {
+              ...currentLove,
+              listened_at: new Date(nowMs).toISOString(),
+              record_uri: null,
+              listen_id: null,
+            },
+            identityKey: h.db.one<{ incarnation_key: string }>(
+              'SELECT incarnation_key FROM love_incarnations WHERE uri=?',
+              uri,
+            )!.incarnation_key,
+            windowLo: presentProof.commit.rev,
+            windowHi: absentProof.commit.rev,
+            replacedByCid: null,
+            ...(absencePath === 'delayed-import' ? { loveSourceService: 'lastfm' } : {}),
+            nowMs,
+          },
+        ]);
+        const nowNs = fromMs(nowMs);
+        expect(
+          h.db.tx(() =>
+            applyRecordProof(h.db, absentProof, {
+              ...authorizedLiveOptions(h.db, absentProof, projectionRandom),
+              prefix: 'com.example.atmusic',
+              nowNs,
+              receiptNs: nowNs,
+            }),
+          ).outcome,
+        ).toBe('absent');
+        recordLiveEvidence(h.db, liveDelete, nowMs);
+        h.db.tx(() => authorizePendingRemovals(h.db, { uri, rev: absentProof.commit.rev, action: 'delete' }, nowMs));
+        expect(
+          h.db.tx(() =>
+            executeAuthorizedRemovals(h.db, {
+              uri,
+              nowMs,
+              random: h.m.random,
+              limit: 1,
+            }),
+          ).groups,
+        ).toBe(1);
+      }
       if (!gcBeforeAbsence) cleanApiHistory();
       if (!allSent) {
         // Bindings and a terminal negative outcome never establish recipient
@@ -461,29 +544,49 @@ it.each([
         ).toMatchObject({ queued: 0, deferred: 0, replay: 0 });
         return;
       }
-      expect(h.db.all('SELECT state FROM love_api_recipients ORDER BY link_id')).toEqual([
-        { state: 'sealed' },
-        { state: 'sealed' },
-      ]);
+      const positiveLinks = absencePath === 'delayed-import' ? [lastfm] : [lastfm, listenbrainz];
+      const releasedLinks = absencePath === 'delayed-import' ? [listenbrainz] : [];
+      expect(
+        h.db.all<{ link_id: string; state: string }>('SELECT link_id,state FROM love_api_recipients ORDER BY link_id'),
+      ).toEqual(
+        [
+          ...positiveLinks.map((link_id) => ({ link_id, state: 'sealed' })),
+          ...releasedLinks.map((link_id) => ({ link_id, state: 'released' })),
+        ].sort((left, right) => left.link_id.localeCompare(right.link_id)),
+      );
       const result = materializeLoveApiRecipientDecisions(h.db, h.m.clock.nowMs(), h.m.random, 'snapshot-multi-api');
-      expect(result).toMatchObject({ visited: 2, queued: 2, deferred: 0, refused: 0 });
+      expect(result).toMatchObject({
+        visited: positiveLinks.length,
+        queued: positiveLinks.length,
+        deferred: 0,
+        refused: 0,
+      });
       expect(
         h.db.all<{ link_id: string; kind: string; state: string; dedupe_key: string }>(
           `SELECT link_id,kind,state,dedupe_key FROM forward_outbox WHERE kind='unlove' ORDER BY link_id`,
         ),
       ).toEqual([
-        {
-          link_id: lastfm,
-          kind: 'unlove',
-          state: 'queued',
-          dedupe_key: `love-delete:${h.db.one<{ incarnation_key: string }>('SELECT incarnation_key FROM love_incarnations WHERE uri=?', uri)!.incarnation_key}:rev:${absentProof.commit.rev}:api-recipient`,
-        },
-        {
-          link_id: listenbrainz,
-          kind: 'unlove',
-          state: 'queued',
-          dedupe_key: `love-delete:${h.db.one<{ incarnation_key: string }>('SELECT incarnation_key FROM love_incarnations WHERE uri=?', uri)!.incarnation_key}:rev:${absentProof.commit.rev}:api-recipient`,
-        },
+        ...(absencePath === 'delayed-import'
+          ? [
+              {
+                link_id: lastfm,
+                kind: 'unlove',
+                state: 'queued',
+                dedupe_key: `love-delete:${h.db.one<{ incarnation_key: string }>('SELECT incarnation_key FROM love_incarnations WHERE uri=?', uri)!.incarnation_key}:rev:${absentProof.commit.rev}:api-recipient`,
+              },
+              {
+                link_id: listenbrainz,
+                kind: 'unlove',
+                state: 'queued',
+                dedupe_key: `love-delete:${h.db.one<{ incarnation_key: string }>('SELECT incarnation_key FROM love_incarnations WHERE uri=?', uri)!.incarnation_key}:rev:${absentProof.commit.rev}`,
+              },
+            ]
+          : positiveLinks.map((link_id) => ({
+              link_id,
+              kind: 'unlove',
+              state: 'queued',
+              dedupe_key: `love-delete:${h.db.one<{ incarnation_key: string }>('SELECT incarnation_key FROM love_incarnations WHERE uri=?', uri)!.incarnation_key}:rev:${absentProof.commit.rev}:api-recipient`,
+            }))),
       ]);
     });
   },
