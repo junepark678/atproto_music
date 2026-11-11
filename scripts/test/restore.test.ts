@@ -1938,9 +1938,10 @@ describe('restore.ts', () => {
     expect(restoredMaintenance.writes).toBeLessThanOrEqual(96);
     expect(restoredMaintenance.visits).toBeLessThanOrEqual(16);
     const restoredDecisionPhases = restoredMaintenance.transactions.filter((row) => row.phase === 'l2-decision');
+    // The current transaction trace includes the production pre-unit metadata SELECT in each decision phase.
     expect(restoredDecisionPhases.map(({ reads, changedRows, visits }) => ({ reads, changedRows, visits }))).toEqual([
-      { reads: 69, changedRows: 12, visits: 1 },
-      { reads: 3, changedRows: 0, visits: 0 },
+      { reads: 70, changedRows: 12, visits: 1 },
+      { reads: 4, changedRows: 0, visits: 0 },
     ]);
     expect(restoredDecisionPhases.every((row) => row.reads <= 128 && row.changedRows <= 28 && row.visits <= 1)).toBe(
       true,
