@@ -3,14 +3,18 @@ import type { Db } from '../do/db';
 import { countLiveAdmission, type LiveEvidence } from '../do/ingest/live-evidence';
 import { projectedListensOfRecord } from '../do/write/apply-record';
 import { enqueueForwards } from '../outbox/forward-enqueue';
+import { cancelLoveApiRecipientDecisionsForUri } from './love-api-recipients';
 import { projectionListenKey } from './projection';
 
 export function dropLiveState(db: Db, uri: string): void {
-  db.run('DELETE FROM live_record_evidence WHERE uri=?', uri);
-  db.run('DELETE FROM live_acceptance_candidates WHERE uri=?', uri);
-  db.run('DELETE FROM live_pending_removals WHERE uri=?', uri);
-  db.run('DELETE FROM live_pending_removal_events WHERE uri=?', uri);
-  db.run('DELETE FROM live_pending_removal_reconcile WHERE uri=?', uri);
+  db.tx(() => {
+    cancelLoveApiRecipientDecisionsForUri(db, uri);
+    db.run('DELETE FROM live_record_evidence WHERE uri=?', uri);
+    db.run('DELETE FROM live_acceptance_candidates WHERE uri=?', uri);
+    db.run('DELETE FROM live_pending_removals WHERE uri=?', uri);
+    db.run('DELETE FROM live_pending_removal_events WHERE uri=?', uri);
+    db.run('DELETE FROM live_pending_removal_reconcile WHERE uri=?', uri);
+  });
 }
 
 export function deleteLiveCandidates(db: Db, uri: string): void {

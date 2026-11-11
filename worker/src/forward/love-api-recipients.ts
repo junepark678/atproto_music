@@ -79,6 +79,44 @@ export interface LoveApiMaterializerCandidate {
   generation: number;
 }
 
+/** Complete accepted but not yet handed-off decisions for one URI or DID.
+ * Existing SENT/queued B2 effects are deliberately outside this pre-handoff seam.
+ */
+export function cancelLoveApiRecipientDecisionsForUri(db: Db, uri: string): void {
+  db.tx(() => cancelLoveApiRecipientDecisions(db, 'uri=?', [uri]));
+}
+
+/** DID suppression uses the URI index's bounded lexical DID prefix. */
+export function cancelLoveApiRecipientDecisionsForDid(db: Db, did: string): void {
+  if (!isDid(did)) throw new TypeError('invalid L2 cancellation DID');
+  db.tx(() => cancelLoveApiRecipientDecisions(db, 'did=? AND uri>=? AND uri<?', [did, `at://${did}/`, `at://${did}0`]));
+}
+
+function cancelLoveApiRecipientDecisions(db: Db, scope: string, params: readonly string[]): void {
+  const decisions = db.all<{
+    did: string;
+    uri: string;
+    incarnation_key: string;
+    link_id: string;
+    generation: number;
+  }>(
+    `SELECT did,uri,incarnation_key,link_id,generation
+     FROM love_api_unlove_decisions WHERE ${scope} ORDER BY did,uri,incarnation_key,link_id,generation`,
+    ...params,
+  );
+  for (const decision of decisions)
+    db.run(
+      `UPDATE love_api_recipients SET state='released'
+       WHERE did=? AND uri=? AND incarnation_key=? AND link_id=? AND generation=? AND state IN ('present','sealed')`,
+      decision.did,
+      decision.uri,
+      decision.incarnation_key,
+      decision.link_id,
+      decision.generation,
+    );
+  db.run(`DELETE FROM love_api_unlove_decisions WHERE ${scope}`, ...params);
+}
+
 export type LoveApiHandoffPreparation =
   | {
       status: 'ready';

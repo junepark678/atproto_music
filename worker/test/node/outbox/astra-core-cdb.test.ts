@@ -13,9 +13,12 @@ import {
   recordPendingRemovals,
 } from '../../../src/do/ingest/live-pending-removals';
 import { applyRecordProof } from '../../../src/do/write/apply-record';
+import { disconnectLocalData } from '../../../src/do/write/suppression';
 import { settleRows } from '../../../src/forward/forward-outbox';
+import { dropLiveState } from '../../../src/forward/live-acceptance';
 import { reclaimLoveApiProofRows } from '../../../src/forward/love-api-maintenance';
 import { materializeLoveApiRecipientDecisions } from '../../../src/forward/love-api-materializer';
+import { runLoveApiMaintenance } from '../../../src/forward/love-api-scheduler';
 import { enqueueLove } from '../../../src/outbox/love-ops';
 import { cancelUnsentForDid } from '../../../src/outbox/operations';
 import { authorizedLiveOptions } from '../../write/support';
@@ -39,6 +42,70 @@ async function projectLove(h: Harness, rkey: string, live = false) {
       ...(live ? authorizedLiveOptions(h.db, proof, projectionRandom) : {}),
     }),
   );
+}
+
+async function produceImportedApiSentLove(
+  h: Harness,
+  person: 'Alice' | 'Bob',
+  rkey: string,
+  input: { artist: string; track: string },
+) {
+  const did = person === 'Alice' ? h.alice : h.bob;
+  const repo = h.kit.repos[person];
+  const user = h.kit.users[person];
+  const linkId =
+    h.db.one<{ id: string }>("SELECT id FROM linked_accounts WHERE did=? AND service='lastfm'", did)?.id ??
+    h.link(did, 'lastfm');
+  const uri = `at://${did}/${LOVE}/${rkey}`;
+  h.db.run('INSERT OR IGNORE INTO forward_admission_clock(singleton,next_seq) VALUES(1,0)');
+  const admission = h.db.one<{ next_seq: number }>(
+    'UPDATE forward_admission_clock SET next_seq=next_seq+1 WHERE singleton=1 RETURNING next_seq',
+  );
+  if (admission === null) throw new Error('forward admission clock missing');
+  h.db.run(
+    `INSERT INTO forward_admissions(did,identity_key,path,source_service,created_at_ms,admission_seq)
+     VALUES(?,?,'import','lastfm',?,?)`,
+    did,
+    `love-uri:${did}:${LOVE}:${rkey}`,
+    h.m.clock.nowMs(),
+    admission.next_seq,
+  );
+  await h.kit.externalPut(person, LOVE, rkey, {
+    $type: LOVE,
+    ...input,
+    createdAt: '2026-01-15T11:00:00Z',
+  });
+  const present = await verifyRecordProof(await repo.getRecordCar(LOVE, rkey), {
+    did,
+    collection: LOVE,
+    rkey,
+    signingKey: user.key.didKey,
+  });
+  h.db.tx(() =>
+    applyRecordProof(h.db, present, {
+      prefix: 'com.example.atmusic',
+      nowNs: fromMs(h.m.clock.nowMs()),
+      receiptNs: fromMs(h.m.clock.nowMs()),
+    }),
+  );
+  const accepted = await enqueueLove(h.m, { did, input, origin: 'web' });
+  if (!accepted.ok) throw new Error(`API reuse refused: ${accepted.reason.code}`);
+  await h.runUntilIdle();
+  expect(h.op(accepted.operation.id)).toMatchObject({ state: 'succeeded', result_uri: uri });
+  const binding = h.db.one<{ incarnation_key: string }>(
+    'SELECT incarnation_key FROM love_api_bindings WHERE did=? AND operation_id=?',
+    did,
+    accepted.operation.id,
+  );
+  const effect = h.db.one<{ id: string; generation: number }>(
+    "SELECT id,generation FROM forward_outbox WHERE did=? AND link_id=? AND kind='love' AND dedupe_key=?",
+    did,
+    linkId,
+    accepted.operation.id,
+  );
+  if (binding === null || effect === null) throw new Error('API reuse did not persist its binding and love effect');
+  settleRows(h.db, [effect.id], 'sent', h.m.clock.nowMs(), null, true, effect.generation);
+  return { did, uri, rkey, linkId, incarnationKey: binding.incarnation_key, person };
 }
 
 it.each([false, true])('keeps broad-covered producer order single-effect early=%s', async (early) => {
@@ -1074,5 +1141,356 @@ it('refuses one production handoff child while its materializer-batch sibling qu
       cid: '',
       conflicted: 0,
     });
+  });
+});
+
+it('keeps the no-cancellation control: two accepted direct decisions still hand off once each', async () => {
+  await withHarness(async (h) => {
+    h.seedUser(h.alice);
+    const first = await produceImportedApiSentLove(h, 'Alice', '3kc1controluri1', {
+      artist: 'C1 control artist',
+      track: 'Control one',
+    });
+    const second = await produceImportedApiSentLove(h, 'Alice', '3kc1controluri2', {
+      artist: 'C1 control artist',
+      track: 'Control two',
+    });
+    for (const row of [first, second]) await h.kit.externalDelete('Alice', LOVE, row.rkey);
+    const proofs = [] as Array<{ row: typeof first; proof: Awaited<ReturnType<typeof verifyRecordProof>> }>;
+    for (const row of [first, second]) {
+      const proof = await verifyRecordProof(await h.kit.repos.Alice.getRecordCar(LOVE, row.rkey), {
+        did: row.did,
+        collection: LOVE,
+        rkey: row.rkey,
+        signingKey: h.kit.users.Alice.key.didKey,
+      });
+      if (proof.state !== 'absent') throw new Error('expected signed control absence');
+      recordLiveEvidence(
+        h.db,
+        { uri: row.uri, did: row.did, collection: LOVE, rkey: row.rkey, rev: proof.commit.rev, action: 'delete' },
+        h.m.clock.nowMs(),
+      );
+      proofs.push({ row, proof });
+    }
+    h.db.tx(() => {
+      for (const { proof } of proofs) {
+        const options = authorizedLiveOptions(h.db, proof, projectionRandom);
+        expect(
+          applyRecordProof(h.db, proof, {
+            ...options,
+            prefix: 'com.example.atmusic',
+            nowNs: fromMs(h.m.clock.nowMs()),
+            receiptNs: fromMs(h.m.clock.nowMs()),
+          }).outcome,
+        ).toBe('absent');
+      }
+    });
+    expect(h.db.all('SELECT uri FROM love_api_unlove_decisions ORDER BY uri')).toEqual([
+      { uri: first.uri },
+      { uri: second.uri },
+    ]);
+    expect(h.db.all("SELECT * FROM forward_outbox WHERE kind='unlove'")).toEqual([]);
+    expect(
+      materializeLoveApiRecipientDecisions(h.db, h.m.clock.nowMs(), h.m.random, 'c1-no-cancellation-control'),
+    ).toMatchObject({ visited: 2, queued: 2, deferred: 0, replay: 0, refused: 0 });
+    expect(
+      h.db.all<{ authorization_uri: string; state: string }>(
+        "SELECT authorization_uri,state FROM forward_outbox WHERE kind='unlove' ORDER BY authorization_uri",
+      ),
+    ).toEqual([
+      { authorization_uri: first.uri, state: 'queued' },
+      { authorization_uri: second.uri, state: 'queued' },
+    ]);
+    const handedOff = h.db.all("SELECT * FROM forward_outbox WHERE kind='unlove' AND authorization_uri=?", first.uri);
+    dropLiveState(h.db, first.uri);
+    expect(h.db.all("SELECT * FROM forward_outbox WHERE kind='unlove' AND authorization_uri=?", first.uri)).toEqual(
+      handedOff,
+    );
+    expect(
+      materializeLoveApiRecipientDecisions(h.db, h.m.clock.nowMs(), h.m.random, 'c1-do-not-retract-handoff'),
+    ).toMatchObject({ visited: 0, queued: 0, deferred: 0, replay: 0 });
+  });
+});
+
+it('cancels only accepted direct decisions at URI drop and DID suppression, atomically', async () => {
+  await withHarness(async (h) => {
+    h.seedUser(h.alice);
+    h.seedUser(h.bob);
+    const first = await produceImportedApiSentLove(h, 'Alice', '3kc1dropuri', {
+      artist: 'C1 same DID artist',
+      track: 'Dropped URI',
+    });
+    const sibling = await produceImportedApiSentLove(h, 'Alice', '3kc1siblinguri', {
+      artist: 'C1 same DID artist',
+      track: 'Unaffected URI',
+    });
+    const suppressed = await produceImportedApiSentLove(h, 'Bob', '3kc1suppressuri', {
+      artist: 'C1 suppressed DID artist',
+      track: 'Suppressed URI',
+    });
+    const produced = [first, sibling, suppressed];
+    for (const row of produced) await h.kit.externalDelete(row.person, LOVE, row.rkey);
+    const acceptedAbsences = [] as Array<typeof first & { absent: Awaited<ReturnType<typeof verifyRecordProof>> }>;
+    for (const row of produced) {
+      const user = row.person === 'Alice' ? h.kit.users.Alice : h.kit.users.Bob;
+      const absent = await verifyRecordProof(await h.kit.repos[row.person].getRecordCar(LOVE, row.rkey), {
+        did: row.did,
+        collection: LOVE,
+        rkey: row.rkey,
+        signingKey: user.key.didKey,
+      });
+      if (absent.state !== 'absent') throw new Error('expected signed API reuse absence');
+      recordLiveEvidence(
+        h.db,
+        { uri: row.uri, did: row.did, collection: LOVE, rkey: row.rkey, rev: absent.commit.rev, action: 'delete' },
+        h.m.clock.nowMs(),
+      );
+      acceptedAbsences.push({ ...row, absent });
+    }
+
+    // The three decisions come only from real API reuse, SENT settlement, and
+    // signed PDS absences. Both Alice absences share one projector transaction.
+    h.db.tx(() => {
+      for (const row of acceptedAbsences) {
+        const options = authorizedLiveOptions(h.db, row.absent, projectionRandom);
+        expect(
+          applyRecordProof(h.db, row.absent, {
+            ...options,
+            prefix: 'com.example.atmusic',
+            nowNs: fromMs(h.m.clock.nowMs()),
+            receiptNs: fromMs(h.m.clock.nowMs()),
+          }).outcome,
+        ).toBe('absent');
+      }
+    });
+    const expectedUris = [first.uri, sibling.uri, suppressed.uri].sort();
+    expect(
+      h.db.all<{ uri: string; did: string; generation: number }>(
+        'SELECT uri,did,generation FROM love_api_unlove_decisions ORDER BY uri',
+      ),
+    ).toEqual(
+      expectedUris.map((uri) => ({
+        uri,
+        did: uri === suppressed.uri ? h.bob : h.alice,
+        generation: 1,
+      })),
+    );
+    expect(h.db.all("SELECT * FROM forward_outbox WHERE kind='unlove' ORDER BY did,authorization_uri")).toEqual([]);
+    for (const row of [first, sibling, suppressed])
+      expect(h.db.one('SELECT 1 FROM forward_deferred_love_authorities WHERE authorization_uri=?', row.uri)).toBeNull();
+
+    const snapshot = () => ({
+      decisions: h.db.all('SELECT * FROM love_api_unlove_decisions ORDER BY uri'),
+      recipients: h.db.all('SELECT * FROM love_api_recipients ORDER BY did,uri,link_id,generation'),
+      members: h.db.all('SELECT * FROM love_api_recipient_members ORDER BY did,uri,link_id,generation,member_seq'),
+      facts: h.db.all('SELECT * FROM love_api_comparison_facts ORDER BY authorization_uri,authorization_rev'),
+      proofState: h.db.all('SELECT * FROM love_api_proof_state ORDER BY singleton'),
+      counters: h.db.all('SELECT * FROM counters ORDER BY name,label'),
+      authorities: h.db.all(
+        'SELECT * FROM forward_deferred_love_authorities ORDER BY authorization_uri,authorization_rev',
+      ),
+      outbox: h.db.all('SELECT * FROM forward_outbox ORDER BY id'),
+      evidence: h.db.all('SELECT * FROM live_record_evidence ORDER BY uri'),
+      suppression: h.db.all('SELECT * FROM suppression ORDER BY did'),
+    });
+    const assertNoBrokenProofRelations = () => {
+      // The worker-node module facade denies PRAGMA; these are scoped relational
+      // anti-joins, not a claim that this test ran raw foreign_key_check.
+      expect(
+        h.db.all(
+          `SELECT m.did,m.uri,m.link_id,m.generation FROM love_api_recipient_members m
+           LEFT JOIN love_api_recipients r ON r.did=m.did AND r.uri=m.uri AND r.incarnation_key=m.incarnation_key
+             AND r.link_id=m.link_id AND r.generation=m.generation WHERE r.did IS NULL`,
+        ),
+      ).toEqual([]);
+      expect(
+        h.db.all(
+          `SELECT d.did,d.uri,d.link_id,d.generation FROM love_api_unlove_decisions d
+           LEFT JOIN love_api_recipients r ON r.did=d.did AND r.uri=d.uri AND r.incarnation_key=d.incarnation_key
+             AND r.link_id=d.link_id AND r.generation=d.generation
+           LEFT JOIN love_api_comparison_facts f ON f.authorization_uri=d.authorization_uri
+             AND f.authorization_rev=d.authorization_rev
+           WHERE r.did IS NULL OR f.authorization_uri IS NULL`,
+        ),
+      ).toEqual([]);
+      expect(
+        h.db.all(
+          `SELECT o.uri,o.member_uri,o.link_id,o.generation FROM love_api_window_owners o
+           LEFT JOIN live_pending_removals p ON p.uri=o.uri AND p.member_uri=o.member_uri
+             AND p.removed_cid=o.removed_cid AND p.window_lo=o.window_lo AND p.window_hi=o.window_hi
+             AND p.replaced_by_cid=o.replaced_by_cid
+           LEFT JOIN love_api_recipients r ON r.did=o.did AND r.uri=o.uri AND r.incarnation_key=o.incarnation_key
+             AND r.link_id=o.link_id AND r.generation=o.generation
+           WHERE p.uri IS NULL OR r.did IS NULL`,
+        ),
+      ).toEqual([]);
+    };
+
+    let sawDecisionCancellation = false;
+    let sawFollowingLiveDelete = false;
+    const dropFaultDb: Db = {
+      all: (sql, ...params) => h.db.all(sql, ...params),
+      one: (sql, ...params) => h.db.one(sql, ...params),
+      run(sql, ...params) {
+        const result = h.db.run(sql, ...params);
+        if (sql.includes('DELETE FROM love_api_unlove_decisions WHERE uri=?') && params[0] === first.uri)
+          sawDecisionCancellation = true;
+        if (sql === 'DELETE FROM live_record_evidence WHERE uri=?' && params[0] === first.uri) {
+          sawFollowingLiveDelete = sawDecisionCancellation;
+          throw new Error('injected URI drop failure after L2 cancellation');
+        }
+        return result;
+      },
+      tx: (fn) => h.db.tx(fn),
+    };
+    const beforeDropFailure = snapshot();
+    expect(() => dropLiveState(dropFaultDb, first.uri)).toThrow('injected URI drop failure after L2 cancellation');
+    expect(sawFollowingLiveDelete).toBe(true);
+    expect(snapshot()).toEqual(beforeDropFailure);
+
+    const uriSql: Array<{ sql: string; params: SqlParam[] }> = [];
+    const tracedDropDb: Db = {
+      all(sql, ...params) {
+        if (sql.includes('love_api_unlove_decisions') || sql.includes('love_api_recipients'))
+          uriSql.push({ sql, params });
+        return h.db.all(sql, ...params);
+      },
+      one: (sql, ...params) => h.db.one(sql, ...params),
+      run(sql, ...params) {
+        if (sql.includes('love_api_unlove_decisions') || sql.includes('love_api_recipients'))
+          uriSql.push({ sql, params });
+        return h.db.run(sql, ...params);
+      },
+      tx: (fn) => h.db.tx(fn),
+    };
+    dropLiveState(tracedDropDb, first.uri);
+    expect(uriSql).toHaveLength(3);
+    for (const { sql, params } of uriSql) {
+      const plan = h.db.all<{ detail: string }>(`EXPLAIN QUERY PLAN ${sql}`, ...params).map((row) => row.detail);
+      expect(plan.some((detail) => /SEARCH .*love_api_(unlove_decisions|recipients)/.test(detail))).toBe(true);
+      expect(
+        plan.some((detail) => /SCAN .*love_api_(unlove_decisions|recipients)/.test(detail)),
+        JSON.stringify(plan),
+      ).toBe(false);
+    }
+    expect(
+      h.db.all<{ uri: string; state: string }>(
+        'SELECT uri,state FROM love_api_recipients WHERE uri IN (?,?) ORDER BY uri',
+        first.uri,
+        sibling.uri,
+      ),
+    ).toEqual([
+      { uri: first.uri, state: 'released' },
+      { uri: sibling.uri, state: 'sealed' },
+    ]);
+    expect(h.db.one('SELECT 1 FROM love_api_unlove_decisions WHERE uri=?', first.uri)).toBeNull();
+    expect(h.db.one('SELECT 1 FROM love_api_unlove_decisions WHERE uri=?', sibling.uri)).not.toBeNull();
+    expect(h.db.one('SELECT 1 FROM love_api_comparison_facts WHERE authorization_uri=?', first.uri)).not.toBeNull();
+    assertNoBrokenProofRelations();
+    const afterUriCancellation = snapshot();
+    dropLiveState(h.db, first.uri);
+    expect(snapshot()).toEqual(afterUriCancellation);
+
+    let sawSuppressionCancellation = false;
+    let sawSuppressionDelete = false;
+    const suppressionFaultDb: Db = {
+      all: (sql, ...params) => h.db.all(sql, ...params),
+      one: (sql, ...params) => h.db.one(sql, ...params),
+      run(sql, ...params) {
+        const result = h.db.run(sql, ...params);
+        if (sql.includes('DELETE FROM love_api_unlove_decisions WHERE did=?')) sawSuppressionCancellation = true;
+        if (sql === 'DELETE FROM scrobbles WHERE did = ?' && params[0] === h.bob) {
+          sawSuppressionDelete = sawSuppressionCancellation;
+          throw new Error('injected suppression failure after L2 cancellation');
+        }
+        return result;
+      },
+      tx: (fn) => h.db.tx(fn),
+    };
+    const beforeSuppressionFailure = snapshot();
+    expect(() =>
+      disconnectLocalData(suppressionFaultDb, h.bob, {
+        settingsUri: `at://${h.bob}/com.example.atmusic.settings/self`,
+        settingsRev: '4',
+        nowNs: fromMs(h.m.clock.nowMs()),
+      }),
+    ).toThrow('injected suppression failure after L2 cancellation');
+    expect(sawSuppressionDelete).toBe(true);
+    expect(snapshot()).toEqual(beforeSuppressionFailure);
+
+    const didSql: Array<{ sql: string; params: SqlParam[] }> = [];
+    const tracedSuppressionDb: Db = {
+      all(sql, ...params) {
+        if (sql.includes('love_api_unlove_decisions') || sql.includes('love_api_recipients'))
+          didSql.push({ sql, params });
+        return h.db.all(sql, ...params);
+      },
+      one: (sql, ...params) => h.db.one(sql, ...params),
+      run(sql, ...params) {
+        if (sql.includes('love_api_unlove_decisions') || sql.includes('love_api_recipients'))
+          didSql.push({ sql, params });
+        return h.db.run(sql, ...params);
+      },
+      tx: (fn) => h.db.tx(fn),
+    };
+    disconnectLocalData(tracedSuppressionDb, h.bob, {
+      settingsUri: `at://${h.bob}/com.example.atmusic.settings/self`,
+      settingsRev: '4',
+      nowNs: fromMs(h.m.clock.nowMs()),
+    });
+    expect(didSql).toHaveLength(3);
+    for (const { sql, params } of didSql) {
+      const plan = h.db.all<{ detail: string }>(`EXPLAIN QUERY PLAN ${sql}`, ...params).map((row) => row.detail);
+      expect(plan.some((detail) => /SEARCH .*love_api_(unlove_decisions|recipients)/.test(detail))).toBe(true);
+      expect(plan.some((detail) => /SCAN .*love_api_(unlove_decisions|recipients)/.test(detail))).toBe(false);
+    }
+    expect(h.db.one('SELECT 1 FROM suppression WHERE did=?', h.bob)).not.toBeNull();
+    expect(h.db.one('SELECT 1 FROM love_api_unlove_decisions WHERE did=?', h.bob)).toBeNull();
+    expect(h.db.one('SELECT state FROM love_api_recipients WHERE did=? AND uri=?', h.bob, suppressed.uri)).toEqual({
+      state: 'released',
+    });
+    expect(
+      h.db.one('SELECT 1 FROM love_api_comparison_facts WHERE authorization_uri=?', suppressed.uri),
+    ).not.toBeNull();
+    const afterDidCancellation = snapshot();
+    disconnectLocalData(h.db, h.bob, {
+      settingsUri: `at://${h.bob}/com.example.atmusic.settings/self`,
+      settingsRev: '4',
+      nowNs: fromMs(h.m.clock.nowMs()),
+    });
+    expect(snapshot()).toEqual(afterDidCancellation);
+
+    expect(
+      materializeLoveApiRecipientDecisions(h.db, h.m.clock.nowMs(), h.m.random, 'c1-cancelled-direct-decisions'),
+    ).toMatchObject({ visited: 1, queued: 1, deferred: 0, replay: 0, refused: 0 });
+    expect(
+      h.db.all<{ did: string; authorization_uri: string; state: string }>(
+        "SELECT did,authorization_uri,state FROM forward_outbox WHERE kind='unlove' ORDER BY did,authorization_uri",
+      ),
+    ).toEqual([{ did: h.alice, authorization_uri: sibling.uri, state: 'queued' }]);
+    expect(
+      materializeLoveApiRecipientDecisions(h.db, h.m.clock.nowMs(), h.m.random, 'c1-cancelled-rerun'),
+    ).toMatchObject({ visited: 0, queued: 0, deferred: 0, replay: 0 });
+
+    for (let pass = 0; pass < 8; pass++) runLoveApiMaintenance(h.db, h.m.clock.nowMs(), h.m.random, `c1-drain-${pass}`);
+    expect(h.db.one('SELECT 1 FROM love_api_recipients WHERE did=? AND uri=?', h.alice, first.uri)).toBeNull();
+    expect(h.db.one('SELECT 1 FROM love_api_recipients WHERE did=? AND uri=?', h.bob, suppressed.uri)).toBeNull();
+    expect(h.db.one('SELECT 1 FROM love_api_recipient_members WHERE uri=?', first.uri)).toBeNull();
+    expect(h.db.one('SELECT 1 FROM love_api_recipient_members WHERE uri=?', suppressed.uri)).toBeNull();
+    expect(h.db.one('SELECT 1 FROM love_api_comparison_facts WHERE authorization_uri=?', first.uri)).not.toBeNull();
+    expect(h.db.one('SELECT 1 FROM love_api_comparison_facts WHERE authorization_uri=?', sibling.uri)).not.toBeNull();
+    expect(
+      h.db.one('SELECT 1 FROM love_api_comparison_facts WHERE authorization_uri=?', suppressed.uri),
+    ).not.toBeNull();
+    expect(
+      h.db.all(
+        'SELECT * FROM forward_outbox WHERE kind=? AND authorization_uri IN (?,?,?) ORDER BY authorization_uri',
+        'unlove',
+        first.uri,
+        sibling.uri,
+        suppressed.uri,
+      ),
+    ).toEqual([expect.objectContaining({ did: h.alice, authorization_uri: sibling.uri })]);
+    assertNoBrokenProofRelations();
   });
 });

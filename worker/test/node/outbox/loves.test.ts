@@ -430,7 +430,7 @@ it('rolls back reused API binding and member allocation when the real love execu
   });
 });
 
-it('drops live state and suppresses a DID through production callers without inventing an L2 unlove', async () => {
+it('does not invent L2 proof when dropping a present API recipient without accepted absence', async () => {
   await withHarness(async (h) => {
     h.seedUser(h.alice);
     const linkId = h.link(h.alice, 'lastfm');

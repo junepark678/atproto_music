@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { Db } from '../do/db';
+import { cancelLoveApiRecipientDecisionsForDid } from './love-api-recipients';
 
 export interface ForwardProvenance {
   path: 'api' | 'import' | 'live' | 'snapshot';
@@ -190,6 +191,13 @@ export function releaseForwardAdmission(db: Db, did: string, identityKey: string
 
 /** Drop projection-only admission state during a DID opt-out, keeping local acceptance receipts. */
 export function cleanupForwardAdmissionsForSuppression(db: Db, did: string): void {
+  db.tx(() => {
+    cancelLoveApiRecipientDecisionsForDid(db, did);
+    cleanupForwardAdmissionsForSuppressionInTransaction(db, did);
+  });
+}
+
+function cleanupForwardAdmissionsForSuppressionInTransaction(db: Db, did: string): void {
   const uriLo = `at://${did}/`;
   const uriHi = `at://${did}0`;
   db.run('DELETE FROM live_record_evidence WHERE uri>=? AND uri<?', uriLo, uriHi);
