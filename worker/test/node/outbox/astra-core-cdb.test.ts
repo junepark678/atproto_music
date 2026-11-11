@@ -397,16 +397,18 @@ it.each([
       );
       expect(loveRows).toHaveLength(4);
       expect(new Set(loveRows.map(({ link_id }) => link_id))).toEqual(new Set([lastfm, listenbrainz]));
-      for (const row of reverseSettlement ? [...loveRows].reverse() : loveRows)
-        settleRows(
-          h.db,
-          [row.id],
-          allSent ? 'sent' : 'ignored',
-          h.m.clock.nowMs(),
-          allSent ? null : 'fixture_terminal_ignore',
-          true,
-          row.generation,
-        );
+      const settlementOrder = reverseSettlement ? [...operations].reverse() : operations;
+      for (const operation of settlementOrder)
+        for (const row of loveRows.filter(({ dedupe_key }) => dedupe_key === operation.id))
+          settleRows(
+            h.db,
+            [row.id],
+            allSent ? 'sent' : 'ignored',
+            h.m.clock.nowMs(),
+            allSent ? null : 'fixture_terminal_ignore',
+            true,
+            row.generation,
+          );
       expect(h.db.all('SELECT 1 FROM love_api_recipient_members')).toEqual([]);
       expect(
         h.db.all<{ link_id: string; sent_operation_id: string }>(

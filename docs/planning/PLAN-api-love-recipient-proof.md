@@ -992,6 +992,10 @@ rkeys, both service links, actual PDS execution/SENT, signed absence,
 operation/outbox GC before or after absence, plus an all-ignored terminal
 negative whose binding alone yields no decision or effect. The actual fake
 Last.fm/ListenBrainz transport sends one unlove each and zero on rerun.
+The Node settlement control groups exact terminal rows by operation and runs
+both older-first and newer-first through `settleRows`, asserting the selected
+SENT identity on both recipient links; the fake-transport path covers the
+actual active delivery sequence.
 
 The handoff query now asks whether any exact-key pending member exists with
 indexed `EXISTS`. The worker-bench captures the complete SQL and parameters
