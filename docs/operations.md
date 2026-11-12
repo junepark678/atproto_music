@@ -58,11 +58,11 @@ The `counters` table (shown by `status`) holds the monotonic operational counts 
 | Exit | Meaning | systemd |
 |---|---|---|
 | 0 | stopped by SIGTERM after the drain (≤ 25 s; `TimeoutStopSec=30s`) | — |
-| 78 | configuration: a missing or invalid variable, a forbidden runtime variable (`NODE_OPTIONS`, a proxy, `SSL_CERT_*`), unreadable secrets, a missing database without `--init`, or a pre-migration backup refused for lack of space (`ATMUSIC_MIN_FREE_BYTES`). The message names the variable. | never restarted (`RestartPreventExitStatus=78 75`) |
-| 75 | another process holds the database (`locking_mode=EXCLUSIVE`, the single-writer lock), whatever admin socket it uses | never restarted |
+| 78 | configuration: a missing or invalid variable, a forbidden runtime variable (`NODE_OPTIONS`, a proxy, `SSL_CERT_*`), unreadable secrets, a missing database without `--init`, or a pre-migration backup refused for lack of space (`ATMUSIC_MIN_FREE_BYTES`). The message names the variable. | never restarted (`RestartPreventExitStatus=78`) |
+| 75 | another process holds the database (`locking_mode=EXCLUSIVE`, the single-writer lock), whatever admin socket it uses | restarted with the same backoff: a predecessor stuck after a watchdog kill eventually releases the lock |
 | 1 | anything else | `Restart=on-failure`, 2 s growing to 2 min, at most 10 starts in 10 min |
 
-After fixing a 78 or 75: `systemctl --user reset-failed atmusic && systemctl --user start atmusic`.
+After fixing a 78, or when 75 exhausts the start limit: `systemctl --user reset-failed atmusic && systemctl --user start atmusic`.
 
 ## Secrets
 
