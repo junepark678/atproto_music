@@ -403,3 +403,8 @@ reproduction belongs to this separate slice and must start red and end green.
 - Survivor checks must use indexed point lookups. Reuse an existing index if sufficient; otherwise coordinate the next free additive migration after B2’s 56 with finding 32’s still-unallocated number. No new migration is allocated here.
 - Prove the inherited reproduction red on B1 and B2, then green; two-link behavior, enqueue and dispatch races, an API-unlove positive control, and a load-bearing negative control are required.
 - Stack on the ready branch with the fewest real dependencies: B1 for enqueue-only work, B2 if the dispatch path is needed. Readiness requires exact-head local gate, fresh Astra acceptance and green hosted checks.
+
+
+## Relay trust
+
+Jetstream is a latency hint, not authority for upstream effects. A live claim may accelerate a forward only when per-link history backfill would also admit that record from verified PDS state. Promotion therefore applies the history payload eligibility rules, source-service/import provenance exclusions, Last.fm 13-day cutoff, generation and gap rules, and the identical listen key used by backfill. It may bypass only backfill’s skip for records already admitted through the live path since generation start, preserving the genuine snapshot/live race recovery. Historical ineligible records produce no row; eligible records dedupe with their history row. Snapshot transition admission does not rely on a scalar race floor. Removal hints remain bounded by verified prior-presence and proof-absence revisions; signed Jetstream transition verification remains a follow-up architectural limitation.

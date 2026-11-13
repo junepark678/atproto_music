@@ -100,8 +100,6 @@ export interface SnapshotChunk {
   did: string;
   generation: number;
   headRev: string;
-  /** Verified head before this walk; missing/unknown floors fail closed for live authority. */
-  raceFloorRev?: string | null;
   /** Exclusive lower key bound; null for the start of the range. */
   intervalLo: string | null;
   /** Inclusive upper key bound. */
@@ -190,9 +188,7 @@ function reaffirm(
       receiptNs: c.receiptNs,
       prefix: c.prefix,
       nowNs: c.nowNs,
-      ...(c.random
-        ? { live: { random: c.random, evidence, legacyRev: null, raceFloorRev: c.raceFloorRev }, liveCandidates: true }
-        : {}),
+      ...(c.random ? { live: { random: c.random, evidence, legacyRev: null }, liveCandidates: true } : {}),
     });
     if (c.random)
       lateAccept(db, {
@@ -201,7 +197,6 @@ function reaffirm(
         collection,
         rkey,
         evidence,
-        raceFloorRev: c.raceFloorRev ?? null,
         nowMs: Number(c.nowNs / 1_000_000n),
         random: c.random,
       });
@@ -315,7 +310,6 @@ export function applySnapshotChunk(db: Db, c: SnapshotChunk): ChunkResult {
           collection,
           rkey,
           evidence,
-          raceFloorRev: c.raceFloorRev ?? null,
           nowMs: Number(c.nowNs / 1_000_000n),
           random: c.random,
         });
@@ -337,7 +331,6 @@ export function applySnapshotChunk(db: Db, c: SnapshotChunk): ChunkResult {
           collection,
           rkey,
           evidence,
-          raceFloorRev: c.raceFloorRev ?? null,
           nowMs: Number(c.nowNs / 1_000_000n),
           random: c.random,
         });
@@ -362,7 +355,7 @@ export function applySnapshotChunk(db: Db, c: SnapshotChunk): ChunkResult {
           ...o,
           ...(c.random
             ? {
-                live: { random: c.random, evidence, legacyRev: null, raceFloorRev: c.raceFloorRev },
+                live: { random: c.random, evidence, legacyRev: null },
                 liveCandidates: canCandidate,
               }
             : {}),
@@ -375,7 +368,6 @@ export function applySnapshotChunk(db: Db, c: SnapshotChunk): ChunkResult {
           collection,
           rkey,
           evidence,
-          raceFloorRev: c.raceFloorRev ?? null,
           nowMs: Number(c.nowNs / 1_000_000n),
           random: c.random,
         });
@@ -442,7 +434,7 @@ export function applySnapshotChunk(db: Db, c: SnapshotChunk): ChunkResult {
           ...o,
           ...(c.random
             ? {
-                live: { random: c.random, evidence, legacyRev: null, raceFloorRev: c.raceFloorRev },
+                live: { random: c.random, evidence, legacyRev: null },
                 liveCandidates: canCandidate,
               }
             : {}),
@@ -455,7 +447,6 @@ export function applySnapshotChunk(db: Db, c: SnapshotChunk): ChunkResult {
           collection,
           rkey,
           evidence,
-          raceFloorRev: c.raceFloorRev ?? null,
           nowMs: Number(c.nowNs / 1_000_000n),
           random: c.random,
         });

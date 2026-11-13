@@ -88,7 +88,7 @@ export function recordBackfillFailure(
     return { failures, retryAt, exhausted };
   });
 }
-type HistoryRow = {
+export type HistoryRow = {
   kind: 'scrobble' | 'love';
   uri: string;
   cid: string;
@@ -175,7 +175,12 @@ function sourceService(source: string | null): 'lastfm' | 'listenbrainz' | null 
   return null;
 }
 
-function hasCurrentApiRecipientAdmission(db: Db, link: LinkedAccountRow, uri: string, incarnationKey: string): boolean {
+function hasCurrentApiRecipientAdmission(
+  db: Db,
+  link: Pick<LinkedAccountRow, 'did' | 'id' | 'generation'>,
+  uri: string,
+  incarnationKey: string,
+): boolean {
   return (
     db.one(
       `SELECT 1 FROM love_api_bindings b
@@ -197,11 +202,17 @@ function hasCurrentApiRecipientAdmission(db: Db, link: LinkedAccountRow, uri: st
   );
 }
 
-function payloadForHistoryRow(
+export type HistoryEligibilityLink = Pick<
+  LinkedAccountRow,
+  'id' | 'did' | 'generation' | 'service' | 'generation_start_seq'
+>;
+
+export function payloadForHistoryRow(
   db: Db,
-  link: LinkedAccountRow,
+  link: HistoryEligibilityLink,
   row: HistoryRow,
   identityKey: string,
+  options: { allowLiveAdmission?: boolean } = {},
 ): { key: string; payload: unknown } | null {
   if (row.kind === 'love') {
     const incarnation = db.one<{ incarnation_key: string; path: string; source_service: string | null }>(
@@ -243,6 +254,7 @@ function payloadForHistoryRow(
     marker !== null &&
     marker.admission_seq > link.generation_start_seq &&
     marker.path !== 'snapshot' &&
+    !(options.allowLiveAdmission && marker.path === 'live') &&
     !ownsAdmissionInGap(db, link, marker.admission_seq)
   )
     return null;

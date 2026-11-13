@@ -4,6 +4,7 @@ import type { Db } from '../../../src/do/db';
 import { recordLiveEvidence } from '../../../src/do/ingest/live-evidence';
 import { applyRecordProof } from '../../../src/do/write/apply-record';
 import { applySnapshotChunk } from '../../../src/do/write/apply-snapshot';
+import { runLinkBackfill } from '../../../src/forward/backfill';
 import { lateAccept } from '../../../src/forward/live-acceptance';
 import {
   ALICE,
@@ -69,7 +70,7 @@ async function refresh(
     : { ...initial, album: 'Metadata only' };
   const first = present(await putProof(repo, collection, 'candidate-refresh', initial));
   const second = present(await putProof(repo, collection, 'candidate-refresh', changed));
-  await withMigratedDb((db) => {
+  await withMigratedDb(async (db) => {
     const generation = seedUser(db, ALICE);
     db.run(
       `INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,created_at_ms,updated_at_ms)
@@ -100,7 +101,6 @@ async function refresh(
           did: ALICE,
           generation,
           headRev: second.commit.rev,
-          raceFloorRev: first.commit.rev,
           intervalLo: `${PREFIX}.`,
           intervalHi: `${PREFIX}/`,
           entries: [{ key: `${collection}/candidate-refresh`, cid: second.cid!, record: second.record }],
@@ -129,27 +129,14 @@ async function refresh(
           collection,
           rkey: 'candidate-refresh',
           evidence: event(second, 'update'),
-          raceFloorRev: second.commit.rev,
-          nowMs: NOW_MS + 1000,
-          random,
-        }),
-      ),
-    ).toBe(0);
-    expect(db.all('SELECT * FROM forward_outbox')).toHaveLength(0);
-    expect(
-      db.tx(() =>
-        lateAccept(db, {
-          uri: `at://${ALICE}/${collection}/candidate-refresh`,
-          did: ALICE,
-          collection,
-          rkey: 'candidate-refresh',
-          evidence: event(second, 'update'),
-          raceFloorRev: first.commit.rev,
           nowMs: NOW_MS + 1000,
           random,
         }),
       ),
     ).toBe(1);
+    const queuedBeforeHistory = db.all('SELECT link_id,kind,dedupe_key FROM forward_outbox');
+    for (let turn = 0; turn < 5; turn++) await runLinkBackfill(db, random, NOW_MS + 1000);
+    expect(db.all('SELECT link_id,kind,dedupe_key FROM forward_outbox')).toEqual(queuedBeforeHistory);
     expect(db.all('SELECT * FROM forward_outbox')).toHaveLength(1);
     expect(
       db.tx(() =>
@@ -159,7 +146,6 @@ async function refresh(
           collection,
           rkey: 'candidate-refresh',
           evidence: event(second, 'update'),
-          raceFloorRev: first.commit.rev,
           nowMs: NOW_MS + 1000,
           random,
         }),
@@ -186,7 +172,6 @@ it('keeps first-snapshot history out of candidate ownership and late-accepts a s
       did: ALICE,
       generation,
       headRev: proof.commit.rev,
-      raceFloorRev: '0000000000000',
       intervalLo: `${PREFIX}.`,
       intervalHi: `${PREFIX}/`,
       entries: [{ key: `${SCROBBLE}/snapshot-frontier`, cid: proof.cid!, record: proof.record }],
@@ -233,6 +218,62 @@ it('keeps first-snapshot history out of candidate ownership and late-accepts a s
     expect(db.all('SELECT * FROM forward_outbox')).toHaveLength(1);
     db.tx(() => chunk(db, generation, NOW_NS + 3_000_000_000n));
     expect(db.all('SELECT * FROM forward_outbox')).toHaveLength(1);
+  });
+});
+
+it('A1-7 R2: a forged relay claim for snapshot history outside Last.fm backfill eligibility queues no row', async () => {
+  const repo = await repoFor('alice');
+  const listenedAt = new Date(NOW_MS - 14 * 86_400_000).toISOString();
+  const proof = present(
+    await putProof(repo, SCROBBLE, 'relay-historical-r2', {
+      ...fixtureScrobble('r02'),
+      listenedAt,
+    }),
+  );
+  await withMigratedDb((db) => {
+    const generation = seedUser(db, ALICE);
+    db.run('UPDATE users SET last_snapshot_at_ms=? WHERE did=?', NOW_MS - 1000, ALICE);
+    seedSnapshotJob(db, ALICE, generation);
+    db.run(
+      `INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,created_at_ms,updated_at_ms)
+       VALUES('relay-r2-lastfm',?,'lastfm','remote',X'00','fixture',?,?)`,
+      ALICE,
+      NOW_MS,
+      NOW_MS,
+    );
+    db.tx(() =>
+      applySnapshotChunk(db, {
+        did: ALICE,
+        generation,
+        headRev: proof.commit.rev,
+        intervalLo: `${PREFIX}.`,
+        intervalHi: `${PREFIX}/`,
+        entries: [{ key: `${SCROBBLE}/relay-historical-r2`, cid: proof.cid!, record: proof.record }],
+        receiptNs: NOW_NS,
+        nowNs: NOW_NS + 1_000_000_000n,
+        prefix: PREFIX,
+        random,
+      }),
+    );
+    expect(
+      db.one('SELECT path FROM forward_admissions WHERE did=? ORDER BY admission_seq DESC LIMIT 1', ALICE),
+    ).toEqual({
+      path: 'snapshot',
+    });
+    expect(
+      db.tx(() =>
+        lateAccept(db, {
+          uri: `at://${ALICE}/${SCROBBLE}/relay-historical-r2`,
+          did: ALICE,
+          collection: SCROBBLE,
+          rkey: 'relay-historical-r2',
+          evidence: event(proof, 'update'),
+          nowMs: NOW_MS,
+          random,
+        }),
+      ),
+    ).toBe(1);
+    expect(db.all("SELECT link_id,kind,dedupe_key FROM forward_outbox WHERE link_id='relay-r2-lastfm'")).toEqual([]);
   });
 });
 
@@ -310,7 +351,6 @@ it('does not transfer a scrobble candidate when an accepted rewrite changes its 
           collection: SCROBBLE,
           rkey: 'identity-owner',
           evidence: event(changed, 'update'),
-          raceFloorRev: null,
           nowMs: NOW_MS + 1,
           random,
         }),

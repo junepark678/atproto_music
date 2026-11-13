@@ -26,8 +26,6 @@ export interface LiveAuthority {
   evidence: LiveEvidence | null;
   /** Exact revision compatibility for a legacy Jetstream hint only. */
   legacyRev: string | null;
-  /** Snapshot's last verified pre-walk head; claims must be inside this race interval. */
-  raceFloorRev?: string | null;
 }
 
 interface EvidenceRow extends LiveEvidence {
@@ -50,8 +48,6 @@ export function additionAuthority(authority: LiveAuthority | undefined, proofRev
     evidence?.up_rev !== null &&
     evidence?.up_rev !== undefined &&
     (evidence.del_rev === null || evidence.up_rev > evidence.del_rev) &&
-    (authority.raceFloorRev === undefined ||
-      (authority.raceFloorRev !== null && evidence.up_rev > authority.raceFloorRev)) &&
     evidence.up_rev <= proofRev &&
     evidence.up_cid === cid &&
     evidence.conflict_rev !== evidence.up_rev;
@@ -67,8 +63,6 @@ export function absenceAuthority(
   const { evidence, legacyRev } = authority;
   if (evidence?.del_rev !== null && evidence?.del_rev !== undefined) {
     return (priorRev ?? '') < evidence.del_rev &&
-      (authority.raceFloorRev === undefined ||
-        (authority.raceFloorRev !== null && evidence.del_rev > authority.raceFloorRev)) &&
       evidence.del_rev <= proofRev &&
       evidence.conflict_rev !== evidence.del_rev
       ? evidence.del_rev

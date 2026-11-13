@@ -3,6 +3,7 @@ import type { Db } from '../do/db';
 import { countLiveAdmission, type LiveEvidence } from '../do/ingest/live-evidence';
 import { projectedListensOfRecord } from '../do/write/apply-record';
 import { enqueueForwards } from '../outbox/forward-enqueue';
+import { type HistoryRow, payloadForHistoryRow } from './backfill';
 import { cancelLoveApiRecipientDecisionsForUri } from './love-api-recipients';
 import { projectionListenKey } from './projection';
 
@@ -30,7 +31,6 @@ export function lateAccept(
     collection: string;
     rkey: string;
     evidence: LiveEvidence | null;
-    raceFloorRev?: string | null;
     nowMs: number;
     random: Random;
   },
@@ -39,7 +39,6 @@ export function lateAccept(
   if (
     evidence?.up_rev === null ||
     evidence?.up_rev === undefined ||
-    (input.raceFloorRev !== undefined && (input.raceFloorRev === null || evidence.up_rev <= input.raceFloorRev)) ||
     evidence.conflict_rev === evidence.up_rev ||
     (evidence.del_rev !== null && evidence.del_rev >= evidence.up_rev)
   )
@@ -83,27 +82,47 @@ export function lateAccept(
         input.rkey,
       );
       if (row && marker?.path === 'snapshot' && acceptedBefore === null && local?.origin !== 'import') {
-        enqueueForwards(db, {
-          did: input.did,
-          items: [
-            {
-              kind: 'scrobble',
-              listenKey: candidate.identity_key,
-              payload: {
-                listen: {
-                  artist: row.artist,
-                  track: row.track,
-                  listenedAt: row.listened_at,
-                  recordingMbid: row.recording_mbid ?? undefined,
-                },
-                origin: 'web',
-              },
-            },
-          ],
-          now: input.nowMs,
-          random: input.random,
-        });
-        accepted++;
+        const links = db.all<{
+          id: string;
+          did: string;
+          generation: number;
+          service: 'lastfm' | 'listenbrainz';
+          status: string;
+          forward_scrobbles: number;
+          generation_start_seq: number;
+        }>(`SELECT * FROM linked_accounts WHERE did=? AND status='active' AND forward_scrobbles=1`, input.did);
+        const acceptedBeforeLinks = accepted;
+        const historyRow: HistoryRow = {
+          kind: 'scrobble',
+          uri: input.uri,
+          cid: row.cid,
+          event_at: row.listened_at,
+          artist: row.artist,
+          track: row.track,
+          album: null,
+          recording_mbid: row.recording_mbid,
+          artist_key: row.artist_key,
+          track_key: row.track_key,
+          album_key: null,
+          listened_at: row.listened_at,
+        };
+        for (const link of links) {
+          if (link.service === 'lastfm' && Date.parse(row.listened_at) < input.nowMs - 13 * 86_400_000) continue;
+          const admitted = payloadForHistoryRow(db, link, historyRow, candidate.identity_key, {
+            allowLiveAdmission: true,
+          });
+          if (!admitted) continue;
+          enqueueForwards(db, {
+            did: input.did,
+            linkId: link.id,
+            priority: 1,
+            items: [{ kind: 'scrobble', listenKey: admitted.key, payload: admitted.payload }],
+            now: input.nowMs,
+            random: input.random,
+          });
+          accepted++;
+        }
+        if (accepted === acceptedBeforeLinks) accepted++;
       }
     } else {
       const row = db.one<{

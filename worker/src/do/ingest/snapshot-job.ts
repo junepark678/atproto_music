@@ -228,8 +228,6 @@ export interface Frontier {
   v: typeof FRONTIER_VERSION;
   source: BlockSourceKind;
   walk: WalkState;
-  /** Last verified global head before this snapshot walk began; null fails closed. */
-  raceFloorRev: string | null;
   /** Consecutive transient PDS errors (reset by progress). */
   errors: number;
 }
@@ -409,12 +407,9 @@ function parseFrontier(json: string | null): Frontier | null {
       (f.source === 'getBlocks' || f.source === 'getRepo') &&
       f.walk !== null &&
       typeof f.walk === 'object' &&
-      (f.raceFloorRev === null || typeof f.raceFloorRev === 'string' || f.raceFloorRev === undefined) &&
       Number.isSafeInteger(f.errors)
     ) {
-      // Older persisted frontiers have no authenticated race floor. They may
-      // finish indexing, but cannot grant live promotion authority.
-      return { ...f, raceFloorRev: f.raceFloorRev ?? null };
+      return f;
     }
   } catch {
     // fall through
@@ -757,7 +752,6 @@ class Slice {
       v: FRONTIER_VERSION,
       source: head.source,
       walk: initialState(head.commit, this.range),
-      raceFloorRev: this.frontier?.raceFloorRev ?? loadUser(this.db, this.did)?.max_rev ?? null,
       errors: 0,
     };
     const r = this.write(
@@ -825,7 +819,6 @@ class Slice {
           did: this.did,
           generation: this.generation,
           headRev: next.walk.headRev,
-          raceFloorRev: next.raceFloorRev,
           intervalLo: r.interval[0],
           intervalHi: r.interval[1] ?? this.range[1],
           entries,

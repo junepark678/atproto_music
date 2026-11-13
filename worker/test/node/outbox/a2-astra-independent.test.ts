@@ -364,7 +364,6 @@ it('replacement with delayed matching update deletes the old listen and late-for
         collection: SCROBBLE,
         rkey: 'replacement',
         evidence: readLiveEvidence(db, uri('replacement'), NOW_MS),
-        raceFloorRev: '0000000000000',
         nowMs: NOW_MS,
         random: rng,
       }),

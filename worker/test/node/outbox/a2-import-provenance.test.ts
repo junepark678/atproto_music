@@ -55,7 +55,6 @@ it('snapshot replacement preserves an established import admission and source ex
         did: ALICE,
         generation,
         headRev: replacement.commit.rev,
-        raceFloorRev: '0000000000000',
         intervalLo: null,
         intervalHi: `${SCROBBLE}/import-replacement`,
         entries: [{ key: `${SCROBBLE}/import-replacement`, cid: replacement.cid, record: replacement.record }],
