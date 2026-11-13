@@ -1,9 +1,12 @@
+import { floorSeconds } from '@atmusic/core/listen-key';
 import { trackKey } from '@atmusic/core/music-key';
 import { isTid } from '@atmusic/core/syntax';
+import { parseRfc3339 } from '@atmusic/core/timestamp';
 import type { OperationRow, Origin } from '../app/rows';
 import type { ModuleDeps } from '../do/contracts';
 import type { Db } from '../do/db';
 import { bumpStatsVersion } from '../do/write/account-state';
+import { musicKeyColumns } from '../do/write/keys';
 import { enqueueListenDelete } from '../forward/delete-enqueue';
 import { projectionListenKey, releaseForwardAdmission } from '../forward/projection';
 import { batchMemberForListenKey } from '../imports/batch-acceptance';
@@ -106,7 +109,13 @@ export interface BatchListenRemovalPlan {
 /** Prepare a never-sent import batch edit outside a transaction. */
 export async function prepareUnsentBatchListenRemoval(
   m: ModuleDeps,
-  args: { did: string; operationId: string; listenId: string; listenKey?: string },
+  args: {
+    did: string;
+    operationId: string;
+    listenId: string;
+    listenKey?: string;
+    tuple?: { artistKey: string; trackKey: string; listenedSecond: bigint };
+  },
 ): Promise<BatchListenRemovalPlan | null> {
   let op = m.db.one<OperationRow>('SELECT * FROM operations WHERE id = ?', args.operationId);
   if (
@@ -142,6 +151,20 @@ export async function prepareUnsentBatchListenRemoval(
     (entry) => entry !== null && typeof entry === 'object' && (entry as { id?: unknown }).id === args.listenId,
   );
   if (matches.length !== 1) return null;
+  const selected = matches[0] as { artist?: unknown; track?: unknown; listenedAt?: unknown };
+  const listenedNs = typeof selected.listenedAt === 'string' ? parseRfc3339(selected.listenedAt) : null;
+  if (listenedNs === null || typeof selected.artist !== 'string' || typeof selected.track !== 'string') return null;
+  let selectedKeys: ReturnType<typeof musicKeyColumns>;
+  try {
+    selectedKeys = musicKeyColumns(selected.artist, selected.track, null);
+  } catch {
+    return null;
+  }
+  const tuple = args.tuple ?? {
+    artistKey: selectedKeys.artist_key,
+    trackKey: selectedKeys.track_key,
+    listenedSecond: floorSeconds(listenedNs),
+  };
   const mapped = m.db.all<{ job_id: string; seq: number; dedupe_key: string }>(
     `SELECT i.job_id,i.seq,i.dedupe_key FROM batch_entry_items b JOIN import_items i
        ON i.job_id=b.job_id AND i.seq=b.seq
@@ -157,6 +180,7 @@ export async function prepareUnsentBatchListenRemoval(
     did: args.did,
     recordJson: op.record_json,
     listenKey,
+    tuple,
   });
   if (validatedMember !== args.listenId) return null;
   const current = m.db.one<OperationRow>('SELECT * FROM operations WHERE id = ?', args.operationId);
