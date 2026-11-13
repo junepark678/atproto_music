@@ -122,6 +122,7 @@ export default function SettingsLinks() {
     } catch (e) {
       if (!isCurrent()) return false;
       if (!preserveError) setError(e);
+      return false;
     }
     return true;
   }, []);
@@ -233,6 +234,7 @@ export default function SettingsLinks() {
     setError(null);
     const operationSession = session;
     const generation = ++actionGeneration.current;
+    currentActionError.current = null;
     requestGeneration.current++;
     mutationInFlight.current++;
     try {
@@ -255,6 +257,7 @@ export default function SettingsLinks() {
     setError(null);
     const operationSession = session;
     const generation = ++actionGeneration.current;
+    currentActionError.current = null;
     requestGeneration.current++;
     mutationInFlight.current++;
     let actionError: unknown = null;
@@ -341,7 +344,13 @@ export default function SettingsLinks() {
         <ErrorState
           title="Connected services could not be updated."
           error={displayError}
-          onRetry={() => void refresh()}
+          onRetry={() => {
+            const actionError = currentActionError.current;
+            void refresh().then((succeeded) => {
+              if (succeeded && actionError && currentActionError.current === actionError)
+                currentActionError.current = null;
+            });
+          }}
         />
       )}
       {displayLinks === null ? (

@@ -787,6 +787,60 @@ it.each(['success', 'failure'])(
   },
 );
 
+it('retires a dismissed PATCH error fence after a successful retry', async () => {
+  vi.useFakeTimers();
+  Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+  const reads: Array<{ resolve: (value: Response) => void; reject: (error: Error) => void }> = [];
+  vi.stubGlobal('fetch', (input: RequestInfo | URL, init: RequestInit = {}) => {
+    const path = new URL(String(input), 'https://music.test').pathname;
+    if (path === '/api/v1/auth/session') return Promise.resolve(Response.json(session));
+    if (init.method === 'PATCH') return Promise.resolve(Response.json({ error: 'failed' }, { status: 502 }));
+    return new Promise<Response>((resolve, reject) => reads.push({ resolve, reject }));
+  });
+  const flush = () =>
+    act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+  let view!: ReturnType<typeof mount>;
+  await act(() => {
+    view = mount();
+  });
+  try {
+    await flush();
+    reads[0]!.resolve(Response.json({ items: [link()] }));
+    await flush();
+    await act(() => {
+      const input = view.root.querySelector<HTMLInputElement>('input[type=checkbox]')!;
+      input.checked = false;
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await flush();
+    expect(reads).toHaveLength(2);
+    reads[1]!.resolve(Response.json({ items: [link()] }));
+    await flush();
+    expect(view.root.querySelector('[role=alert]')).not.toBeNull();
+
+    await act(() => view.root.querySelector<HTMLButtonElement>('button')!.click());
+    await flush();
+    expect(reads).toHaveLength(3);
+    reads[2]!.resolve(Response.json({ items: [link()] }));
+    await flush();
+    expect(view.root.querySelector('[role=alert]')).toBeNull();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+    });
+    expect(reads).toHaveLength(4);
+    reads[3]!.reject(new Error('poll failed after retry'));
+    await flush();
+    expect(view.root.querySelector('[role=alert]')).not.toBeNull();
+  } finally {
+    await act(() => view.unmount());
+    vi.clearAllTimers();
+    vi.useRealTimers();
+  }
+});
+
 it('marks permanent invalid payload forwarding errors on active links as Error', async () => {
   stubLinks([link({ status: 'active', lastError: 'invalid_payload' })]);
   const view = mount();
