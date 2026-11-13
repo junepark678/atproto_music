@@ -790,11 +790,12 @@ function pickJob(rt: ForwardRuntime, now: number, localWork: Map<string, { remai
     if (due.length === 0) continue;
     const priority = Math.min(...due.map((hint) => hint.priority));
     const oldest = Math.min(...due.filter((hint) => hint.priority === priority).map((hint) => hint.created_at_ms));
+    const nowPlayingHint = hints[0];
     candidates.push({
       link,
       priority,
       oldest,
-      nowPlaying: hints[0] !== null && hints[0].created_at_ms !== null,
+      nowPlaying: nowPlayingHint !== undefined && nowPlayingHint !== null && nowPlayingHint.created_at_ms !== null,
     });
   }
   // A live now-playing update is useful only while current (60 s). Let it
