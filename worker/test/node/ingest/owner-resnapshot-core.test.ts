@@ -63,22 +63,9 @@ describe('owner resnapshot through IndexCore', () => {
         NOW,
         NOW,
       );
-      // Hold the independent gap discovery pass beyond this scenario so it
-      // cannot admit fixture relay users before the owner timer selects Alice.
-      schedule(db, 'discovery', NOW + OWNER_RESNAPSHOT_INTERVAL_MS);
-
-      // Commit directly to the signed repository without relay hints. The
-      // fake Jetstream is never connected, so discovery can only come from
-      // the owner's full signed PDS snapshot.
-      const uri = `at://${alice}/${kit.collections.scrobble}/periodic-new`;
-      const commit = await kit.externalPut('Alice', kit.collections.scrobble, 'periodic-new', {
-        $type: kit.collections.scrobble,
-        artist: 'Periodic Artist',
-        track: 'Periodic Song',
-        listenedAt: '2026-01-15T11:59:00Z',
-        createdAt: '2026-01-15T11:59:00Z',
-      });
-      kit.resetCalls();
+      // Keep independent gap discovery beyond both owner snapshots. This
+      // scenario must prove the owner's later hourly timer found the record.
+      schedule(db, 'discovery', NOW + OWNER_RESNAPSHOT_INTERVAL_MS * 2);
 
       const transport = Object.assign(kit.transport, { attempts: [] as string[] });
       const coreFixture = indexCore(db, { clock, config: config(), transport });
@@ -91,26 +78,45 @@ describe('owner resnapshot through IndexCore', () => {
       });
       expect(db.one("SELECT 1 AS x FROM repo_jobs WHERE did=? AND kind='snapshot'", DID_OTHER)).toBeNull();
 
-      let completed = false;
-      for (let slice = 0; slice < 80; slice++) {
-        if (
-          db.one<{ indexing_state: string }>('SELECT indexing_state FROM users WHERE did=?', alice)?.indexing_state ===
-          'current'
-        ) {
+      const finishSnapshot = async (notBefore: number) => {
+        for (let slice = 0; slice < 80; slice++) {
           const row = db.one<{ last_snapshot_at_ms: number | null }>(
             'SELECT last_snapshot_at_ms FROM users WHERE did=?',
             alice,
           );
-          completed =
-            row?.last_snapshot_at_ms !== null &&
-            row?.last_snapshot_at_ms !== undefined &&
-            row.last_snapshot_at_ms >= NOW;
-          if (completed) break;
+          if (row?.last_snapshot_at_ms != null && row.last_snapshot_at_ms >= notBefore) return;
+          clock.advance(1_000);
+          await runAlarmNow(coreFixture.core);
         }
-        clock.advance(1_000);
-        await runAlarmNow(coreFixture.core);
-      }
-      expect(completed).toBe(true);
+        expect(
+          db.one<{ last_snapshot_at_ms: number | null }>('SELECT last_snapshot_at_ms FROM users WHERE did=?', alice)
+            ?.last_snapshot_at_ms,
+        ).toBeGreaterThanOrEqual(notBefore);
+      };
+      await finishSnapshot(NOW);
+      const uri = `at://${alice}/${kit.collections.scrobble}/periodic-new`;
+      expect(db.one('SELECT uri FROM scrobbles WHERE uri=?', uri)).toBeNull();
+      expect(
+        db.one('SELECT backfill_state,backfill_run_revision FROM linked_accounts WHERE id=?', 'owner-resnapshot-link'),
+      ).toEqual({ backfill_state: 'pending', backfill_run_revision: 2 });
+
+      // Commit directly to the signed repository only after initial snapshot
+      // admission has completed. The fake Jetstream is never connected.
+      const commit = await kit.externalPut('Alice', kit.collections.scrobble, 'periodic-new', {
+        $type: kit.collections.scrobble,
+        artist: 'Periodic Artist',
+        track: 'Periodic Song',
+        listenedAt: '2026-01-15T11:59:00Z',
+        createdAt: '2026-01-15T11:59:00Z',
+      });
+      kit.resetCalls();
+      const hourlyAt = NOW + OWNER_RESNAPSHOT_INTERVAL_MS;
+      clock.advance(hourlyAt - clock.nowMs());
+      await runAlarmNow(coreFixture.core);
+      expect(db.one("SELECT value FROM counters WHERE name='owner_resnapshot_receipt' AND label=?", alice)).toEqual({
+        value: hourlyAt,
+      });
+      await finishSnapshot(hourlyAt);
       expect(db.one('SELECT uri,cid,revision,artist,track FROM scrobbles WHERE uri=?', uri)).toEqual({
         uri,
         cid: commit.ops[0]!.cid,
@@ -120,12 +126,9 @@ describe('owner resnapshot through IndexCore', () => {
       });
       expect(
         db.one('SELECT backfill_state,backfill_run_revision FROM linked_accounts WHERE id=?', 'owner-resnapshot-link'),
-      ).toEqual({
-        backfill_state: 'pending',
-        backfill_run_revision: 2,
-      });
+      ).toEqual({ backfill_state: 'pending', backfill_run_revision: 3 });
       expect(fakePds.calls.count()).toBeGreaterThan(0);
-      expect(dueAt(db, OWNER_RESNAPSHOT_TIMER)).toBe(NOW + OWNER_RESNAPSHOT_INTERVAL_MS);
+      expect(dueAt(db, OWNER_RESNAPSHOT_TIMER)).toBe(hourlyAt + OWNER_RESNAPSHOT_INTERVAL_MS);
 
       const callsAfterCompletion = fakePds.calls.count();
       const rescanStarts =
@@ -137,7 +140,15 @@ describe('owner resnapshot through IndexCore', () => {
         alice,
       );
       expect(completedJob).toEqual({ attempts: 0, restarts: 0, state: 'complete' });
-      await runAlarmNow(coreFixture.core);
+      for (let step = 0; step < 100; step++) {
+        const nextTimer = db.one<{ due_at: number }>(
+          "SELECT due_at FROM timers WHERE name NOT LIKE '~running:%' ORDER BY due_at LIMIT 1",
+        )?.due_at;
+        if (nextTimer === undefined || nextTimer >= hourlyAt + OWNER_RESNAPSHOT_INTERVAL_MS) break;
+        clock.advance(Math.max(0, nextTimer - clock.nowMs()));
+        await runAlarmNow(coreFixture.core);
+      }
+      clock.advance(hourlyAt + OWNER_RESNAPSHOT_INTERVAL_MS - 1 - clock.nowMs());
       await runAlarmNow(coreFixture.core);
       expect(fakePds.calls.count()).toBe(callsAfterCompletion);
       expect(
@@ -149,7 +160,7 @@ describe('owner resnapshot through IndexCore', () => {
         completedJob,
       );
       expect(db.one("SELECT value FROM counters WHERE name='owner_resnapshot_receipt' AND label=?", alice)).toEqual({
-        value: NOW,
+        value: hourlyAt,
       });
     });
   });

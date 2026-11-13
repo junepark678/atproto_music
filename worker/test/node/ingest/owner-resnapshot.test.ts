@@ -148,7 +148,9 @@ describe('owner signed resnapshot scheduler', () => {
         expect(db.one("SELECT value FROM counters WHERE name='owner_resnapshot_receipt' AND label=?", known)).toEqual({
           value: passAt,
         });
-        expect(db.one("SELECT count(*) AS n FROM counters WHERE name='owner_resnapshot_receipt'")?.n).toBe(1);
+        expect(
+          db.one<{ n: number }>("SELECT count(*) AS n FROM counters WHERE name='owner_resnapshot_receipt'")?.n,
+        ).toBe(1);
       }
 
       expect(db.one('SELECT 1 AS x FROM users WHERE did=?', 'did:plc:000000000000000000000000')).toBeNull();
