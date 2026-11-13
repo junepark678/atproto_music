@@ -117,6 +117,7 @@ function checkRecording(value: Record<string, unknown>, row: Row, minScore = 0):
   if (minScore > 0 && typeof value.score !== 'number') return 'malformed';
   if (
     value.length !== undefined &&
+    value.length !== null &&
     (typeof value.length !== 'number' || !Number.isSafeInteger(value.length) || value.length < 0)
   )
     return 'malformed';

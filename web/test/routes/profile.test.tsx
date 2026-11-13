@@ -1,5 +1,4 @@
 import type { Meta, Statistics } from '@atmusic/core/api-types';
-import { render } from 'preact';
 import { describe, expect, it, vi } from 'vitest';
 import { ApiClient } from '../../src/api/client';
 import { App } from '../../src/app';
@@ -9,20 +8,23 @@ import { type ScreenServices, ServicesProvider } from '../../src/components/serv
 import type { OutboxOperation } from '../../src/outbox/overlay';
 import type { Session } from '../../src/session/client';
 import { AppStateContext, createAppState } from '../../src/state/store';
-import { DID, example, META, mount, SESSION } from './support';
+import { DID, example, META, mountOwned, ownTest, SESSION, settleRouteImport } from './support';
 
 describe('web/test/routes/profile.test.tsx', () => {
-  it('renders the indexed profile and its reads from the Node AppView routes', async () => {
-    const app = mount(`/u/${DID}`);
+  it('renders the indexed profile and its reads from the Node AppView routes', async ({ signal }) => {
+    const owner = ownTest(signal);
+    const app = mountOwned(owner, `/u/${DID}`);
+    await settleRouteImport();
     await vi.waitFor(() => expect(app.root.querySelector('.profile-header')).not.toBeNull());
     expect(app.requests.some((path) => path.endsWith(`/api/v1/users/${DID}/profile`))).toBe(true);
     expect(app.root.querySelector('[data-count="scrobbles"]')).not.toBeNull();
     app.cleanup();
   });
 
-  it('stats window switch fetches the requested window and renders the server-ranked top lists', async () => {
+  it('stats window switch fetches the requested window and renders the server-ranked top lists', async ({ signal }) => {
+    const owner = ownTest(signal);
     const requested: string[] = [];
-    const app = mount(`/u/${DID}`, async (input) => {
+    const app = mountOwned(owner, `/u/${DID}`, async (input) => {
       const url = new URL(String(input), 'https://music.test');
       if (url.pathname === '/api/v1/meta') return Response.json(META);
       if (url.pathname.endsWith('/stats')) {
@@ -59,6 +61,7 @@ describe('web/test/routes/profile.test.tsx', () => {
       }
       return undefined;
     });
+    await settleRouteImport();
     await vi.waitFor(() => expect(app.root.textContent).toContain('Jóga'));
     app.root.querySelector<HTMLButtonElement>('[data-window="7d"]')!.click();
     await vi.waitFor(() => expect(requested).toContain('7d'));
@@ -77,10 +80,11 @@ describe('web/test/routes/profile.test.tsx', () => {
     app.cleanup();
   });
 
-  it('a refreshed verified handle updates on the same DID route', async () => {
+  it('a refreshed verified handle updates on the same DID route', async ({ signal }) => {
+    const owner = ownTest(signal);
     let reads = 0;
     const profile = example<Record<string, unknown>>('profile');
-    const app = mount(`/u/${DID}`, async (input) => {
+    const app = mountOwned(owner, `/u/${DID}`, async (input) => {
       const url = new URL(String(input), 'https://music.test');
       if (url.pathname.endsWith('/profile')) {
         reads++;
@@ -88,6 +92,7 @@ describe('web/test/routes/profile.test.tsx', () => {
       }
       return undefined;
     });
+    await settleRouteImport();
     await vi.waitFor(() => expect(app.root.textContent).toContain('@alice.test'));
     app.root.querySelector<HTMLButtonElement>('button')!.click();
     await vi.waitFor(() => expect(app.root.textContent).toContain('@new-alice.test'));
@@ -95,10 +100,11 @@ describe('web/test/routes/profile.test.tsx', () => {
     app.cleanup();
   });
 
-  it('recordless profiles show explicit empty history and unknown DIDs show not found', async () => {
+  it('recordless profiles show explicit empty history and unknown DIDs show not found', async ({ signal }) => {
+    const owner = ownTest(signal);
     const profile = example<Record<string, unknown>>('profile');
     const stats = example<Statistics>('stats');
-    const app = mount(`/u/${DID}`, async (input) => {
+    const app = mountOwned(owner, `/u/${DID}`, async (input) => {
       const url = new URL(String(input), 'https://music.test');
       if (url.pathname.endsWith('/profile')) return Response.json({ ...profile, totalScrobbles: 0 });
       if (url.pathname.endsWith('/stats'))
@@ -107,11 +113,12 @@ describe('web/test/routes/profile.test.tsx', () => {
         return Response.json({ ...example('scrobble-page'), items: [], nextCursor: null });
       return undefined;
     });
+    await settleRouteImport();
     await vi.waitFor(() => expect(app.root.textContent).toContain('No scrobbles yet'));
     expect(app.root.textContent).toContain('No scrobbles in this window');
     app.cleanup();
 
-    const unknown = mount(`/u/${DID}`, async (input) => {
+    const unknown = mountOwned(owner, `/u/${DID}`, async (input) => {
       const url = new URL(String(input), 'https://music.test');
       if (url.pathname.endsWith('/profile'))
         return Response.json(
@@ -120,6 +127,7 @@ describe('web/test/routes/profile.test.tsx', () => {
         );
       return undefined;
     });
+    await settleRouteImport();
     await vi.waitFor(() => expect(unknown.root.textContent).toContain('Profile not found'));
     expect(unknown.root.textContent).not.toContain('0 scrobbles');
     unknown.cleanup();
@@ -173,11 +181,14 @@ describe('web/test/routes/profile.test.tsx', () => {
     expect(stoppedUnfollow.action).toBe('unfollow');
   });
 
-  it("a scrobble whose index confirmation stopped reads as not confirmed in the owner's history, not as waiting", async () => {
+  it("a scrobble whose index confirmation stopped reads as not confirmed in the owner's history, not as waiting", async ({
+    signal,
+  }) => {
+    const owner = ownTest(signal);
     const meta: Meta = { ...META, capabilities: [...META.capabilities, 'publication'] };
     const stats = example<Statistics>('stats');
     const api = new ApiClient({
-      fetch: async (input) => {
+      fetch: owner.wrapFetch(async (input) => {
         const path = new URL(String(input), 'https://music.test').pathname;
         if (path === '/api/v1/meta') return Response.json(meta);
         if (path.endsWith('/profile')) return Response.json(example('profile'));
@@ -189,7 +200,7 @@ describe('web/test/routes/profile.test.tsx', () => {
           { error: { code: 'not_found', message: 'not found', requestId: 'test' } },
           { status: 404 },
         );
-      },
+      }),
     });
     const state = createAppState({ api });
     state.meta.value = meta;
@@ -233,28 +244,29 @@ describe('web/test/routes/profile.test.tsx', () => {
       outbox: async () => outbox,
       closeOutbox: async () => undefined,
     };
-    (window as unknown as { happyDOM: { setURL(url: string): void } }).happyDOM.setURL(`https://music.test/u/${DID}`);
+    owner.setUrl(`/u/${DID}`);
     const root = document.createElement('div');
-    document.body.append(root);
-    render(
+    const ownedRoot = owner.registerRoot(root);
+    ownedRoot.mount(
       <AppStateContext.Provider value={state}>
         <ServicesProvider value={services}>
           <App state={state} loadMetaOnMount={false} />
         </ServicesProvider>
       </AppStateContext.Provider>,
-      root,
     );
+    await settleRouteImport();
     await vi.waitFor(() => expect(root.querySelector('.profile-header')).not.toBeNull());
     await vi.waitFor(() => expect(root.querySelector('ul[aria-labelledby="pending-title"] li')).not.toBeNull());
     const status = root.querySelector('.op-status');
     expect(status?.textContent).toContain('the index has not confirmed it yet');
     expect(status?.textContent).not.toContain('waiting for the index');
-    render(null, root);
-    root.remove();
+    // owner cleanup also owns this hand-rendered root.
   });
 
-  it('owner profiles have no follow control and anonymous viewers get a sign-in action', async () => {
-    const app = mount(`/u/${DID}`);
+  it('owner profiles have no follow control and anonymous viewers get a sign-in action', async ({ signal }) => {
+    const owner = ownTest(signal);
+    const app = mountOwned(owner, `/u/${DID}`);
+    await settleRouteImport();
     await vi.waitFor(() => expect(app.root.querySelector('.profile-header')).not.toBeNull());
     expect(app.root.textContent).toContain('Sign in to follow this account');
     app.state.session.value = SESSION;
@@ -263,10 +275,11 @@ describe('web/test/routes/profile.test.tsx', () => {
     app.cleanup();
   });
 
-  it('shows delete controls only on the signed-in owner’s records', async () => {
+  it('shows delete controls only on the signed-in owner’s records', async ({ signal }) => {
+    const owner = ownTest(signal);
     const meta: Meta = { ...META, capabilities: [...META.capabilities, 'publication'] };
     const api = new ApiClient({
-      fetch: async (input) => {
+      fetch: owner.wrapFetch(async (input) => {
         const path = new URL(String(input), 'https://music.test').pathname;
         if (path === '/api/v1/meta') return Response.json(meta);
         if (path.endsWith('/profile')) return Response.json(example('profile'));
@@ -277,7 +290,7 @@ describe('web/test/routes/profile.test.tsx', () => {
           { error: { code: 'not_found', message: 'not found', requestId: 'test' } },
           { status: 404 },
         );
-      },
+      }),
     });
     const state = createAppState({ api });
     state.meta.value = meta;
@@ -301,17 +314,17 @@ describe('web/test/routes/profile.test.tsx', () => {
       outbox: async () => outbox,
       closeOutbox: async () => undefined,
     };
-    (window as unknown as { happyDOM: { setURL(url: string): void } }).happyDOM.setURL(`https://music.test/u/${DID}`);
+    owner.setUrl(`/u/${DID}`);
     const root = document.createElement('div');
-    document.body.append(root);
-    render(
+    const ownedRoot = owner.registerRoot(root);
+    ownedRoot.mount(
       <AppStateContext.Provider value={state}>
         <ServicesProvider value={services}>
           <App state={state} loadMetaOnMount={false} />
         </ServicesProvider>
       </AppStateContext.Provider>,
-      root,
     );
+    await settleRouteImport();
     await vi.waitFor(() => expect(root.querySelector('.profile-header')).not.toBeNull());
     expect(root.querySelector('button.delete')).toBeNull();
     const visitor = { ...SESSION, did: 'did:plc:bbbbbbbbbbbbbbbbbbbbbbbb', handle: 'bob.test', username: 'bob' };
@@ -325,7 +338,6 @@ describe('web/test/routes/profile.test.tsx', () => {
     state.session.value = SESSION;
     await vi.waitFor(() => expect(root.querySelector('button.delete')).not.toBeNull());
     expect(root.querySelectorAll('button.delete').length).toBeGreaterThan(0);
-    render(null, root);
-    root.remove();
+    // owner cleanup also owns this hand-rendered root.
   });
 });

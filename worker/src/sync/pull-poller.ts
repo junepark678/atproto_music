@@ -143,6 +143,23 @@ function retry(db: Db, link: PullLink, state: PullState, reason: string, now: nu
   return due;
 }
 
+function retryCredentialAvailability(db: Db, link: PullLink, random: Random, now: number): number {
+  // Local key/configuration recovery is independent of the shared upstream
+  // failure budget. Keep checking forever at a bounded cadence so restoring
+  // an old encryption key can resume the link without relinking it.
+  const due = now + dueJitter(random, LINKED_PULL_RETRY_BASE_MS);
+  db.run(
+    `UPDATE linked_pull_state SET retry_at_ms=?,poll_next_at_ms=?,hold_reason='credential_unavailable',
+      updated_at_ms=? WHERE link_id=? AND generation=?`,
+    due,
+    due,
+    now,
+    link.id,
+    link.generation,
+  );
+  return due;
+}
+
 export interface LinkedPullPollerDeps {
   moduleDeps: ModuleDeps;
   db: Db;
@@ -409,6 +426,20 @@ function currentLinks(db: Db): PullLink[] {
      ORDER BY coalesce((SELECT poll_next_at_ms FROM linked_pull_state p WHERE p.link_id=linked_accounts.id
        AND p.generation=linked_accounts.generation),0),id LIMIT 1000`,
   );
+}
+
+function nextEligiblePullDue(deps: LinkedPullPollerDeps, now: number): number | null {
+  let next: number | null = null;
+  for (const link of currentLinks(deps.db)) {
+    if (!current(deps.db, link)) continue;
+    const state = ensureState(deps.db, link, now);
+    if (state.poll_next_at_ms === null || TERMINAL_HOLDS.has(state.hold_reason ?? '')) continue;
+    const due = Math.max(state.poll_next_at_ms, state.retry_at_ms ?? 0);
+    next = next === null ? due : Math.min(next, due);
+  }
+  // A due link that was not serviced needs one follow-up timer turn. Once that
+  // turn checks its pacer, the pacer deadline is persisted instead of spinning.
+  return next !== null && next <= now ? now + 1 : next;
 }
 
 function startListenbrainzRound(deps: LinkedPullPollerDeps, link: PullLink, state: PullState, now: number): PullState {
@@ -898,7 +929,7 @@ async function runLovePage(
   return { requested: 1, staged: items.length, held: writer.held, nextDueMs: due };
 }
 
-/** One bounded timer run. It uses at most one remote request currently; remaining budget is reserved for follow-up pagers. */
+/** One bounded timer run, with at most three remote requests and no budget charge for pacing deferrals. */
 export async function runLinkedLastfmPull(
   deps: LinkedPullPollerDeps,
   now = deps.clock.nowMs(),
@@ -909,6 +940,7 @@ export async function runLinkedLastfmPull(
   let staged = 0;
   let held: string | null = null;
   for (const link of links) {
+    if (requested >= LINKED_PULL_MAX_REQUESTS_PER_RUN) break;
     if (!current(deps.db, link)) continue;
     let state = ensureState(deps.db, link, now);
     if (state.poll_next_at_ms === null) continue;
@@ -939,7 +971,8 @@ export async function runLinkedLastfmPull(
       credential = openLinkCredential(linkDeps.box, link);
     } catch (error) {
       held = safeReason(error);
-      setHold(deps.db, link, held, now, null);
+      if (held === 'credential_unavailable') nextDueMs = retryCredentialAvailability(deps.db, link, deps.random, now);
+      else setHold(deps.db, link, held, now, null);
       continue;
     }
     if (!current(deps.db, link)) continue;
@@ -991,6 +1024,7 @@ export async function runLinkedLastfmPull(
         staged += result.staged;
         held = result.held ?? priorWriterHeld;
         nextDueMs = result.nextDueMs;
+        if (result.requested === 0) continue;
       } catch (error) {
         if (!current(deps.db, link)) continue;
         held = error instanceof Error && error.message.includes('capacity') ? 'staging_capacity' : safeReason(error);
@@ -1006,6 +1040,7 @@ export async function runLinkedLastfmPull(
         staged += result.staged;
         held = result.held;
         nextDueMs = result.nextDueMs;
+        if (result.requested === 0) continue;
       } catch (error) {
         if (!current(deps.db, link)) continue;
         held = error instanceof Error && error.message.includes('capacity') ? 'staging_capacity' : safeReason(error);
@@ -1021,6 +1056,7 @@ export async function runLinkedLastfmPull(
         staged += result.staged;
         held = result.held ?? priorWriterHeld;
         nextDueMs = result.nextDueMs;
+        if (result.requested === 0) continue;
       } catch (error) {
         if (!current(deps.db, link)) continue;
         held = error instanceof Error && error.message.includes('capacity') ? 'staging_capacity' : safeReason(error);
@@ -1060,7 +1096,7 @@ export async function runLinkedLastfmPull(
         link.generation,
       );
       nextDueMs = paceAt;
-      break;
+      continue;
     }
     try {
       const response = await fetchLastfmPullPage(
@@ -1141,5 +1177,6 @@ export async function runLinkedLastfmPull(
       break;
     }
   }
+  nextDueMs = nextEligiblePullDue(deps, now);
   return { requested, staged, held, nextDueMs };
 }

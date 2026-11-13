@@ -402,18 +402,25 @@ function isoSeconds(ms: number): string {
 export async function startDevEnv(ports: E2ePorts = portsFromEnv()): Promise<DevEnv> {
   // Loaded here, not at module scope: playwright.config.ts and the specs
   // import this module's constants and must not load the PDS stack.
-  const { mockResolvers, TestPds, TestPlc } = await import('@atproto/dev-env');
+  const [{ mockResolvers }, { createOwnedTestPds, createOwnedTestPlc }] = await Promise.all([
+    import('@atproto/dev-env'),
+    import('../../worker/test/node/support/dev-env-startup'),
+  ]);
   const closers: Array<() => Promise<void>> = [];
   const close = async () => {
     for (const c of closers.reverse()) await c().catch(() => undefined);
   };
   try {
-    const plc = await TestPlc.create({ port: ports.plc });
+    const plc = await createOwnedTestPlc({ port: ports.plc }, { retryCollisions: false });
     closers.push(() => plc.close());
     const plcUrl = `http://127.0.0.1:${plc.port}`;
-    const pds1 = await TestPds.create({ port: ports.pds1, hostname: 'pds1.test', didPlcUrl: plcUrl });
+    const pds1 = await createOwnedTestPds({ port: ports.pds1, hostname: 'pds1.test', didPlcUrl: plcUrl }, undefined, {
+      retryCollisions: false,
+    });
     closers.push(() => pds1.close());
-    const pds2 = await TestPds.create({ port: ports.pds2, hostname: 'pds2.test', didPlcUrl: plcUrl });
+    const pds2 = await createOwnedTestPds({ port: ports.pds2, hostname: 'pds2.test', didPlcUrl: plcUrl }, undefined, {
+      retryCollisions: false,
+    });
     closers.push(() => pds2.close());
     // Each PDS resolves its own DIDs (OAuth, handle checks) against its loopback port.
     mockResolvers(pds1.ctx.idResolver, pds1);
