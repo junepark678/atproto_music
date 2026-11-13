@@ -431,3 +431,74 @@ it('does not transfer a scrobble candidate when an accepted rewrite changes its 
     ).toBe(0);
   });
 });
+
+it.each(['scrobble', 'love'] as const)(
+  'a %s candidate promoted to two linked services counts as one late acceptance',
+  async (kind) => {
+    const repo = await repoFor('alice');
+    const collection = kind === 'love' ? LOVE : SCROBBLE;
+    const initial =
+      kind === 'love'
+        ? {
+            $type: LOVE,
+            artist: 'Candidate Artist',
+            track: 'Candidate Track',
+            recordingMbid: '33333333-3333-4333-8333-333333333333',
+            createdAt: '2026-01-15T11:00:00Z',
+          }
+        : fixtureScrobble('r02');
+    const first = present(await putProof(repo, collection, 'two-links', initial));
+    const second = present(await putProof(repo, collection, 'two-links', { ...initial, album: 'Metadata only' }));
+    await withMigratedDb((db) => {
+      const generation = seedUser(db, ALICE);
+      for (const [id, service] of [
+        ['two-links-lastfm', 'lastfm'],
+        ['two-links-listenbrainz', 'listenbrainz'],
+      ] as const) {
+        db.run(
+          `INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,created_at_ms,updated_at_ms)
+          VALUES(?,?,?,'remote',X'00','fixture',?,?)`,
+          id,
+          ALICE,
+          service,
+          NOW_MS,
+          NOW_MS,
+        );
+      }
+      seedSnapshotJob(db, ALICE, generation);
+      db.run('UPDATE users SET last_snapshot_at_ms=? WHERE did=?', NOW_MS - 1000, ALICE);
+      for (const proof of [first, second]) {
+        db.tx(() =>
+          applyRecordProof(db, proof, {
+            prefix: PREFIX,
+            receiptNs: NOW_NS,
+            nowNs: NOW_NS,
+            liveCandidates: true,
+            live: { random, evidence: null, legacyRev: null },
+          }),
+        );
+      }
+      expect(
+        db.tx(() =>
+          lateAccept(db, {
+            uri: `at://${ALICE}/${collection}/two-links`,
+            did: ALICE,
+            collection,
+            rkey: 'two-links',
+            evidence: event(second, 'update'),
+            nowMs: NOW_MS + 1000,
+            random,
+          }),
+        ),
+      ).toBe(1);
+      expect(
+        db.all<{ link_id: string }>('SELECT link_id FROM forward_outbox ORDER BY link_id').map((r) => r.link_id),
+      ).toEqual(['two-links-lastfm', 'two-links-listenbrainz']);
+      expect(
+        db.all<{ label: string; value: number }>(
+          "SELECT label,value FROM counters WHERE name='live_admission' AND label LIKE 'late_%' ORDER BY label",
+        ),
+      ).toEqual([{ label: 'late_accepted', value: 1 }]);
+    });
+  },
+);

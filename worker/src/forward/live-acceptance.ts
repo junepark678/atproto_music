@@ -91,7 +91,6 @@ export function lateAccept(
           forward_scrobbles: number;
           generation_start_seq: number;
         }>(`SELECT * FROM linked_accounts WHERE did=? AND status='active' AND forward_scrobbles=1`, input.did);
-        const acceptedBeforeLinks = accepted;
         const historyRow = scrobbleHistoryRow(db, input.did, row.uri);
         if (!historyRow || historyRow.cid !== row.cid) continue;
         for (const link of links) {
@@ -108,9 +107,9 @@ export function lateAccept(
             now: input.nowMs,
             random: input.random,
           });
-          accepted++;
         }
-        if (accepted === acceptedBeforeLinks) accepted++;
+        // One accepted candidate, however many linked services it was forwarded to.
+        accepted++;
       }
     } else {
       const row = db.one<{
@@ -161,7 +160,7 @@ export function lateAccept(
           candidate.identity_key,
         ).rowsWritten;
         if (changed === 1) {
-          if (admitted.length === 0) accepted++;
+          accepted++;
           for (const { link, result } of admitted) {
             enqueueForwards(db, {
               did: input.did,
@@ -170,7 +169,6 @@ export function lateAccept(
               now: input.nowMs,
               random: input.random,
             });
-            accepted++;
           }
         }
       }
