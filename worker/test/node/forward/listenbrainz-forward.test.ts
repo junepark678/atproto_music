@@ -1162,6 +1162,19 @@ describe('ListenBrainz forwarding', () => {
     expect(
       w.app.db.one('SELECT target_msid,target_listened_at,state FROM listenbrainz_deletes WHERE id=?', 'delete-test'),
     ).toEqual({ target_msid: msid, target_listened_at: listenedAt, state: 'queued' });
+    w.app.db.run(
+      `INSERT INTO listenbrainz_deletes
+      (id,event_key,link_id,generation,did,identity_key,listened_at,artist_key,track_key,artist,track,source_path,state,
+       attempts,due_at,deadline_at,created_at_ms,updated_at_ms,target_msid,target_listened_at)
+       SELECT 'other-target','other-event',link_id,generation,did,'other-identity',listened_at,artist_key,track_key,
+         artist,track,source_path,'queued',0,?,?,?,?,'other-msid',?
+       FROM listenbrainz_deletes WHERE id='delete-test'`,
+      w.clock.nowMs() + 60_000,
+      w.clock.nowMs() + DAY,
+      w.clock.nowMs(),
+      w.clock.nowMs(),
+      listenedAt + 1,
+    );
     expect(w.lb.deletions).toEqual([]);
     w.clock.advance(1000);
     const second = await runDeleteSlice({
@@ -1173,6 +1186,9 @@ describe('ListenBrainz forwarding', () => {
       pacing: w.rt.pacing,
     });
     expect(second.state).toBe('sent');
+    expect(w.app.db.one('SELECT state FROM listenbrainz_deletes WHERE id=?', 'other-target')).toEqual({
+      state: 'queued',
+    });
     expect(w.lb.deletions).toEqual([
       { user: 'alice_lb', token: TOKEN, scheme: 'Token', listened_at: listenedAt, recording_msid: msid },
     ]);

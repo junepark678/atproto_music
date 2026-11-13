@@ -319,7 +319,8 @@ export async function runDeleteSlice(
       // a new event key and remains eligible.
       deps.db.run(
         `UPDATE listenbrainz_deletes SET state='ignored',last_error='canonical_delete_sent',updated_at_ms=?
-         WHERE link_id=? AND generation=? AND did=? AND state='queued' AND listened_at=? AND artist_key=? AND track_key=?`,
+         WHERE link_id=? AND generation=? AND did=? AND state='queued' AND listened_at=? AND artist_key=? AND track_key=?
+           AND target_msid=? AND target_listened_at=?`,
         deps.clock.nowMs(),
         row.link_id,
         row.generation,
@@ -327,6 +328,8 @@ export async function runDeleteSlice(
         row.listened_at,
         row.artist_key,
         row.track_key,
+        row.target_msid,
+        row.target_listened_at,
       );
       return { requests: 1, state: 'sent', nextDueMs: null };
     }
