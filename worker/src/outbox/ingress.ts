@@ -36,7 +36,7 @@ import { parseRfc3339 } from '@atmusic/core/timestamp';
 import type { Origin } from '../app/rows';
 import type { ModuleDeps } from '../do/contracts';
 import { admitForwardIdentity } from '../forward/projection';
-import { enqueueForwards } from './forward-enqueue';
+import { enqueueForwards, rewriteNowPlayingForwardStart } from './forward-enqueue';
 import { type Idempotency, idempotentOperation, newOperationId, type Prepared } from './operations';
 import { insertScrobbleCreate, prepareScrobble } from './scrobble-ops';
 
@@ -234,6 +234,14 @@ export async function acceptListens(m: ModuleDeps, args: AcceptListensArgs): Pro
               now,
               listenedAtMs,
               args.did,
+            );
+            rewriteNowPlayingForwardStart(
+              db,
+              args.did,
+              playing.artist,
+              playing.track,
+              playing.started_at_ms,
+              listenedAtMs,
             );
           } else if (listenedAtMs >= playing.started_at_ms) {
             db.run('UPDATE now_playing SET scrobbled_at_ms = ? WHERE did = ?', now, args.did);

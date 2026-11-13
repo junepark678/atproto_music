@@ -87,6 +87,7 @@ import type { ModuleDeps } from '../do/contracts';
 import { clearNowPlaying } from '../do/read/now-playing';
 import { visibleScrobblesFrom } from '../do/read/visibility';
 import { musicKeyColumns } from '../do/write/keys';
+import { kickForwardDebounced } from '../forward/forward-kick';
 import { need, type RequestCtx, type RouteDef } from '../http/types';
 import {
   commitUnsentBatchListenRemoval,
@@ -214,6 +215,11 @@ export function lbPublicationOpen(config: Pick<AppConfig, 'prefix' | 'publicatio
 /** Kicks the outbox timer of the composition (a no-op where the outbox extension is not registered). */
 export function kickOutbox(ctx: RequestCtx): void {
   if (ctx.index instanceof IndexCore) ctx.index.extensionTimers.kick('outbox');
+}
+
+/** Kicks the forward timer (debounced) after a compatibility now-playing enqueue. */
+export function kickForward(ctx: RequestCtx): void {
+  if (ctx.index instanceof IndexCore) kickForwardDebounced(ctx.index.extensionTimers);
 }
 
 // ---------------------------------------------------------------------------

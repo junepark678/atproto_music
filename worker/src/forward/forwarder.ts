@@ -81,6 +81,7 @@ import { enqueueTrack, matchedRecordingMbid } from '../musicbrainz/store';
 import { canonicalForwardDedupeKey } from '../outbox/forward-key';
 import { hasPresentTrackLove } from '../outbox/live-track-survivor';
 import { nextDeleteWakeAt, runDeleteSlice } from './delete-forwarder';
+import { pendingForwardKick } from './forward-kick';
 import {
   backoffRows,
   clearLastfmKeyRejected,
@@ -764,9 +765,54 @@ export const KIND_CANDIDATE_SQL = `SELECT min(priority) AS priority,min(created_
 export const LANE_FIRST_DUE_SQL = `SELECT priority,head_created_at_ms FROM forward_love_lanes INDEXED BY forward_love_lanes_due
   WHERE link_id=? AND generation=? AND priority=? AND due_at<=? ORDER BY due_at,rowid LIMIT 1`;
 
+/**
+ * A link's due now playing jumps ahead of other links' backlog at most once per
+ * this interval. All Last.fm links share one 1 request/second token, so an
+ * unbounded boost would let one link that keeps a now-playing update due take
+ * every token and starve other links' scrobbles, loves and imports.
+ */
+export const NOW_PLAYING_PRIORITY_INTERVAL_MS = 30_000;
+/** When each link's now playing last took the cross-link boost, per Db handle (in memory). */
+const nowPlayingBoostedAt = new WeakMap<Db, Map<string, number>>();
+
+/** TEST/DIAGNOSTIC: how many links the boost cooldown cache currently holds for `db`. */
+export function nowPlayingBoostCacheSize(db: Db): number {
+  return nowPlayingBoostedAt.get(db)?.size ?? 0;
+}
+/**
+ * Server-wide bound on boosted Last.fm now playing, counted in turns rather
+ * than time: whether the last Last.fm selection was a boost, per Db handle (in
+ * memory). All Last.fm links share one 1 request/second token, so after a
+ * boost the next Last.fm turn goes to ordinary work (scrobbles, loves,
+ * imports, or unboosted now playing in age order). Boosts therefore never take
+ * more than every other Last.fm token, however many links take turns and
+ * however slowly Last.fm answers. ListenBrainz paces each link separately and
+ * needs no global bound.
+ */
+const lastfmLastTurnBoosted = new WeakMap<Db, boolean>();
+/**
+ * The same bound over the whole delivery loop, all services: runForward
+ * awaits every delivery in turn and shares its per-run request budget across
+ * Last.fm and ListenBrainz, so after any boosted selection the next selection
+ * goes to ordinary work. Rotating ListenBrainz links can therefore not starve
+ * ordinary forwarding either (including Last.fm work whose token is free).
+ */
+const lastTurnBoosted = new WeakMap<Db, boolean>();
+
 function pickJob(rt: ForwardRuntime, now: number, localWork: Map<string, { remaining: number }>): Job | null {
   const links = rt.db.all<LinkRow>("SELECT * FROM linked_accounts WHERE status='active' ORDER BY id");
-  const candidates: Array<{ link: LinkRow; priority: number; oldest: number }> = [];
+  let boostedAt = nowPlayingBoostedAt.get(rt.db);
+  if (boostedAt === undefined) {
+    boostedAt = new Map();
+    nowPlayingBoostedAt.set(rt.db, boostedAt);
+  }
+  // An entry older than the interval behaves exactly like a missing one, so
+  // drop it: the cache holds only links boosted in the last interval and
+  // cannot grow with links that were deleted (or recreated under a new id).
+  for (const [linkId, at] of boostedAt) {
+    if (now - at >= NOW_PLAYING_PRIORITY_INTERVAL_MS) boostedAt.delete(linkId);
+  }
+  const candidates: Array<{ link: LinkRow; priority: number; oldest: number; nowPlaying: boolean }> = [];
   for (const link of links) {
     const hints: Array<{ priority: number; created_at_ms: number | null } | null> = [];
     for (const kind of ['nowplaying', 'scrobble'] as const) {
@@ -790,20 +836,54 @@ function pickJob(rt: ForwardRuntime, now: number, localWork: Map<string, { remai
     if (due.length === 0) continue;
     const priority = Math.min(...due.map((hint) => hint.priority));
     const oldest = Math.min(...due.filter((hint) => hint.priority === priority).map((hint) => hint.created_at_ms));
-    candidates.push({ link, priority, oldest });
+    const nowPlayingHint = hints[0];
+    const lastBoost = boostedAt.get(link.id);
+    const globalBoostFree =
+      lastTurnBoosted.get(rt.db) !== true && (link.service !== 'lastfm' || lastfmLastTurnBoosted.get(rt.db) !== true);
+    candidates.push({
+      link,
+      priority,
+      oldest,
+      nowPlaying:
+        nowPlayingHint !== undefined &&
+        nowPlayingHint !== null &&
+        nowPlayingHint.created_at_ms !== null &&
+        (lastBoost === undefined || now - lastBoost >= NOW_PLAYING_PRIORITY_INTERVAL_MS) &&
+        globalBoostFree,
+    });
   }
-  candidates.sort((a, b) => a.priority - b.priority || a.oldest - b.oldest || a.link.id.localeCompare(b.link.id));
-  for (const { link } of candidates) {
+  // A live now-playing update is useful only while current (60 s). Let it
+  // take the next Last.fm token before historical/live listen backlog, at most
+  // once per NOW_PLAYING_PRIORITY_INTERVAL_MS per link; between boosts a link
+  // competes, and sends, by the age of its oldest due job.
+  candidates.sort(
+    (a, b) =>
+      Number(b.nowPlaying) - Number(a.nowPlaying) ||
+      a.priority - b.priority ||
+      a.oldest - b.oldest ||
+      a.link.id.localeCompare(b.link.id),
+  );
+  for (const { link, nowPlaying } of candidates) {
     if (!upstreamFree(rt, link, now)) continue;
     let budget = localWork.get(link.id);
     if (budget === undefined) {
       budget = { remaining: MAX_LOCAL_WORK_PER_RUN };
       localWork.set(link.id, budget);
     }
-    const job = rt.db.tx(
-      () => nowPlayingJob(rt, link, now) ?? older(scrobbleJob(rt, link, now), loveJob(rt, link, now, budget!)),
-    );
-    if (job !== null) return job;
+    const job = rt.db.tx(() => {
+      const backlog = () => older(scrobbleJob(rt, link, now), loveJob(rt, link, now, budget!));
+      // Boosted: now playing goes first. Otherwise this link sends its oldest due
+      // job, so the backlog row whose age won the link this turn is what spends
+      // the token; it cannot keep lending that age to fresh now-playing updates.
+      return nowPlaying ? (nowPlayingJob(rt, link, now) ?? backlog()) : older(nowPlayingJob(rt, link, now), backlog());
+    });
+    if (job !== null) {
+      const boosted = nowPlaying && job.kind === 'nowplaying';
+      if (boosted) boostedAt.set(link.id, now);
+      lastTurnBoosted.set(rt.db, boosted);
+      if (link.service === 'lastfm') lastfmLastTurnBoosted.set(rt.db, boosted);
+      return job;
+    }
   }
   return null;
 }
@@ -903,12 +983,18 @@ async function sendLastfm(rt: ForwardRuntime, job: Job, sk: string): Promise<voi
       : await client.love(sk, job.kind === 'love' ? 'track.love' : 'track.unlove', job.track.artist, job.track.track);
   const at = rt.clock.nowMs();
   if (!generationIsCurrent(db, job.link)) return;
-  if (!out.ok) return lastfmFailed(rt, job, out, at);
+  if (!out.ok) {
+    if (job.kind === 'nowplaying')
+      rt.log.log('info', 'forward.nowplaying', { kind: job.kind, status: 'failed', service: 'lastfm' });
+    return lastfmFailed(rt, job, out, at);
+  }
   db.tx(() => {
     clearLastfmKeyRejected(db);
     noteLinkSuccess(db, job.link, at);
     settleJobRows(db, job, 'sent', at);
   });
+  if (job.kind === 'nowplaying')
+    rt.log.log('info', 'forward.nowplaying', { kind: job.kind, status: 'sent', service: 'lastfm' });
 }
 
 // ---------------------------------------------------------------------------
@@ -961,6 +1047,8 @@ async function sendListenbrainz(rt: ForwardRuntime, job: Job, token: string): Pr
       noteLinkSuccess(db, job.link, at);
       settleJobRows(db, job, 'sent', at);
     });
+    if (job.kind === 'nowplaying')
+      rt.log.log('info', 'forward.nowplaying', { kind: job.kind, status: 'sent', service: 'listenbrainz' });
     return;
   }
   if (out.kind === 'network') {
@@ -971,6 +1059,7 @@ async function sendListenbrainz(rt: ForwardRuntime, job: Job, token: string): Pr
       else backoffRows(db, job.rows, at, rt.random, error);
     });
     rt.log.log('warn', 'forward.failed', { service: 'listenbrainz', kind: job.kind, rows: job.rows.length, error });
+    if (once) rt.log.log('info', 'forward.nowplaying', { kind: job.kind, status: 'failed', service: 'listenbrainz' });
     return;
   }
   const error = `http_${out.status}`;
@@ -1007,6 +1096,7 @@ async function sendListenbrainz(rt: ForwardRuntime, job: Job, token: string): Pr
     rows: job.rows.length,
     status: out.status,
   });
+  if (once) rt.log.log('info', 'forward.nowplaying', { kind: job.kind, status: 'failed', service: 'listenbrainz' });
 }
 
 // ---------------------------------------------------------------------------
@@ -1250,8 +1340,20 @@ export function forwardExtension(runtime: () => ForwardRuntime | null): CoreExte
         }
         refreshForwardStorageStats(rt.db, rt.clock.nowMs());
         if (report.skipped) return;
-        const deleteDue = nextDeleteWakeAt({ db: rt.db, pacing: rt.pacing }, rt.clock.nowMs());
-        const due = [report.nextDueMs, deleteDue]
+        const after = rt.clock.nowMs();
+        const deleteDue = nextDeleteWakeAt({ db: rt.db, pacing: rt.pacing }, after);
+        // The report predates the delete and pull awaits above, and this
+        // schedule is forced, so work queued meanwhile must set the deadline
+        // too or it would wait for the idle poll:
+        // - a now-playing kick still pending keeps its own (debounced) due time;
+        // - otherwise the current earliest due row counts, but work that is
+        //   already overdue keeps runForward's bounded-work floor (at least
+        //   LASTFM_MIN_INTERVAL_MS away), so a bounded expiry or local-work
+        //   backlog cannot turn this into a busy loop.
+        const current = nextForwardDue(rt, after);
+        const forwardDue = current === null ? null : current <= after ? after + LASTFM_MIN_INTERVAL_MS : current;
+        const kickDue = pendingForwardKick(ctx, after);
+        const due = [report.nextDueMs, forwardDue, kickDue, deleteDue]
           .filter((v): v is number => v !== null)
           .reduce<number | null>((a, v) => (a === null ? v : Math.min(a, v)), null);
         const poll = now + FORWARD_IDLE_POLL_MS;

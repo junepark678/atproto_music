@@ -105,6 +105,8 @@ export interface LastfmAuthServices {
   readonly writeRate: BucketSet;
   /** Makes the outbox timer due now (a no-op when no outbox is composed). */
   kickOutbox(): void;
+  /** Makes the forward timer due now (a no-op when no forwarder is composed). */
+  kickForward(): void;
 }
 
 declare module '../app/services' {
@@ -123,6 +125,7 @@ export interface LastfmAuthServicesInput {
   publicOrigin: string;
   clock: Clock;
   kickOutbox?: () => void;
+  kickForward?: () => void;
   /** Default MOBILE_FAILURE_LIMITS. */
   failureLimits?: FailureLimits;
 }
@@ -137,6 +140,7 @@ export function createLastfmAuthServices(input: LastfmAuthServicesInput): Lastfm
     mobileFailures: new FailureLimiter(input.clock, input.failureLimits ?? MOBILE_FAILURE_LIMITS),
     writeRate: new BucketSet(WRITE_RATE, input.clock, { onFull: 'refuse' }),
     kickOutbox: input.kickOutbox ?? (() => undefined),
+    kickForward: input.kickForward ?? (() => undefined),
   };
 }
 

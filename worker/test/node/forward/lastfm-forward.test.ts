@@ -23,6 +23,7 @@ import { MemoryRevocations } from '../../../src/app/revocations';
 import type { ForwardOutboxRow } from '../../../src/app/rows';
 import { ensureAccount } from '../../../src/credentials/accounts';
 import { runLinkBackfill } from '../../../src/forward/backfill';
+import { FORWARD_KICK_DEBOUNCE_MS, kickForwardDebounced } from '../../../src/forward/forward-kick';
 import {
   BACKOFF_BASE_MS,
   holdLinkRows,
@@ -32,7 +33,14 @@ import {
   resumeHeldRows,
   rowStates,
 } from '../../../src/forward/forward-outbox';
-import { type ForwardRuntime, KEY_REJECTED_PROBE_MS, runForward } from '../../../src/forward/forwarder';
+import {
+  type ForwardRuntime,
+  forwardExtension,
+  KEY_REJECTED_PROBE_MS,
+  NOW_PLAYING_PRIORITY_INTERVAL_MS,
+  nowPlayingBoostCacheSize,
+  runForward,
+} from '../../../src/forward/forwarder';
 import { LASTFM_CAPS, LastfmClient } from '../../../src/forward/lastfm-client';
 import { patchLink, saveLink } from '../../../src/forward/links';
 import { admitForwardIdentity, projectionListenKey } from '../../../src/forward/projection';
@@ -1244,6 +1252,382 @@ describe('Last.fm forwarding', () => {
     expect(report.requests).toBe(0);
     expect(w.rows()[2]).toMatchObject({ state: 'expired', last_error: 'stale', attempts: 0 });
     expect(w.lastfm.calls.count({ nsid: 'track.updateNowPlaying' })).toBe(2);
+  });
+
+  it('sends pending now playing before an older scrobble on another Last.fm link', async () => {
+    const w = await world();
+    const backlogLink = w.linkLastfm(BOB, 'older_backlog');
+    const playerLink = w.linkLastfm(ALICE, 'current_player');
+    const now = w.clock.nowMs();
+    enqueueForwards(w.app.db, {
+      did: BOB,
+      linkId: backlogLink.id,
+      items: [
+        {
+          kind: 'scrobble',
+          listenKey: 'older-link-backlog',
+          payload: {
+            listen: { artist: 'Old Artist', track: 'Old Track', listenedAt: '2026-01-14T00:00:00.000Z' },
+            origin: 'lastfm',
+          },
+        },
+      ],
+      now,
+      random: enqueueRandom,
+    });
+    w.clock.advance(SECOND);
+    const startedAtMs = w.clock.nowMs();
+    enqueueForwards(w.app.db, {
+      did: ALICE,
+      linkId: playerLink.id,
+      items: [
+        {
+          kind: 'nowplaying',
+          startedAtMs,
+          artist: 'Current Artist',
+          track: 'Current Track',
+          payload: { track: { artist: 'Current Artist', track: 'Current Track' }, startedAtMs, origin: 'lastfm' },
+        },
+      ],
+      now: startedAtMs,
+      random: enqueueRandom,
+    });
+
+    await w.run();
+
+    expect(w.lastfm.nowPlayingCalls.map((call) => call.track)).toEqual(['Current Track']);
+    expect(w.lastfm.calls.filter({ nsid: 'track.scrobble' })).toHaveLength(0);
+    expect(w.rows().find((row) => row.kind === 'nowplaying')).toMatchObject({ state: 'sent' });
+    expect(w.rows().find((row) => row.kind === 'scrobble')).toMatchObject({ state: 'queued' });
+  });
+
+  it("a second now-playing update inside NOW_PLAYING_PRIORITY_INTERVAL_MS waits behind another link's older scrobble", async () => {
+    const w = await world();
+    const backlogLink = w.linkLastfm(BOB, 'older_backlog');
+    const playerLink = w.linkLastfm(ALICE, 'current_player');
+    const nowPlayingOn = (title: string) => {
+      const startedAtMs = w.clock.nowMs();
+      enqueueForwards(w.app.db, {
+        did: ALICE,
+        linkId: playerLink.id,
+        items: [
+          {
+            kind: 'nowplaying',
+            startedAtMs,
+            artist: 'Current Artist',
+            track: title,
+            payload: { track: { artist: 'Current Artist', track: title }, startedAtMs, origin: 'lastfm' },
+          },
+        ],
+        now: startedAtMs,
+        random: enqueueRandom,
+      });
+    };
+    enqueueForwards(w.app.db, {
+      did: BOB,
+      linkId: backlogLink.id,
+      items: [
+        {
+          kind: 'scrobble',
+          listenKey: 'starvation-backlog',
+          payload: {
+            listen: { artist: 'Old Artist', track: 'Old Track', listenedAt: '2026-01-14T00:00:00.000Z' },
+            origin: 'lastfm',
+          },
+        },
+      ],
+      now: w.clock.nowMs(),
+      random: enqueueRandom,
+    });
+    w.clock.advance(SECOND);
+    nowPlayingOn('First');
+    await w.run();
+    expect(w.lastfm.nowPlayingCalls.map((call) => call.track)).toEqual(['First']);
+    expect(w.lastfm.calls.count({ nsid: 'track.scrobble' })).toBe(0);
+
+    // A second update inside the interval no longer jumps the other link's older scrobble.
+    w.clock.advance(SECOND);
+    nowPlayingOn('Second');
+    await w.run();
+    expect(w.lastfm.calls.count({ nsid: 'track.scrobble' })).toBe(1);
+    expect(w.lastfm.nowPlayingCalls.map((call) => call.track)).toEqual(['First']);
+
+    // It still goes out on the next token, well inside its 60 s lifetime.
+    w.clock.advance(SECOND);
+    await w.run();
+    expect(w.lastfm.nowPlayingCalls.map((call) => call.track)).toEqual(['First', 'Second']);
+  });
+
+  it('a link with an old scrobble cannot keep sending fresh now playing ahead of it and starve other links', async () => {
+    const w = await world();
+    const player = w.linkLastfm(ALICE, 'player');
+    w.linkLastfm(BOB, 'victim');
+    w.scrobbles(ALICE, 1, 'anchor');
+    w.clock.advance(SECOND);
+    w.scrobbles(BOB, 1, 'victim');
+    for (let i = 0; i < 65; i++) {
+      w.clock.advance(SECOND);
+      const startedAtMs = w.clock.nowMs();
+      enqueueForwards(w.app.db, {
+        did: ALICE,
+        linkId: player.id,
+        items: [
+          {
+            kind: 'nowplaying',
+            startedAtMs,
+            artist: 'Artist',
+            track: `Track ${i}`,
+            payload: { track: { artist: 'Artist', track: `Track ${i}` }, startedAtMs, origin: 'lastfm' },
+          },
+        ],
+        now: startedAtMs,
+        random: enqueueRandom,
+      });
+      await w.run();
+    }
+    // Both links' scrobbles went out; now playing kept being forwarded, boosted at most every 30 s.
+    expect(w.lastfm.calls.count({ nsid: 'track.scrobble' })).toBe(2);
+    expect(
+      w
+        .rows()
+        .filter((row) => row.kind === 'scrobble')
+        .map((row) => row.state),
+    ).toEqual(['sent', 'sent']);
+    expect(w.lastfm.nowPlayingCalls.length).toBeGreaterThanOrEqual(60);
+  });
+
+  it.each([
+    ['fast', 1],
+    ['slow (2 s per request)', 2],
+  ] as const)(
+    "many Last.fm links taking turns with now playing cannot take every token from another user's scrobbles: %s upstream",
+    async (_label, stepSeconds) => {
+      const w = await world();
+      // Each player's first now playing is boost-eligible, so 20 players taking one turn each
+      // would fill every token for 20 seconds without the server-wide bound.
+      const players = Array.from({ length: 20 }, (_, i) => {
+        const did = `did:plc:${`player${i}`.padEnd(24, 'x')}`;
+        ensureAccount({ db: w.app.db, clock: w.clock }, { did, verifiedHandle: null });
+        return { did, link: w.linkLastfm(did, `player_${i}`) };
+      });
+      w.linkLastfm(BOB, 'victim');
+      let victimQueued = 0;
+      for (let second = 0; second < 20; second++) {
+        const { did, link } = players[second % players.length]!;
+        const startedAtMs = w.clock.nowMs();
+        enqueueForwards(w.app.db, {
+          did,
+          linkId: link.id,
+          items: [
+            {
+              kind: 'nowplaying',
+              startedAtMs,
+              artist: 'Artist',
+              track: `Track ${second}`,
+              payload: { track: { artist: 'Artist', track: `Track ${second}` }, startedAtMs, origin: 'lastfm' },
+            },
+          ],
+          now: startedAtMs,
+          random: enqueueRandom,
+        });
+        if (second % 5 === 0) {
+          w.scrobbles(BOB, 1, `victim-${second}`);
+          victimQueued++;
+        }
+        await w.run();
+        // A slow upstream: the clock has moved on by the time the next turn is picked.
+        w.clock.advance(stepSeconds * SECOND);
+      }
+      // Ordinary work keeps at least every other shared token while the rotation runs:
+      // every victim scrobble went out within the loop, one request each.
+      const victim = w.rows().filter((row) => row.kind === 'scrobble');
+      expect(victim).toHaveLength(victimQueued);
+      expect(victim.map((row) => row.state)).toEqual(Array(victimQueued).fill('sent'));
+      expect(w.lastfm.calls.count({ nsid: 'track.scrobble' })).toBe(victimQueued);
+      expect(w.lastfm.nowPlayingCalls.length).toBeGreaterThanOrEqual(15);
+    },
+  );
+
+  it('rotating ListenBrainz now playing cannot fill the shared delivery loop and starve Last.fm scrobbles', async () => {
+    const w = await world();
+    // 25 ListenBrainz players, five due per run, each again only after its 30 s cooldown:
+    // without a loop-wide bound, the five boosted updates would take every request of every run.
+    const players = Array.from({ length: 25 }, (_, i) => {
+      const did = `did:plc:${`lbplayer${i}`.padEnd(24, 'x')}`;
+      ensureAccount({ db: w.app.db, clock: w.clock }, { did, verifiedHandle: null });
+      const token = `lb-token-${i}`;
+      w.lb.addToken(`lb_player_${i}`, token);
+      const saved = saveLink(
+        { db: w.app.db, clock: w.clock, random: w.rt.random, box: w.rt.box },
+        { did, service: 'listenbrainz', remoteUser: `lb_player_${i}`, credential: token },
+      );
+      return { did, linkId: saved.link.id };
+    });
+    w.linkLastfm(BOB, 'victim');
+    let victimQueued = 0;
+    for (let step = 0; step < 15; step++) {
+      for (let k = 0; k < 5; k++) {
+        const { did, linkId } = players[(step * 5 + k) % players.length]!;
+        const startedAtMs = w.clock.nowMs();
+        enqueueForwards(w.app.db, {
+          did,
+          linkId,
+          items: [
+            {
+              kind: 'nowplaying',
+              startedAtMs,
+              artist: 'Artist',
+              track: `Track ${step}-${k}`,
+              payload: {
+                track: { artist: 'Artist', track: `Track ${step}-${k}` },
+                startedAtMs,
+                origin: 'listenbrainz',
+              },
+            },
+          ],
+          now: startedAtMs,
+          random: enqueueRandom,
+        });
+      }
+      if (step % 3 === 0) {
+        w.scrobbles(BOB, 1, `lb-victim-${step}`);
+        victimQueued++;
+      }
+      await w.run();
+      w.clock.advance(8 * SECOND);
+    }
+    const victim = w.rows(BOB).filter((row) => row.kind === 'scrobble');
+    expect(victim).toHaveLength(victimQueued);
+    expect(victim.map((row) => row.state)).toEqual(Array(victimQueued).fill('sent'));
+  });
+
+  it('now playing queued and kicked while a forward pass awaits a delete keeps its prompt deadline', async () => {
+    const w = await world();
+    const link = w.linkLastfm(ALICE, 'race');
+    const ctx = w.app.composed.core.extensionTimers;
+    const start = w.clock.nowMs();
+    kickForwardDebounced(ctx);
+    // The timer is consumed before its handler runs.
+    w.app.db.run("DELETE FROM timers WHERE name='forward'");
+    const lbLink = saveLink(
+      { db: w.app.db, clock: w.clock, random: w.rt.random, box: w.rt.box },
+      { did: BOB, service: 'listenbrainz', remoteUser: 'delete-user', credential: 'delete-token' },
+    ).link;
+    w.app.db.run(
+      `INSERT INTO listenbrainz_deletes
+         (id,event_key,link_id,generation,did,identity_key,listened_at,artist_key,track_key,artist,track,source_path,
+          due_at,deadline_at,target_msid,target_listened_at,created_at_ms,updated_at_ms)
+       VALUES ('race-delete','race-event',?,?,?,'race-identity',100,'a','t','A','T','audit',?,?,'race-msid',100,?,?)`,
+      lbLink.id,
+      lbLink.generation,
+      BOB,
+      start,
+      start + 60_000,
+      start,
+      start,
+    );
+    let entered!: () => void;
+    const enteredDelete = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    (w.rt.listenbrainz as { deleteListen: unknown }).deleteListen = async () => {
+      entered();
+      await gate;
+      return { ok: true, rate: { remaining: null, resetInS: null } };
+    };
+    const running = forwardExtension(() => w.rt).timers!.forward!(start, ctx);
+    await enteredDelete;
+
+    // Mid-pass: a now-playing update is queued and kicked.
+    w.clock.advance(100);
+    const now = w.clock.nowMs();
+    enqueueForwards(w.app.db, {
+      did: ALICE,
+      linkId: link.id,
+      items: [
+        {
+          kind: 'nowplaying',
+          startedAtMs: now,
+          artist: 'Artist',
+          track: 'Queued during the pass',
+          payload: { track: { artist: 'Artist', track: 'Queued during the pass' }, startedAtMs: now, origin: 'lastfm' },
+        },
+      ],
+      now,
+      random: enqueueRandom,
+    });
+    expect(kickForwardDebounced(ctx)).toBe(start + FORWARD_KICK_DEBOUNCE_MS);
+
+    release();
+    await running;
+    expect(w.rows(ALICE).some((row) => row.kind === 'nowplaying' && row.state === 'queued')).toBe(true);
+    // The pass's forced reschedule must not push it to the idle poll.
+    const due = w.app.db.one<{ due_at: number }>("SELECT due_at FROM timers WHERE name='forward'")!.due_at;
+    expect(due).toBeLessThanOrEqual(start + FORWARD_KICK_DEBOUNCE_MS);
+  });
+
+  it('the now-playing boost cooldown cache forgets links once their interval has passed', async () => {
+    const w = await world();
+    for (let i = 0; i < 6; i++) {
+      const did = `did:plc:${`cache${i}`.padEnd(24, 'x')}`;
+      ensureAccount({ db: w.app.db, clock: w.clock }, { did, verifiedHandle: null });
+      const link = w.linkLastfm(did, `cache_${i}`);
+      const startedAtMs = w.clock.nowMs();
+      enqueueForwards(w.app.db, {
+        did,
+        linkId: link.id,
+        items: [
+          {
+            kind: 'nowplaying',
+            startedAtMs,
+            artist: 'Artist',
+            track: `Track ${i}`,
+            payload: { track: { artist: 'Artist', track: `Track ${i}` }, startedAtMs, origin: 'lastfm' },
+          },
+        ],
+        now: startedAtMs,
+        random: enqueueRandom,
+      });
+      await w.run();
+      w.clock.advance(2 * SECOND);
+    }
+    expect(nowPlayingBoostCacheSize(w.app.db)).toBeGreaterThan(0);
+    w.clock.advance(NOW_PLAYING_PRIORITY_INTERVAL_MS);
+    await w.run();
+    expect(nowPlayingBoostCacheSize(w.app.db)).toBe(0);
+  });
+
+  it('a bounded expiry backlog keeps its one-second retry floor after the pass reschedules from current state', async () => {
+    const w = await world();
+    const link = w.linkLastfm(ALICE, 'expiry_backlog');
+    const ctx = w.app.composed.core.extensionTimers;
+    const start = w.clock.nowMs();
+    const old = start - LASTFM_EXPIRY_MS - 60 * MINUTE;
+    // More rows past the Last.fm age limit than one pass may expire.
+    enqueueForwards(w.app.db, {
+      did: ALICE,
+      linkId: link.id,
+      items: Array.from({ length: 200 }, (_, i) => ({
+        kind: 'scrobble' as const,
+        listenKey: `expiry-backlog-${i}`,
+        payload: {
+          listen: { artist: 'Old Artist', track: `Old ${i}`, listenedAt: new Date(old).toISOString() },
+          origin: 'lastfm',
+        },
+      })),
+      now: old,
+      random: enqueueRandom,
+    });
+    await forwardExtension(() => w.rt).timers!.forward!(start, ctx);
+    expect(w.rows(ALICE).filter((row) => row.state === 'expired').length).toBeGreaterThan(0);
+    expect(w.rows(ALICE).some((row) => row.state === 'queued')).toBe(true);
+    // Not an immediate re-run: the bounded-work floor holds.
+    const due = w.app.db.one<{ due_at: number }>("SELECT due_at FROM timers WHERE name='forward'")!.due_at;
+    expect(due).toBeGreaterThanOrEqual(start + SECOND);
   });
 
   it('love, unlove, love for one track forwards track.love, track.unlove, track.love in order, and the same track played as now playing twice 10 minutes apart is forwarded twice', async () => {

@@ -285,6 +285,7 @@ const updateNowPlayingMethod: LastfmMethodDef = {
     const t = mapped.track;
     const m = call.m;
     const now = m.clock.nowMs();
+    let enqueued = 0;
     m.db.tx(() => {
       const { row } = upsertNowPlaying(m, {
         did: caller.did,
@@ -298,7 +299,7 @@ const updateNowPlayingMethod: LastfmMethodDef = {
         client: caller.clientName,
         source: 'lastfm',
       });
-      enqueueForwards(m.db, {
+      enqueued = enqueueForwards(m.db, {
         did: caller.did,
         items: [
           {
@@ -325,6 +326,8 @@ const updateNowPlayingMethod: LastfmMethodDef = {
         random: m.random,
       });
     });
+    // Kick only when a row was actually queued (an eligible link, not a deduped refresh).
+    if (enqueued > 0) call.services.kickForward();
     return nowPlayingDocument(entry, 0);
   },
 };

@@ -38,6 +38,7 @@ import { requireSession, sessionErrorResponse, withSessionCookie } from '../bff/
 import { createWebSessions } from '../bff/sessions';
 import { authorizeToken, createAuthorizedToken, isValidApiKey } from '../credentials/lastfm-auth';
 import { createBox } from '../crypto/box';
+import { kickForwardDebounced } from '../forward/forward-kick';
 import { createLastfmAuthServices, type FailureLimits, lastfmServices } from '../lastfm/auth-methods';
 import type { Feature } from '../node/compose';
 import { errorResponse, toErrorResponse } from './error';
@@ -228,6 +229,9 @@ export function lastfmAuthFeature(options: LastfmAuthFeatureOptions): Feature {
           clock: deps.clock,
           kickOutbox: () => {
             core.extensionTimers.kick('outbox');
+          },
+          kickForward: () => {
+            kickForwardDebounced(core.extensionTimers);
           },
           ...(options.failureLimits !== undefined ? { failureLimits: options.failureLimits } : {}),
         }),
