@@ -91,7 +91,7 @@ it('evidence retained after the startup orphan scan does not keep rearming empty
   });
 });
 
-it('the per-reconciliation orphan check reads live evidence only before the first scan page', async () => {
+it('orphan discovery reads live evidence once at start-up and never on per-hint reconciliation', async () => {
   await withMigratedDb((db) => {
     recordLiveEvidence(
       db,
@@ -106,23 +106,36 @@ it('the per-reconciliation orphan check reads live evidence only before the firs
       },
       NOW,
     );
-    const evidenceReads = () =>
-      [...one.mock.calls, ...all.mock.calls].filter(([sql]) => String(sql).includes('live_record_evidence')).length;
     const one = vi.spyOn(db, 'one');
     const all = vi.spyOn(db, 'all');
+    const discoveryReads = () =>
+      [...one.mock.calls, ...all.mock.calls].filter(([sql]) => /FROM live_record_evidence e\b/.test(String(sql)))
+        .length;
 
-    // Before any drain of this instance the check has to ask the table once per call.
-    expect(orphanRecoveryPending(db, NOW)).toBe(true);
-    expect(evidenceReads()).toBe(1);
+    const fixture = indexCore(db);
+    fixture.core.start();
+    expect(discoveryReads()).toBe(1);
+    expect(db.one<{ due_at: number }>("SELECT due_at FROM timers WHERE name='drain'")?.due_at).toBe(NOW);
 
-    // A paged scan is under way: pending, answered from drain state alone.
+    // Hints keep arriving before the first drain (no drain state yet) and while it is in
+    // flight (state allocated, no committed cursor): the start-up answer holds, query-free.
+    for (let i = 0; i < 1000; i++) expect(orphanRecoveryPending(db)).toBe(true);
     const state = drainState(db, { concurrentFetches: 1, perHostConcurrency: 1 });
+    for (let i = 0; i < 1000; i++) expect(orphanRecoveryPending(db)).toBe(true);
+    // A paged scan under way, then a completed one.
     state.orphanCursor = URI;
-    for (let i = 0; i < 1000; i++) expect(orphanRecoveryPending(db, NOW)).toBe(true);
-    // The scan has covered every row: never pending again, still without a query.
+    for (let i = 0; i < 1000; i++) expect(orphanRecoveryPending(db)).toBe(true);
     state.orphanReconciled = true;
-    for (let i = 0; i < 1000; i++) expect(orphanRecoveryPending(db, NOW)).toBe(false);
-    expect(evidenceReads()).toBe(1);
-    expect(hasOrphanLiveEvidence(db, NOW)).toBe(true);
+    for (let i = 0; i < 1000; i++) expect(orphanRecoveryPending(db)).toBe(false);
+    expect(discoveryReads()).toBe(1);
+  });
+});
+
+it('a start-up without orphan evidence never arms orphan recovery', async () => {
+  await withMigratedDb((db) => {
+    const fixture = indexCore(db);
+    fixture.core.start();
+    expect(orphanRecoveryPending(db)).toBe(false);
+    expect(db.one("SELECT due_at FROM timers WHERE name='drain'")).toBeNull();
   });
 });

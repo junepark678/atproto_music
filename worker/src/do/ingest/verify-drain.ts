@@ -204,9 +204,10 @@ export function drainState(db: Db, budget: Pick<SliceBudget, 'concurrentFetches'
 }
 
 /**
- * Point the `drain` timer at the next due hint, no sooner than
- * DRAIN_MIN_INTERVAL_MS from now (the queue is the source of truth, so this
- * replaces whatever was stored), or cancel it when the queue is empty.
+ * Unexpired live evidence that has no hint and no walking snapshot of its
+ * repository: work the drain's orphan-recovery scan re-hints. A full anti-join
+ * over `live_record_evidence`, so it runs at start-up (`discoverOrphanRecovery`)
+ * and in tests, never on the per-hint reconciliation path.
  */
 export function hasOrphanLiveEvidence(db: Db, now: number): boolean {
   return (
@@ -220,30 +221,51 @@ export function hasOrphanLiveEvidence(db: Db, now: number): boolean {
   );
 }
 
+/** Start-up answers of `discoverOrphanRecovery`, per Db handle (a process restart or reopen starts afresh). */
+const orphanDiscovery = new WeakMap<Db, boolean>();
+
 /**
- * Whether this instance still owes its orphan-evidence recovery scan: orphaned
- * live evidence exists (`hasOrphanLiveEvidence`) and the drain's in-memory scan
- * has not yet covered every row. Once that scan completes, evidence it already
- * re-hinted and that stays retained afterwards (for example with a conflict
- * after its proof) must not keep arming empty drains until it expires.
- *
- * This runs on every timer reconciliation, including after each accepted
- * Jetstream hint, so it touches `live_record_evidence` only before this
- * instance's first scan page: a completed scan answers false and a paged scan
- * already under way answers true without a query.
+ * Start-up (IndexCore.start): ask the evidence table once whether this
+ * instance owes an orphan-recovery scan (ADR 0005 restore/restart: retained
+ * evidence with no hints, pending removals or drain timer must still be
+ * re-hinted before it expires). The answer is kept until the drain's scan
+ * commits, so per-hint reconciliation never repeats the query.
  */
-export function orphanRecoveryPending(db: Db, now: number): boolean {
+export function discoverOrphanRecovery(db: Db, now: number): boolean {
+  const pending = hasOrphanLiveEvidence(db, now);
+  orphanDiscovery.set(db, pending);
+  return pending;
+}
+
+/**
+ * Whether this instance still owes its orphan-evidence recovery scan, for the
+ * core lane's timer reconciliation. That reconciliation runs after every
+ * accepted Jetstream hint, so this never reads `live_record_evidence`:
+ * - a completed scan answers false, so evidence it already re-hinted and that
+ *   stays retained afterwards (for example with a conflict after its proof)
+ *   cannot keep arming empty drains until it expires;
+ * - a paged scan under way (a committed cursor) answers true;
+ * - before the scan's first page commits, the start-up discovery answers. A
+ *   failed drain transaction commits no cursor, so the answer stays and the
+ *   recovery is retried.
+ */
+export function orphanRecoveryPending(db: Db): boolean {
   const state = states.get(db);
   if (state?.orphanReconciled === true) return false;
   if (state !== undefined && state.orphanCursor !== null) return true;
-  return hasOrphanLiveEvidence(db, now);
+  return orphanDiscovery.get(db) === true;
 }
 
-export function scheduleDrainTimer(db: Db, now: number, orphanRecoveryPending = false): number | null {
+/**
+ * Point the `drain` timer at the next due hint, no sooner than
+ * DRAIN_MIN_INTERVAL_MS from now (the queue is the source of truth, so this
+ * replaces whatever was stored), or cancel it when the queue is empty.
+ */
+export function scheduleDrainTimer(db: Db, now: number, orphanScanUnfinished = false): number | null {
   const hintDue = nextHintDue(db);
   const pendingDue = nextPendingRemovalDue(db, now);
   const queued = hintDue === null ? pendingDue : pendingDue === null ? hintDue : Math.min(hintDue, pendingDue);
-  const next = orphanRecoveryPending ? (queued === null ? now : Math.min(now, queued)) : queued;
+  const next = orphanScanUnfinished ? (queued === null ? now : Math.min(now, queued)) : queued;
   if (next === null) {
     cancel(db, 'drain');
     return null;
