@@ -720,15 +720,7 @@ function processGroup(db: Db, group: PendingGroup, nowMs: number, random: Random
 
   const row = rows[0]!;
   const did = row.uri.slice(5).split('/', 1)[0]!;
-  const newerProjectedLove =
-    db.one(
-      `SELECT 1 FROM loves INDEXED BY loves_newer_by_track
-       WHERE did=? AND artist_key=? AND track_key=? AND revision>? LIMIT 1`,
-      did,
-      row.artist_key,
-      row.track_key,
-      group.authorized_rev,
-    ) !== null;
+  const newerProjectedLove = hasSameTrackLoveSurvivor(db, did, row.artist_key, row.track_key, group.authorized_rev);
   const currentIncarnation = db.one<{ incarnation_key: string; state: string }>(
     `SELECT incarnation_key,state FROM love_incarnations WHERE uri=?`,
     row.uri,
@@ -880,6 +872,26 @@ function processGroup(db: Db, group: PendingGroup, nowMs: number, random: Random
   }
   deleteGroup(db, group);
   return 0;
+}
+
+/** Unknown legacy revisions are conservatively treated as possible newer survivors. */
+export function hasSameTrackLoveSurvivor(
+  db: Db,
+  did: string,
+  artistKey: string,
+  trackKey: string,
+  authorizedRev: string,
+): boolean {
+  return (
+    db.one(
+      `SELECT 1 FROM loves INDEXED BY loves_newer_by_track
+       WHERE did=? AND artist_key=? AND track_key=? AND (revision IS NULL OR revision>?) LIMIT 1`,
+      did,
+      artistKey,
+      trackKey,
+      authorizedRev,
+    ) !== null
+  );
 }
 
 /** Process a bounded number of complete groups; every group is atomic, including all batch exclusions. */

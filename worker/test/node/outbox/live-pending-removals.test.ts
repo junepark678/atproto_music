@@ -8,6 +8,7 @@ import { LIVE_EVIDENCE_TTL_MS, readLiveEvidence, recordLiveEvidence } from '../.
 import {
   authorizePendingRemovals,
   executeAuthorizedRemovals,
+  hasSameTrackLoveSurvivor,
   type PendingRemovalInput,
   recordPendingRemoval,
   recordPendingRemovals,
@@ -751,67 +752,75 @@ it('delays love removal while preserving import exclusions, local re-love, and n
   });
 });
 
-it('does not enqueue a delayed event unlove when an older canonical love survives', async () => {
-  await withMigratedDb((db) => {
-    seedUser(db, DID);
-    setup(db);
-    const artist = 'Delayed Survivor Artist';
-    const track = 'Delayed Survivor Track';
-    const [artistKey, trackKeyValue] = trackKey(artist, track);
-    const survivorUri = `at://${DID}/com.example.atmusic.love/survivor`;
-    db.run(
-      `INSERT INTO loves(uri,did,rkey,cid,revision,artist,track,artist_key,track_key,created_at,indexed_at)
-       VALUES(?,?,?,'survivor-cid','1111111111111',?,?,?,?,?,?)`,
-      survivorUri,
-      DID,
-      'survivor',
-      artist,
-      track,
-      artistKey,
-      trackKeyValue,
-      toStorage(fromMs(NOW - 1_000)),
-      toStorage(fromMs(NOW - 1_000)),
-    );
-    const removedUri = `at://${DID}/com.example.atmusic.love/removed`;
-    recordPendingRemoval(db, {
-      did: DID,
-      uri: removedUri,
-      kind: 'love',
-      row: {
-        uri: removedUri,
-        record_uri: null,
-        listen_id: null,
-        cid: 'removed-cid',
-        listened_at: '',
-        artist_key: artistKey,
-        track_key: trackKeyValue,
+it.each([null, '3333333333333'] as const)(
+  'does not enqueue a delayed event unlove when a same-track love survives with revision %s',
+  async (survivorRevision) => {
+    await withMigratedDb((db) => {
+      seedUser(db, DID);
+      setup(db);
+      const artist = 'Delayed Survivor Artist';
+      const track = 'Delayed Survivor Track';
+      const [artistKey, trackKeyValue] = trackKey(artist, track);
+      const survivorUri = `at://${DID}/com.example.atmusic.love/survivor`;
+      db.run(
+        `INSERT INTO loves(uri,did,rkey,cid,revision,artist,track,artist_key,track_key,created_at,indexed_at)
+       VALUES(?,?,?,'survivor-cid',?,?,?,?,?,?,?)`,
+        survivorUri,
+        DID,
+        'survivor',
+        survivorRevision,
         artist,
         track,
-        recording_mbid: null,
-      },
-      identityKey: 'love:delayed-survivor-removed',
-      windowLo: '1111111111111',
-      windowHi: '2222222222222',
-      replacedByCid: null,
-      nowMs: NOW,
-    });
-    authorizePendingRemovals(db, { uri: removedUri, rev: '2222222222222', action: 'delete' }, NOW);
-    executeAuthorizedRemovals(db, { uri: removedUri, nowMs: NOW, random, limit: 1 });
-
-    expect(db.all("SELECT kind,state FROM forward_outbox WHERE kind='unlove'")).toEqual([]);
-    expect(
-      db.one(
-        'SELECT count(*) AS n FROM loves WHERE did=? AND artist_key=? AND track_key=?',
-        DID,
         artistKey,
         trackKeyValue,
-      ),
-    ).toEqual({ n: 1 });
-    expect(
-      db.one('SELECT count(*) AS n FROM forward_deferred_love_intents WHERE operation_id LIKE ?', '%delayed-survivor%'),
-    ).toEqual({ n: 0 });
-  });
-});
+        toStorage(fromMs(NOW - 1_000)),
+        toStorage(fromMs(NOW - 1_000)),
+      );
+      expect(hasSameTrackLoveSurvivor(db, DID, artistKey, trackKeyValue, '2222222222222')).toBe(true);
+      const removedUri = `at://${DID}/com.example.atmusic.love/removed`;
+      recordPendingRemoval(db, {
+        did: DID,
+        uri: removedUri,
+        kind: 'love',
+        row: {
+          uri: removedUri,
+          record_uri: null,
+          listen_id: null,
+          cid: 'removed-cid',
+          listened_at: '',
+          artist_key: artistKey,
+          track_key: trackKeyValue,
+          artist,
+          track,
+          recording_mbid: null,
+        },
+        identityKey: 'love:delayed-survivor-removed',
+        windowLo: '1111111111111',
+        windowHi: '2222222222222',
+        replacedByCid: null,
+        nowMs: NOW,
+      });
+      authorizePendingRemovals(db, { uri: removedUri, rev: '2222222222222', action: 'delete' }, NOW);
+      executeAuthorizedRemovals(db, { uri: removedUri, nowMs: NOW, random, limit: 1 });
+
+      expect(db.all("SELECT kind,state FROM forward_outbox WHERE kind='unlove'")).toEqual([]);
+      expect(
+        db.one(
+          'SELECT count(*) AS n FROM loves WHERE did=? AND artist_key=? AND track_key=?',
+          DID,
+          artistKey,
+          trackKeyValue,
+        ),
+      ).toEqual({ n: 1 });
+      expect(
+        db.one(
+          'SELECT count(*) AS n FROM forward_deferred_love_intents WHERE operation_id LIKE ?',
+          '%delayed-survivor%',
+        ),
+      ).toEqual({ n: 0 });
+    });
+  },
+);
 
 function pending(windowLo: string, windowHi: string, cid = 'same-cid'): PendingRemovalInput {
   const artistKey = 'artist-key';
@@ -1070,12 +1079,9 @@ it('expired unfinished authorization replay cannot authorize later windows', asy
     db.run('UPDATE live_pending_removal_events SET expires_at_ms=? WHERE uri=? AND rev=?', NOW - 1, URI, rev);
     recordPendingRemoval(db, pending('0000000000128', '3333333333333', 'after-expiry'));
     authorizePendingRemovals(db, { uri: URI, rev, action: 'delete' }, NOW);
-    expect(
-      db.one(
-        'SELECT authorized_rev FROM live_pending_removals WHERE window_lo=?',
-        '0000000000128',
-      ),
-    ).toEqual({ authorized_rev: null });
+    expect(db.one('SELECT authorized_rev FROM live_pending_removals WHERE window_lo=?', '0000000000128')).toEqual({
+      authorized_rev: null,
+    });
   });
 });
 
