@@ -773,6 +773,11 @@ export const LANE_FIRST_DUE_SQL = `SELECT priority,head_created_at_ms FROM forwa
 export const NOW_PLAYING_PRIORITY_INTERVAL_MS = 30_000;
 /** When each link's now playing last took the cross-link boost, per Db handle (in memory). */
 const nowPlayingBoostedAt = new WeakMap<Db, Map<string, number>>();
+
+/** TEST/DIAGNOSTIC: how many links the boost cooldown cache currently holds for `db`. */
+export function nowPlayingBoostCacheSize(db: Db): number {
+  return nowPlayingBoostedAt.get(db)?.size ?? 0;
+}
 /**
  * Server-wide bound on boosted Last.fm now playing, counted in turns rather
  * than time: whether the last Last.fm selection was a boost, per Db handle (in
@@ -799,6 +804,12 @@ function pickJob(rt: ForwardRuntime, now: number, localWork: Map<string, { remai
   if (boostedAt === undefined) {
     boostedAt = new Map();
     nowPlayingBoostedAt.set(rt.db, boostedAt);
+  }
+  // An entry older than the interval behaves exactly like a missing one, so
+  // drop it: the cache holds only links boosted in the last interval and
+  // cannot grow with links that were deleted (or recreated under a new id).
+  for (const [linkId, at] of boostedAt) {
+    if (now - at >= NOW_PLAYING_PRIORITY_INTERVAL_MS) boostedAt.delete(linkId);
   }
   const candidates: Array<{ link: LinkRow; priority: number; oldest: number; nowPlaying: boolean }> = [];
   for (const link of links) {

@@ -37,6 +37,8 @@ import {
   type ForwardRuntime,
   forwardExtension,
   KEY_REJECTED_PROBE_MS,
+  NOW_PLAYING_PRIORITY_INTERVAL_MS,
+  nowPlayingBoostCacheSize,
   runForward,
 } from '../../../src/forward/forwarder';
 import { LASTFM_CAPS, LastfmClient } from '../../../src/forward/lastfm-client';
@@ -1566,6 +1568,37 @@ describe('Last.fm forwarding', () => {
     // The pass's forced reschedule must not push it to the idle poll.
     const due = w.app.db.one<{ due_at: number }>("SELECT due_at FROM timers WHERE name='forward'")!.due_at;
     expect(due).toBeLessThanOrEqual(start + FORWARD_KICK_DEBOUNCE_MS);
+  });
+
+  it('the now-playing boost cooldown cache forgets links once their interval has passed', async () => {
+    const w = await world();
+    for (let i = 0; i < 6; i++) {
+      const did = `did:plc:${`cache${i}`.padEnd(24, 'x')}`;
+      ensureAccount({ db: w.app.db, clock: w.clock }, { did, verifiedHandle: null });
+      const link = w.linkLastfm(did, `cache_${i}`);
+      const startedAtMs = w.clock.nowMs();
+      enqueueForwards(w.app.db, {
+        did,
+        linkId: link.id,
+        items: [
+          {
+            kind: 'nowplaying',
+            startedAtMs,
+            artist: 'Artist',
+            track: `Track ${i}`,
+            payload: { track: { artist: 'Artist', track: `Track ${i}` }, startedAtMs, origin: 'lastfm' },
+          },
+        ],
+        now: startedAtMs,
+        random: enqueueRandom,
+      });
+      await w.run();
+      w.clock.advance(2 * SECOND);
+    }
+    expect(nowPlayingBoostCacheSize(w.app.db)).toBeGreaterThan(0);
+    w.clock.advance(NOW_PLAYING_PRIORITY_INTERVAL_MS);
+    await w.run();
+    expect(nowPlayingBoostCacheSize(w.app.db)).toBe(0);
   });
 
   it('love, unlove, love for one track forwards track.love, track.unlove, track.love in order, and the same track played as now playing twice 10 minutes apart is forwarded twice', async () => {
