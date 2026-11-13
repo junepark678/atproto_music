@@ -649,6 +649,37 @@ export async function removeScrobble(m: ModuleDeps, args: RemoveScrobbleArgs): P
     }
     return out;
   });
+  const admitRetryFallback = (snapshot: OperationRow | null, listenId: string): RemoveMatch | null => {
+    if (snapshot === null || snapshot.rkey === null) return null;
+    return m.db.tx(() => {
+      const current = loadOperation(m.db, snapshot.id);
+      const collection = current?.collection;
+      const rkey = current?.rkey;
+      if (
+        current === null ||
+        current.did !== args.did ||
+        current.kind !== 'scrobble.create' ||
+        collection !== collections.scrobbleBatch ||
+        rkey === null ||
+        rkey !== snapshot.rkey ||
+        current.record_json !== snapshot.record_json
+      )
+        return null;
+      const waiting = pendingDelete(m, args.did, collection, rkey, listenId);
+      if (waiting !== null) return { kind: 'delete_pending', uri: uriOf(current), deleteId: waiting };
+      if (alreadyRemoved(m, args.did, collection, rkey, listenId)) return null;
+      const fallback = removeScrobbleCreate(m, {
+        did: args.did,
+        operationId: current.id,
+        origin: 'lastfm',
+        listenId,
+      });
+      if (fallback.status === 'cancelled') return { kind: 'cancelled', operationId: current.id };
+      if (fallback.status === 'delete_chained')
+        return { kind: 'delete_chained', operationId: current.id, deleteId: fallback.delete.id };
+      return null;
+    });
+  };
   for (const operationId of staleBatchOperations) {
     // A sibling may have committed a rewrite after the initial lookup. Retry
     // against the current payload, with a fixed bound if writers keep racing.
@@ -687,27 +718,13 @@ export async function removeScrobble(m: ModuleDeps, args: RemoveScrobbleArgs): P
           tuple,
         });
         if (latestEntry !== null) {
-          const fallback = removeScrobbleCreate(m, {
-            did: args.did,
-            operationId,
-            origin: 'lastfm',
-            listenId: latestEntry,
-          });
-          if (fallback.status === 'cancelled') matches.push({ kind: 'cancelled', operationId });
-          else if (fallback.status === 'delete_chained')
-            matches.push({ kind: 'delete_chained', operationId, deleteId: fallback.delete.id });
+          const fallback = admitRetryFallback(after, latestEntry);
+          if (fallback !== null) matches.push(fallback);
         }
         break;
       }
-      const fallback = removeScrobbleCreate(m, {
-        did: args.did,
-        operationId,
-        origin: 'lastfm',
-        listenId: entryId,
-      });
-      if (fallback.status === 'cancelled') matches.push({ kind: 'cancelled', operationId });
-      else if (fallback.status === 'delete_chained')
-        matches.push({ kind: 'delete_chained', operationId, deleteId: fallback.delete.id });
+      const fallback = admitRetryFallback(current, entryId);
+      if (fallback !== null) matches.push(fallback);
       break;
     }
   }
