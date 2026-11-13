@@ -53,6 +53,7 @@ import type { ModuleDeps } from '../do/contracts';
 import type { Db } from '../do/db';
 import { admitForwardIdentity } from '../forward/projection';
 import { enqueueForwards } from '../outbox/forward-enqueue';
+import { forwardListenMetadata } from '../outbox/forward-payload';
 import { loveKeyOf } from '../outbox/love-ops';
 import {
   IMPORT_PRIORITY,
@@ -363,6 +364,7 @@ function forwardListen(record: Record<string, unknown>): Record<string, unknown>
     listenedAt: record.listenedAt,
     ...(typeof record.durationSeconds === 'number' ? { durationSeconds: record.durationSeconds } : {}),
     ...(typeof record.recordingMbid === 'string' ? { recordingMbid: record.recordingMbid } : {}),
+    ...forwardListenMetadata(record),
   };
 }
 type Settled =

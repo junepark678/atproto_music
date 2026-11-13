@@ -4,7 +4,7 @@ import type { Db } from '../../../src/do/db';
 import { recordLiveEvidence } from '../../../src/do/ingest/live-evidence';
 import { applyRecordProof } from '../../../src/do/write/apply-record';
 import { applySnapshotChunk } from '../../../src/do/write/apply-snapshot';
-import { payloadForHistoryRow, runLinkBackfill } from '../../../src/forward/backfill';
+import { payloadForHistoryRow, runLinkBackfill, scrobbleHistoryRow } from '../../../src/forward/backfill';
 import { lateAccept } from '../../../src/forward/live-acceptance';
 import {
   ALICE,
@@ -502,3 +502,79 @@ it.each(['scrobble', 'love'] as const)(
     });
   },
 );
+
+it('a promoted scrobble carries the same validated metadata as its history backfill payload', async () => {
+  const repo = await repoFor('alice');
+  const initial = fixtureScrobble('r02');
+  const first = present(await putProof(repo, SCROBBLE, 'metadata', initial));
+  const second = present(await putProof(repo, SCROBBLE, 'metadata', { ...initial, album: 'Metadata only' }));
+  await withMigratedDb((db) => {
+    const generation = seedUser(db, ALICE);
+    db.run(
+      `INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,created_at_ms,updated_at_ms)
+      VALUES('metadata-link',?,'listenbrainz','remote',X'00','fixture',?,?)`,
+      ALICE,
+      NOW_MS,
+      NOW_MS,
+    );
+    seedSnapshotJob(db, ALICE, generation);
+    db.run('UPDATE users SET last_snapshot_at_ms=? WHERE did=?', NOW_MS - 1000, ALICE);
+    for (const proof of [first, second]) {
+      db.tx(() =>
+        applyRecordProof(db, proof, {
+          prefix: PREFIX,
+          receiptNs: NOW_NS,
+          nowNs: NOW_NS,
+          liveCandidates: true,
+          live: { random, evidence: null, legacyRev: null },
+        }),
+      );
+    }
+    const uri = `at://${ALICE}/${SCROBBLE}/metadata`;
+    db.run(
+      `UPDATE scrobbles SET album_artist=?,track_number=?,artist_mbids=?,release_mbid=?,release_group_mbid=?,
+       isrc=?,submission_client=?,music_service=? WHERE uri=?`,
+      'Promotion Album Artist',
+      4,
+      '["00000000-0000-4000-8000-000000000011"]',
+      '00000000-0000-4000-8000-000000000012',
+      '00000000-0000-4000-8000-000000000013',
+      'USXYZ7654321',
+      'Pano',
+      'Radio',
+      uri,
+    );
+    expect(
+      db.tx(() =>
+        lateAccept(db, {
+          uri,
+          did: ALICE,
+          collection: SCROBBLE,
+          rkey: 'metadata',
+          evidence: event(second, 'update'),
+          nowMs: NOW_MS + 1000,
+          random,
+        }),
+      ),
+    ).toBe(1);
+    const queued = JSON.parse(
+      db.one<{ payload_json: string }>('SELECT payload_json FROM forward_outbox')!.payload_json,
+    );
+    expect(queued.listen).toMatchObject({
+      albumArtist: 'Promotion Album Artist',
+      trackNumber: 4,
+      artistMbids: ['00000000-0000-4000-8000-000000000011'],
+      releaseMbid: '00000000-0000-4000-8000-000000000012',
+      releaseGroupMbid: '00000000-0000-4000-8000-000000000013',
+      isrc: 'USXYZ7654321',
+      submissionClient: 'Pano',
+      musicService: 'Radio',
+    });
+    const link = db.one<Parameters<typeof payloadForHistoryRow>[1]>(
+      "SELECT * FROM linked_accounts WHERE id='metadata-link'",
+    )!;
+    const identity = db.one<{ identity_key: string }>('SELECT identity_key FROM forward_admissions LIMIT 1')!;
+    const history = scrobbleHistoryRow(db, ALICE, uri)!;
+    expect(queued).toEqual(payloadForHistoryRow(db, link, history, identity.identity_key)!.payload);
+  });
+});

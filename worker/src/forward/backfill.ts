@@ -9,6 +9,7 @@ import type { Db } from '../do/db';
 import { LOVE_IMPORT_SOURCE_CLASS_SQL } from '../do/schema';
 import { matchedRecordingMbid } from '../musicbrainz/store';
 import { enqueueForwards } from '../outbox/forward-enqueue';
+import { forwardListenMetadata } from '../outbox/forward-payload';
 import { closeOpenLinkGap, ownsAdmissionInGap } from './coverage';
 import type { ForwardRuntime } from './forwarder';
 import { runLoveApiMaintenance } from './love-api-scheduler';
@@ -101,13 +102,22 @@ export type HistoryRow = {
   track_key: string;
   album_key: string | null;
   listened_at: string | null;
+  album_artist?: string | null;
+  track_number?: number | null;
+  artist_mbids?: string | null;
+  release_mbid?: string | null;
+  release_group_mbid?: string | null;
+  isrc?: string | null;
+  submission_client?: string | null;
+  music_service?: string | null;
 };
 
 // Keep live promotion and history backfill on the same canonical scrobble
 // projection. The album fields are payload inputs: omitting them can select a
 // different album-specific MusicBrainz recording for the same listen.
 const SCROBBLE_HISTORY_PROJECTION = `s.uri,s.cid,s.listened_at AS event_at,s.artist,s.track,s.album,
-  s.recording_mbid,s.artist_key,s.track_key,s.album_key,s.listened_at`;
+  s.recording_mbid,s.artist_key,s.track_key,s.album_key,s.listened_at,
+  s.album_artist,s.track_number,s.artist_mbids,s.release_mbid,s.release_group_mbid,s.isrc,s.submission_client,s.music_service`;
 
 export function scrobbleHistoryRow(db: Db, did: string, uri: string): HistoryRow | null {
   return db.one<HistoryRow>(
@@ -301,6 +311,7 @@ export function payloadForHistoryRow(
           listenedAt,
           ...(row.album ? { album: row.album } : {}),
           ...(mbid ? { recordingMbid: mbid } : {}),
+          ...forwardListenMetadata(row),
         },
         origin: 'backfill',
       },
@@ -364,7 +375,8 @@ function validateCurrentCandidate(
   if (candidate.kind === 'scrobble') {
     const current = db.one<HistoryRow>(
       `SELECT 'scrobble' AS kind,uri,cid,listened_at AS event_at,artist,track,album,recording_mbid,
-              artist_key,track_key,album_key,listened_at
+              artist_key,track_key,album_key,listened_at,
+              album_artist,track_number,artist_mbids,release_mbid,release_group_mbid,isrc,submission_client,music_service
        FROM scrobbles WHERE uri=? AND did=? AND cid=?`,
       candidate.uri,
       link.did,

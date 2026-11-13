@@ -72,6 +72,7 @@ import {
 } from '../../forward/projection';
 import { enqueueTrack } from '../../musicbrainz/store';
 import { enqueueForwards, enqueueLiveUnlove } from '../../outbox/forward-enqueue';
+import { forwardListenMetadata } from '../../outbox/forward-payload';
 import { pullLoveAdmissionForUri, retirePullLoveAdmissionUri } from '../../sync/pull-love-admissions';
 import { archiveMatchingLiveListenTombstones, hasListenRemovalTombstones, tombstoneLove } from '../../sync/tombstones';
 import type { Db } from '../db';
@@ -584,6 +585,7 @@ function scrobbleVerdict(
                   listenedAt: row.listenedAt,
                   durationSeconds: row.durationSeconds ?? undefined,
                   recordingMbid: row.recordingMbid ?? undefined,
+                  ...forwardListenMetadata(fields as unknown as Record<string, unknown>),
                 },
                 origin: 'web',
               },
