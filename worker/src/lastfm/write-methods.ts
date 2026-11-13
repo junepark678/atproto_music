@@ -66,6 +66,7 @@ import type { ModuleDeps } from '../do/contracts';
 import { upsertNowPlaying } from '../do/read/now-playing';
 import { visibleScrobblesFrom } from '../do/read/visibility';
 import { musicKeyColumns } from '../do/write/keys';
+import { batchMemberForListenKey } from '../imports/batch-acceptance';
 import {
   commitUnsentBatchListenRemoval,
   enqueueBatchListenDelete,
@@ -484,18 +485,35 @@ export async function removeScrobble(m: ModuleDeps, args: RemoveScrobbleArgs): P
   const lower = toStorage(BigInt(args.timestamp) * NS_PER_SECOND);
   const upper = toStorage(BigInt(args.timestamp + 1) * NS_PER_SECOND);
   const unsentBatchPlans = new Map<string, NonNullable<Awaited<ReturnType<typeof prepareUnsentBatchListenRemoval>>>>();
+  const batchMembers = new Map<string, { entryId: string; recordJson: string | null }>();
+  const staleBatchOperations = new Set<string>();
+  const tuple = {
+    artistKey: keys.artist_key,
+    trackKey: keys.track_key,
+    listenedSecond: BigInt(args.timestamp),
+  };
   for (const operationId of createsWithKey(m, args.did, key)) {
     const candidate = loadOperation(m.db, operationId);
     if (candidate?.collection !== collections.scrobbleBatch) continue;
-    const entryId = m.db.one<{ entry_id: string }>(
-      `SELECT b.entry_id FROM batch_entry_items b JOIN import_items i
-         ON i.job_id=b.job_id AND i.seq=b.seq
-       WHERE b.operation_id=? AND i.dedupe_key=? LIMIT 1`,
-      candidate.id,
-      key,
-    )?.entry_id;
-    if (entryId === undefined) continue;
-    const plan = await prepareUnsentBatchListenRemoval(m, { did: args.did, operationId, listenId: entryId });
+    const entryId = await batchMemberForListenKey(m, {
+      did: args.did,
+      recordJson: candidate.record_json,
+      listenKey: key,
+      tuple: {
+        artistKey: keys.artist_key,
+        trackKey: keys.track_key,
+        listenedSecond: BigInt(args.timestamp),
+      },
+    });
+    if (entryId === null) continue;
+    batchMembers.set(operationId, { entryId, recordJson: candidate.record_json });
+    const plan = await prepareUnsentBatchListenRemoval(m, {
+      did: args.did,
+      operationId,
+      listenId: entryId,
+      listenKey: key,
+      tuple,
+    });
     if (plan !== null) unsentBatchPlans.set(operationId, plan);
   }
   const matches = m.db.tx((): RemoveMatch[] => {
@@ -561,14 +579,15 @@ export async function removeScrobble(m: ModuleDeps, args: RemoveScrobbleArgs): P
       handled.add(uri);
       const batchEntry =
         op.collection === collections.scrobbleBatch
-          ? m.db.one<{ entry_id: string }>(
-              `SELECT b.entry_id FROM batch_entry_items b JOIN import_items i
-            ON i.job_id=b.job_id AND i.seq=b.seq WHERE b.operation_id=? AND i.dedupe_key=? LIMIT 1`,
-              op.id,
-              key,
-            )?.entry_id
+          ? (() => {
+              const member = batchMembers.get(op.id);
+              return member !== undefined && member.recordJson === op.record_json ? member.entryId : undefined;
+            })()
           : undefined;
-      if (op.collection === collections.scrobbleBatch && batchEntry === undefined) continue;
+      if (op.collection === collections.scrobbleBatch && batchEntry === undefined) {
+        if (batchMembers.has(op.id)) staleBatchOperations.add(op.id);
+        continue;
+      }
       const waiting = pendingDelete(m, args.did, op.collection, op.rkey, batchEntry);
       if (waiting !== null) {
         out.push({ kind: 'delete_pending', uri, deleteId: waiting });
@@ -576,8 +595,13 @@ export async function removeScrobble(m: ModuleDeps, args: RemoveScrobbleArgs): P
       }
       if (alreadyRemoved(m, args.did, op.collection, op.rkey, batchEntry)) continue;
       const plan = unsentBatchPlans.get(op.id);
-      if (plan !== undefined && commitUnsentBatchListenRemoval(m, plan) !== null) {
-        out.push({ kind: 'rewritten', operationId: op.id });
+      const batchRemoval = plan === undefined ? null : commitUnsentBatchListenRemoval(m, plan);
+      if (batchRemoval !== null) {
+        out.push({ kind: batchRemoval.state === 'cancelled' ? 'cancelled' : 'rewritten', operationId: op.id });
+        continue;
+      }
+      if (plan !== undefined && loadOperation(m.db, op.id)?.record_json !== plan.snapshot.record_json) {
+        staleBatchOperations.add(op.id);
         continue;
       }
       const removed = removeScrobbleCreate(m, {
@@ -625,6 +649,85 @@ export async function removeScrobble(m: ModuleDeps, args: RemoveScrobbleArgs): P
     }
     return out;
   });
+  const admitRetryFallback = (snapshot: OperationRow | null, listenId: string): RemoveMatch | null => {
+    if (snapshot === null || snapshot.rkey === null) return null;
+    return m.db.tx(() => {
+      const current = loadOperation(m.db, snapshot.id);
+      const collection = current?.collection;
+      const rkey = current?.rkey;
+      if (
+        current === null ||
+        current.did !== args.did ||
+        current.kind !== 'scrobble.create' ||
+        collection !== collections.scrobbleBatch ||
+        rkey === null ||
+        rkey !== snapshot.rkey ||
+        current.record_json !== snapshot.record_json
+      )
+        return null;
+      const waiting = pendingDelete(m, args.did, collection, rkey, listenId);
+      if (waiting !== null) return { kind: 'delete_pending', uri: uriOf(current), deleteId: waiting };
+      if (alreadyRemoved(m, args.did, collection, rkey, listenId)) return null;
+      const fallback = removeScrobbleCreate(m, {
+        did: args.did,
+        operationId: current.id,
+        origin: 'lastfm',
+        listenId,
+      });
+      if (fallback.status === 'cancelled') return { kind: 'cancelled', operationId: current.id };
+      if (fallback.status === 'delete_chained')
+        return { kind: 'delete_chained', operationId: current.id, deleteId: fallback.delete.id };
+      return null;
+    });
+  };
+  for (const operationId of staleBatchOperations) {
+    // A sibling may have committed a rewrite after the initial lookup. Retry
+    // against the current payload, with a fixed bound if writers keep racing.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const current = loadOperation(m.db, operationId);
+      if (current === null || current.collection !== collections.scrobbleBatch || current.rkey === null) break;
+      const entryId = await batchMemberForListenKey(m, {
+        did: args.did,
+        recordJson: current.record_json,
+        listenKey: key,
+        tuple,
+      });
+      if (entryId === null) break;
+      const plan = await prepareUnsentBatchListenRemoval(m, {
+        did: args.did,
+        operationId,
+        listenId: entryId,
+        listenKey: key,
+        tuple,
+      });
+      const removed = plan === null ? null : commitUnsentBatchListenRemoval(m, plan);
+      if (removed !== null) {
+        matches.push({ kind: removed.state === 'cancelled' ? 'cancelled' : 'rewritten', operationId });
+        break;
+      }
+      const after = loadOperation(m.db, operationId);
+      if (after?.record_json !== current.record_json) {
+        if (attempt < 2) continue;
+        // Keep the request durable if the bounded optimistic retries were
+        // repeatedly overtaken: resolve once more, then admit an exact-member
+        // delete through the synchronous removal transaction.
+        const latestEntry = await batchMemberForListenKey(m, {
+          did: args.did,
+          recordJson: after?.record_json ?? null,
+          listenKey: key,
+          tuple,
+        });
+        if (latestEntry !== null) {
+          const fallback = admitRetryFallback(after, latestEntry);
+          if (fallback !== null) matches.push(fallback);
+        }
+        break;
+      }
+      const fallback = admitRetryFallback(current, entryId);
+      if (fallback !== null) matches.push(fallback);
+      break;
+    }
+  }
   if (matches.some((match) => match.kind !== 'delete_pending')) args.kick?.();
   return matches;
 }

@@ -1,11 +1,15 @@
+import { floorSeconds } from '@atmusic/core/listen-key';
 import { trackKey } from '@atmusic/core/music-key';
 import { isTid } from '@atmusic/core/syntax';
+import { parseRfc3339 } from '@atmusic/core/timestamp';
 import type { OperationRow, Origin } from '../app/rows';
 import type { ModuleDeps } from '../do/contracts';
 import type { Db } from '../do/db';
 import { bumpStatsVersion } from '../do/write/account-state';
+import { musicKeyColumns } from '../do/write/keys';
 import { enqueueListenDelete } from '../forward/delete-enqueue';
 import { projectionListenKey, releaseForwardAdmission } from '../forward/projection';
+import { batchMemberForListenKey } from '../imports/batch-acceptance';
 import { tombstoneListen } from '../sync/tombstones';
 import { deleteQueuedForwardIdentity } from './forward-key';
 import {
@@ -83,6 +87,7 @@ function selectedIn(listens: readonly unknown[], wanted: ReadonlySet<string>): b
 export interface BatchListenRemovalPlan {
   operationId: string;
   listenId: string;
+  listenKey: string;
   snapshot: Pick<
     OperationRow,
     | 'did'
@@ -104,9 +109,15 @@ export interface BatchListenRemovalPlan {
 /** Prepare a never-sent import batch edit outside a transaction. */
 export async function prepareUnsentBatchListenRemoval(
   m: ModuleDeps,
-  args: { did: string; operationId: string; listenId: string },
+  args: {
+    did: string;
+    operationId: string;
+    listenId: string;
+    listenKey?: string;
+    tuple?: { artistKey: string; trackKey: string; listenedSecond: bigint };
+  },
 ): Promise<BatchListenRemovalPlan | null> {
-  const op = m.db.one<OperationRow>('SELECT * FROM operations WHERE id = ?', args.operationId);
+  let op = m.db.one<OperationRow>('SELECT * FROM operations WHERE id = ?', args.operationId);
   if (
     op === null ||
     op.did !== args.did ||
@@ -140,6 +151,20 @@ export async function prepareUnsentBatchListenRemoval(
     (entry) => entry !== null && typeof entry === 'object' && (entry as { id?: unknown }).id === args.listenId,
   );
   if (matches.length !== 1) return null;
+  const selected = matches[0] as { artist?: unknown; track?: unknown; listenedAt?: unknown };
+  const listenedNs = typeof selected.listenedAt === 'string' ? parseRfc3339(selected.listenedAt) : null;
+  if (listenedNs === null || typeof selected.artist !== 'string' || typeof selected.track !== 'string') return null;
+  let selectedKeys: ReturnType<typeof musicKeyColumns>;
+  try {
+    selectedKeys = musicKeyColumns(selected.artist, selected.track, null);
+  } catch {
+    return null;
+  }
+  const tuple = args.tuple ?? {
+    artistKey: selectedKeys.artist_key,
+    trackKey: selectedKeys.track_key,
+    listenedSecond: floorSeconds(listenedNs),
+  };
   const mapped = m.db.all<{ job_id: string; seq: number; dedupe_key: string }>(
     `SELECT i.job_id,i.seq,i.dedupe_key FROM batch_entry_items b JOIN import_items i
        ON i.job_id=b.job_id AND i.seq=b.seq
@@ -148,7 +173,43 @@ export async function prepareUnsentBatchListenRemoval(
     args.listenId,
     op.id,
   );
-  if (mapped.length === 0) return null;
+  const listenKey = args.listenKey ?? mapped[0]?.dedupe_key;
+  if (listenKey === undefined) return null;
+  if (mapped.some((member) => member.dedupe_key !== listenKey)) return null;
+  const validatedMember = await batchMemberForListenKey(m, {
+    did: args.did,
+    recordJson: op.record_json,
+    listenKey,
+    tuple,
+  });
+  if (validatedMember !== args.listenId) return null;
+  const current = m.db.one<OperationRow>('SELECT * FROM operations WHERE id = ?', args.operationId);
+  if (
+    current === null ||
+    current.did !== op.did ||
+    current.kind !== op.kind ||
+    current.origin !== op.origin ||
+    current.collection !== op.collection ||
+    current.rkey !== op.rkey ||
+    current.state !== op.state ||
+    current.attempts !== op.attempts ||
+    current.send_started_at_ms !== op.send_started_at_ms ||
+    current.record_json !== op.record_json ||
+    current.digest !== op.digest ||
+    current.updated_at_ms !== op.updated_at_ms
+  )
+    return null;
+  op = current;
+  if (
+    mapped.length === 0 &&
+    m.db.one(
+      'SELECT 1 AS hit FROM listen_keys WHERE did=? AND operation_id=? AND dedupe_key=?',
+      args.did,
+      op.id,
+      listenKey,
+    ) === null
+  )
+    return null;
   const listens = record.listens.filter(
     (entry) => !(entry !== null && typeof entry === 'object' && (entry as { id?: unknown }).id === args.listenId),
   );
@@ -156,6 +217,7 @@ export async function prepareUnsentBatchListenRemoval(
   return {
     operationId: op.id,
     listenId: args.listenId,
+    listenKey,
     snapshot: {
       did: op.did,
       kind: op.kind,
@@ -215,8 +277,17 @@ export function commitUnsentBatchListenRemoval(m: ModuleDeps, plan: BatchListenR
       plan.listenId,
       op.id,
     );
+    const pullReceipt =
+      plan.members.length === 0 &&
+      actual.length === 0 &&
+      m.db.one(
+        'SELECT 1 AS hit FROM listen_keys WHERE did=? AND operation_id=? AND dedupe_key=?',
+        op.did,
+        op.id,
+        plan.listenKey,
+      ) !== null;
     if (
-      actual.length !== plan.members.length ||
+      (plan.members.length === 0 ? !pullReceipt : actual.length !== plan.members.length) ||
       actual.some(
         (member) =>
           !plan.members.some(
@@ -264,6 +335,16 @@ export function commitUnsentBatchListenRemoval(m: ModuleDeps, plan: BatchListenR
       );
       deleteQueuedForwardIdentity(m.db, op.did, ['scrobble'], member.dedupe_key);
       releaseForwardAdmission(m.db, op.did, member.dedupe_key);
+    }
+    if (pullReceipt) {
+      m.db.run(
+        'DELETE FROM listen_keys WHERE did=? AND operation_id=? AND dedupe_key=?',
+        op.did,
+        op.id,
+        plan.listenKey,
+      );
+      deleteQueuedForwardIdentity(m.db, op.did, ['scrobble'], plan.listenKey);
+      releaseForwardAdmission(m.db, op.did, plan.listenKey);
     }
     if (plan.replacement === null) {
       if (
