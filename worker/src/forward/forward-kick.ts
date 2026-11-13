@@ -18,15 +18,22 @@ const lastKickDue = new WeakMap<ExtensionContext, number>();
 
 /**
  * Makes the forward timer due now, or at the end of the debounce interval.
- * A kick already scheduled ahead of now covers this one (its pass picks up
- * every row queued by then), so a burst cannot push the due time further out.
- * Returns the due time this kick relies on.
+ * While a kick is pending (its due time is still ahead), this kick re-asserts
+ * that same due time instead of a later one, so a burst cannot push the timer
+ * further out. Re-asserting matters: a forwarding pass may have consumed the
+ * timer and rescheduled it later (its idle poll) in the meantime, and
+ * `schedule` only ever pulls a timer earlier, so this restores the pending due
+ * time without delaying an earlier one. Returns the due time this kick relies on.
  */
 export function kickForwardDebounced(timers: ExtensionContext): number {
   const now = timers.deps.clock.nowMs();
   const last = lastKickDue.get(timers);
-  if (last !== undefined && last > now) return last;
-  const due = last === undefined || now - last >= FORWARD_KICK_DEBOUNCE_MS ? now : last + FORWARD_KICK_DEBOUNCE_MS;
+  const due =
+    last !== undefined && last > now
+      ? last
+      : last === undefined || now - last >= FORWARD_KICK_DEBOUNCE_MS
+        ? now
+        : last + FORWARD_KICK_DEBOUNCE_MS;
   lastKickDue.set(timers, due);
   timers.schedule('forward', due);
   return due;
