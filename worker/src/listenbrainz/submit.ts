@@ -318,21 +318,21 @@ async function playingNow(
       });
       if (stored.outcome !== 'stored') return;
       const startedAtMs = stored.row.started_at_ms;
-      enqueueForwards(m.db, {
-        did,
-        items: [
-          {
-            kind: 'nowplaying',
-            startedAtMs,
-            artist: track.artist,
-            track: track.track,
-            payload: { track, startedAtMs, origin: 'listenbrainz' },
-          },
-        ],
-        now,
-        random: m.random,
-      });
-      enqueued = true;
+      enqueued =
+        enqueueForwards(m.db, {
+          did,
+          items: [
+            {
+              kind: 'nowplaying',
+              startedAtMs,
+              artist: track.artist,
+              track: track.track,
+              payload: { track, startedAtMs, origin: 'listenbrainz' },
+            },
+          ],
+          now,
+          random: m.random,
+        }) > 0;
     });
   }
   if (enqueued) kickForward(ctx);
