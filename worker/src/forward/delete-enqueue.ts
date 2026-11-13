@@ -54,7 +54,43 @@ export function hasCanonicalListenSurvivor(
       args.artistKey,
       args.trackKey,
     );
-    return removal === null;
+    if (removal !== null) return false;
+    // Match the unsettled record/member overlay used by visibleScrobblesFrom.
+    // A CID-changing metadata edit does not turn a still-pending API removal
+    // into a surviving canonical listen. Keep this scoped to removal intents;
+    // account suppression and other visibility rules are not removal intent.
+    const pendingOperation = db.one(
+      `SELECT 1 FROM operations d
+       WHERE d.did=? AND d.rkey=(SELECT s.rkey FROM scrobbles s WHERE s.did=? AND s.uri=?)
+         AND d.collection=substr(?, length('at://' || ? || '/') + 1,
+           instr(substr(?, length('at://' || ? || '/') + 1), '/') - 1)
+         AND d.kind='scrobble.delete' AND d.state IN ('queued','running','blocked','failed')
+         AND (NOT EXISTS (SELECT 1 FROM batch_delete_listens bd WHERE bd.operation_id=d.id)
+           OR EXISTS (SELECT 1 FROM batch_delete_listens bd WHERE bd.operation_id=d.id
+             AND (bd.listen_id='*' OR bd.listen_id=(SELECT s.listen_id FROM scrobbles s WHERE s.did=? AND s.uri=?))))
+         LIMIT 1`,
+      args.did,
+      args.did,
+      row.uri,
+      row.uri,
+      args.did,
+      row.uri,
+      args.did,
+      args.did,
+      row.uri,
+    );
+    const pendingListenRemoval = db.one(
+      `SELECT 1 FROM listen_removals lr LEFT JOIN operations ro ON ro.id=lr.operation_id
+       WHERE lr.did=? AND lr.record_uri=(SELECT s.record_uri FROM scrobbles s WHERE s.did=? AND s.uri=?)
+         AND (lr.listen_id=(SELECT s.listen_id FROM scrobbles s WHERE s.did=? AND s.uri=?) OR lr.listen_id='*')
+         AND (ro.id IS NULL OR ro.state IN ('queued','running','blocked','failed')) LIMIT 1`,
+      args.did,
+      args.did,
+      row.uri,
+      args.did,
+      row.uri,
+    );
+    return pendingOperation === null && pendingListenRemoval === null;
   });
 }
 

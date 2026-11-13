@@ -539,6 +539,42 @@ it('two outstanding removals do not suppress the final deletion', async () => {
     expect(await drain(db)).toMatchObject({ deletes: 1 });
   });
 });
+it.each(['queued', 'failed'] as const)(
+  'pending API removal remains authoritative across a CID-only metadata edit (%s)',
+  async (state) => {
+    const repo = await repoFor('alice');
+    const first = await putProof(repo, SCROBBLE, 'a', record);
+    const edited = await putProof(repo, SCROBBLE, 'a', { ...record, album: 'Updated album' });
+    await withMigratedDb((db) => {
+      seedLink(db);
+      expect(db.tx(() => applyRecordProof(db, first, OPTS)).outcome).toBe('applied');
+      delivered(db);
+      apiSingle(db, 'a');
+      db.run("UPDATE operations SET state=? WHERE kind='scrobble.delete'", state);
+      expect(db.tx(() => applyRecordProof(db, edited, OPTS)).outcome).toBe('applied');
+      expect(db.all(`SELECT s.uri FROM ${visibleScrobblesFrom()}`)).toHaveLength(0);
+      expect(hasCanonicalListenSurvivor(db, deletion)).toBe(false);
+    });
+  },
+);
+it('pending batch-member removal remains authoritative across a CID-only metadata edit', async () => {
+  const repo = await repoFor('alice');
+  const first = await putProof(repo, BATCH, 'batch-cid-edit', batchRecord(['2222222222222']));
+  const before = batchRecord(['2222222222222']);
+  const edited = await putProof(repo, BATCH, 'batch-cid-edit', {
+    ...before,
+    listens: before.listens.map((listen) => ({ ...listen, album: 'Updated' })),
+  });
+  await withMigratedDb((db) => {
+    seedLink(db);
+    expect(db.tx(() => applyRecordProof(db, first, OPTS)).outcome).toBe('applied');
+    apiBatch(db, 'batch-cid-edit', ['2222222222222']);
+    db.run("UPDATE operations SET state='failed' WHERE kind='scrobble.delete'");
+    expect(db.tx(() => applyRecordProof(db, edited, OPTS)).outcome).toBe('applied');
+    expect(db.all(`SELECT s.uri FROM ${visibleScrobblesFrom()}`)).toHaveLength(0);
+    expect(hasCanonicalListenSurvivor(db, deletion)).toBe(false);
+  });
+});
 it.each(['api-full', 'live-full'])(
   'full batch removes duplicate canonical members with exactly one dispatch: %s',
   async (mode) => {
