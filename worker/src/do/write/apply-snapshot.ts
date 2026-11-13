@@ -100,6 +100,8 @@ export interface SnapshotChunk {
   did: string;
   generation: number;
   headRev: string;
+  /** Verified head before this walk; missing/unknown floors fail closed for live authority. */
+  raceFloorRev?: string | null;
   /** Exclusive lower key bound; null for the start of the range. */
   intervalLo: string | null;
   /** Inclusive upper key bound. */
@@ -188,7 +190,9 @@ function reaffirm(
       receiptNs: c.receiptNs,
       prefix: c.prefix,
       nowNs: c.nowNs,
-      ...(c.random ? { live: { random: c.random, evidence, legacyRev: null }, liveCandidates: true } : {}),
+      ...(c.random
+        ? { live: { random: c.random, evidence, legacyRev: null, raceFloorRev: c.raceFloorRev }, liveCandidates: true }
+        : {}),
     });
     if (c.random)
       lateAccept(db, {
@@ -197,6 +201,7 @@ function reaffirm(
         collection,
         rkey,
         evidence,
+        raceFloorRev: c.raceFloorRev ?? null,
         nowMs: Number(c.nowNs / 1_000_000n),
         random: c.random,
       });
@@ -310,6 +315,7 @@ export function applySnapshotChunk(db: Db, c: SnapshotChunk): ChunkResult {
           collection,
           rkey,
           evidence,
+          raceFloorRev: c.raceFloorRev ?? null,
           nowMs: Number(c.nowNs / 1_000_000n),
           random: c.random,
         });
@@ -331,6 +337,7 @@ export function applySnapshotChunk(db: Db, c: SnapshotChunk): ChunkResult {
           collection,
           rkey,
           evidence,
+          raceFloorRev: c.raceFloorRev ?? null,
           nowMs: Number(c.nowNs / 1_000_000n),
           random: c.random,
         });
@@ -353,7 +360,12 @@ export function applySnapshotChunk(db: Db, c: SnapshotChunk): ChunkResult {
         { ...target, kind, collection, uri },
         {
           ...o,
-          ...(c.random ? { live: { random: c.random, evidence, legacyRev: null }, liveCandidates: canCandidate } : {}),
+          ...(c.random
+            ? {
+                live: { random: c.random, evidence, legacyRev: null, raceFloorRev: c.raceFloorRev },
+                liveCandidates: canCandidate,
+              }
+            : {}),
         },
       );
       if (c.random)
@@ -363,6 +375,7 @@ export function applySnapshotChunk(db: Db, c: SnapshotChunk): ChunkResult {
           collection,
           rkey,
           evidence,
+          raceFloorRev: c.raceFloorRev ?? null,
           nowMs: Number(c.nowNs / 1_000_000n),
           random: c.random,
         });
@@ -427,7 +440,12 @@ export function applySnapshotChunk(db: Db, c: SnapshotChunk): ChunkResult {
         { did: c.did, kind, collection, rkey, uri, rev: c.headRev, present: null },
         {
           ...o,
-          ...(c.random ? { live: { random: c.random, evidence, legacyRev: null }, liveCandidates: canCandidate } : {}),
+          ...(c.random
+            ? {
+                live: { random: c.random, evidence, legacyRev: null, raceFloorRev: c.raceFloorRev },
+                liveCandidates: canCandidate,
+              }
+            : {}),
         },
       );
       if (c.random)
@@ -437,6 +455,7 @@ export function applySnapshotChunk(db: Db, c: SnapshotChunk): ChunkResult {
           collection,
           rkey,
           evidence,
+          raceFloorRev: c.raceFloorRev ?? null,
           nowMs: Number(c.nowNs / 1_000_000n),
           random: c.random,
         });

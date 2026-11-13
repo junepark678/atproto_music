@@ -543,11 +543,13 @@ describe('forward coverage gap recovery', () => {
         },
         T0,
       );
-      expect(lateAccept(h.db, { ...imported.args, evidence: imported.evidence })).toBe(0);
+      expect(lateAccept(h.db, { ...imported.args, evidence: imported.evidence, raceFloorRev: '0000000000000' })).toBe(
+        0,
+      );
       expect(h.db.all('SELECT 1 FROM forward_outbox')).toEqual([]);
 
       const cleanup = await prepareCandidate('late-cleanup');
-      expect(lateAccept(h.db, { ...cleanup.args, evidence: cleanup.evidence })).toBe(1);
+      expect(lateAccept(h.db, { ...cleanup.args, evidence: cleanup.evidence, raceFloorRev: '0000000000000' })).toBe(1);
       const row = h.db.one<{ link_id: string; dedupe_key: string }>('SELECT link_id,dedupe_key FROM forward_outbox');
       expect(row).not.toBeNull();
       h.db.run(
@@ -564,7 +566,9 @@ describe('forward coverage gap recovery', () => {
         return originalOne<T>(sql, ...params);
       };
       try {
-        expect(lateAccept(h.db, { ...cleanup.args, evidence: cleanup.evidence })).toBe(0);
+        expect(lateAccept(h.db, { ...cleanup.args, evidence: cleanup.evidence, raceFloorRev: '0000000000000' })).toBe(
+          0,
+        );
         // The acceptance candidate was consumed on the first call, so the receipt layer is unreachable here.
         expect(receiptLookups).toBe(0);
       } finally {

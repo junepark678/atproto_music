@@ -30,6 +30,7 @@ export function lateAccept(
     collection: string;
     rkey: string;
     evidence: LiveEvidence | null;
+    raceFloorRev?: string | null;
     nowMs: number;
     random: Random;
   },
@@ -38,6 +39,7 @@ export function lateAccept(
   if (
     evidence?.up_rev === null ||
     evidence?.up_rev === undefined ||
+    (input.raceFloorRev !== undefined && (input.raceFloorRev === null || evidence.up_rev <= input.raceFloorRev)) ||
     evidence.conflict_rev === evidence.up_rev ||
     (evidence.del_rev !== null && evidence.del_rev >= evidence.up_rev)
   )
