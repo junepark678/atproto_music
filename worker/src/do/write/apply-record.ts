@@ -464,7 +464,11 @@ function scrobbleVerdict(
               });
             })();
       if (replacementCandidate && !additionAuthority(o.live, t.rev, cid))
-        db.run("UPDATE forward_admissions SET path='snapshot' WHERE did=? AND identity_key=?", t.did, identityKey);
+        db.run(
+          "UPDATE forward_admissions SET path='snapshot' WHERE did=? AND identity_key=? AND path!='import'",
+          t.did,
+          identityKey,
+        );
       if (additionAuthority(o.live, t.rev, cid)) countLiveAdmission(db, 'addition_matched');
       db.run(
         `INSERT INTO scrobbles(uri, record_uri, listen_id, cid, did, rkey, revision, artist, track, album, listened_at, created_at,
