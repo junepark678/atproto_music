@@ -1388,6 +1388,51 @@ describe('Last.fm forwarding', () => {
     expect(w.lastfm.nowPlayingCalls.length).toBeGreaterThanOrEqual(60);
   });
 
+  it("many Last.fm links taking turns with now playing cannot take every token from another user's scrobbles", async () => {
+    const w = await world();
+    // Each player's first now playing is boost-eligible, so 20 players taking one turn each
+    // would fill every token for 20 seconds without the server-wide bound.
+    const players = Array.from({ length: 20 }, (_, i) => {
+      const did = `did:plc:${`player${i}`.padEnd(24, 'x')}`;
+      ensureAccount({ db: w.app.db, clock: w.clock }, { did, verifiedHandle: null });
+      return { did, link: w.linkLastfm(did, `player_${i}`) };
+    });
+    w.linkLastfm(BOB, 'victim');
+    let victimQueued = 0;
+    for (let second = 0; second < 20; second++) {
+      const { did, link } = players[second % players.length]!;
+      const startedAtMs = w.clock.nowMs();
+      enqueueForwards(w.app.db, {
+        did,
+        linkId: link.id,
+        items: [
+          {
+            kind: 'nowplaying',
+            startedAtMs,
+            artist: 'Artist',
+            track: `Track ${second}`,
+            payload: { track: { artist: 'Artist', track: `Track ${second}` }, startedAtMs, origin: 'lastfm' },
+          },
+        ],
+        now: startedAtMs,
+        random: enqueueRandom,
+      });
+      if (second % 5 === 0) {
+        w.scrobbles(BOB, 1, `victim-${second}`);
+        victimQueued++;
+      }
+      await w.run();
+      w.clock.advance(SECOND);
+    }
+    // Ordinary work keeps at least half of the shared token while the rotation runs:
+    // every victim scrobble went out within the loop, one request each.
+    const victim = w.rows().filter((row) => row.kind === 'scrobble');
+    expect(victim).toHaveLength(victimQueued);
+    expect(victim.map((row) => row.state)).toEqual(Array(victimQueued).fill('sent'));
+    expect(w.lastfm.calls.count({ nsid: 'track.scrobble' })).toBe(victimQueued);
+    expect(w.lastfm.nowPlayingCalls.length).toBeGreaterThanOrEqual(15);
+  });
+
   it('love, unlove, love for one track forwards track.love, track.unlove, track.love in order, and the same track played as now playing twice 10 minutes apart is forwarded twice', async () => {
     const w = await world();
     w.linkLastfm(ALICE, 'alice_fm');
