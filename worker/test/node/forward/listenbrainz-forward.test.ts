@@ -2564,6 +2564,29 @@ describe('ListenBrainz forwarding', () => {
     ]);
   });
 
+  it('repeated 429s without X-RateLimit-Reset-In back off exponentially instead of retrying every second', async () => {
+    const w = await world();
+    w.link();
+    w.scrobbles(1);
+    const limited = () => Response.json({ code: 429, error: 'slow down' }, { status: 429 });
+    const delays: number[] = [];
+    for (let attempt = 1; attempt <= 4; attempt++) {
+      const row = w.rows()[0]!;
+      if (attempt > 1) w.clock.set(new Date(row.due_at).toISOString());
+      const sentAt = w.clock.nowMs();
+      w.intercept(limited);
+      await w.run();
+      const next = w.rows()[0]!;
+      expect(next).toMatchObject({ state: 'queued', attempts: attempt, last_error: 'http_429' });
+      delays.push(next.due_at - sentAt);
+    }
+    // 30 s * 2^n (+ up to 25% jitter), not the one-second default reset.
+    for (const [n, delay] of delays.entries()) {
+      expect(delay).toBeGreaterThanOrEqual(30 * SECOND * 2 ** n);
+      expect(delay).toBeLessThanOrEqual(Math.ceil(37.5 * SECOND * 2 ** n));
+    }
+  });
+
   it('401 revokes the link; an attempted 429 counts and waits X-RateLimit-Reset-In; 400 is terminal', async () => {
     const w = await world();
     const id = w.link();

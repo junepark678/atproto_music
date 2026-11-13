@@ -91,6 +91,7 @@ import {
   expireRows,
   type ForwardListen,
   type ForwardTrack,
+  forwardBackoffMs,
   holdLinkRows,
   lastfmKeyRejectedAt,
   lovePayload,
@@ -987,7 +988,11 @@ async function sendListenbrainz(rt: ForwardRuntime, job: Job, token: string): Pr
       const until = rt.pacing.observeListenbrainz(key, at, out.rate, true) as number;
       noteLinkError(db, job.link, error, at, once);
       if (once) settleJobRows(db, job, 'failed', at, error);
-      else retryRowsAt(db, job.rows, at, () => until, error);
+      // The later of the upstream reset and the row's own exponential backoff:
+      // without an X-RateLimit-Reset-In the reset defaults to one second, and
+      // rows now retry until expiry rather than for eight attempts.
+      else
+        retryRowsAt(db, job.rows, at, (row) => Math.max(until, at + forwardBackoffMs(row.attempts, rt.random)), error);
       return;
     }
     rt.pacing.observeListenbrainz(key, at, out.rate);
