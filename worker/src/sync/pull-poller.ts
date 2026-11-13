@@ -411,6 +411,20 @@ function currentLinks(db: Db): PullLink[] {
   );
 }
 
+function nextEligiblePullDue(deps: LinkedPullPollerDeps, now: number): number | null {
+  let next: number | null = null;
+  for (const link of currentLinks(deps.db)) {
+    if (!current(deps.db, link)) continue;
+    const state = ensureState(deps.db, link, now);
+    if (state.poll_next_at_ms === null || TERMINAL_HOLDS.has(state.hold_reason ?? '')) continue;
+    const due = Math.max(state.poll_next_at_ms, state.retry_at_ms ?? 0);
+    next = next === null ? due : Math.min(next, due);
+  }
+  // A due link that was not serviced needs one follow-up timer turn. Once that
+  // turn checks its pacer, the pacer deadline is persisted instead of spinning.
+  return next !== null && next <= now ? now + 1 : next;
+}
+
 function startListenbrainzRound(deps: LinkedPullPollerDeps, link: PullLink, state: PullState, now: number): PullState {
   if (state.listen_round_upper_ms !== null && state.listen_round_floor_ms !== null) return state;
   const upper = now;
@@ -898,7 +912,7 @@ async function runLovePage(
   return { requested: 1, staged: items.length, held: writer.held, nextDueMs: due };
 }
 
-/** One bounded timer run. It uses at most one remote request currently; remaining budget is reserved for follow-up pagers. */
+/** One bounded timer run, with at most three remote requests and no budget charge for pacing deferrals. */
 export async function runLinkedLastfmPull(
   deps: LinkedPullPollerDeps,
   now = deps.clock.nowMs(),
@@ -909,6 +923,7 @@ export async function runLinkedLastfmPull(
   let staged = 0;
   let held: string | null = null;
   for (const link of links) {
+    if (requested >= LINKED_PULL_MAX_REQUESTS_PER_RUN) break;
     if (!current(deps.db, link)) continue;
     let state = ensureState(deps.db, link, now);
     if (state.poll_next_at_ms === null) continue;
@@ -991,6 +1006,7 @@ export async function runLinkedLastfmPull(
         staged += result.staged;
         held = result.held ?? priorWriterHeld;
         nextDueMs = result.nextDueMs;
+        if (result.requested === 0) continue;
       } catch (error) {
         if (!current(deps.db, link)) continue;
         held = error instanceof Error && error.message.includes('capacity') ? 'staging_capacity' : safeReason(error);
@@ -1006,6 +1022,7 @@ export async function runLinkedLastfmPull(
         staged += result.staged;
         held = result.held;
         nextDueMs = result.nextDueMs;
+        if (result.requested === 0) continue;
       } catch (error) {
         if (!current(deps.db, link)) continue;
         held = error instanceof Error && error.message.includes('capacity') ? 'staging_capacity' : safeReason(error);
@@ -1021,6 +1038,7 @@ export async function runLinkedLastfmPull(
         staged += result.staged;
         held = result.held ?? priorWriterHeld;
         nextDueMs = result.nextDueMs;
+        if (result.requested === 0) continue;
       } catch (error) {
         if (!current(deps.db, link)) continue;
         held = error instanceof Error && error.message.includes('capacity') ? 'staging_capacity' : safeReason(error);
@@ -1060,7 +1078,7 @@ export async function runLinkedLastfmPull(
         link.generation,
       );
       nextDueMs = paceAt;
-      break;
+      continue;
     }
     try {
       const response = await fetchLastfmPullPage(
@@ -1141,5 +1159,6 @@ export async function runLinkedLastfmPull(
       break;
     }
   }
+  nextDueMs = nextEligiblePullDue(deps, now);
   return { requested, staged, held, nextDueMs };
 }
