@@ -41,6 +41,7 @@ import {
   HELD_EXPIRY_SELECT_SQL,
   LASTFM_EXPIRY_MS,
   LISTENBRAINZ_EXPIRY_MS,
+  nowPlayingPayload,
   STALE_NOWPLAYING_PROBE_SQL,
 } from '../../../src/forward/forward-outbox';
 import {
@@ -70,6 +71,7 @@ import {
   enqueueLiveUnlove,
   type ForwardItem,
 } from '../../../src/outbox/forward-enqueue';
+import { acceptListens } from '../../../src/outbox/ingress';
 import { PRESENT_TRACK_LOVE_SQL } from '../../../src/outbox/live-track-survivor';
 import { enqueueLove, enqueueUnlove } from '../../../src/outbox/love-ops';
 import { cancelUnsent } from '../../../src/outbox/operations';
@@ -3228,4 +3230,60 @@ it('copies the authorized generation into an MBID revival child and rechecks its
     last_error: 'local_survivor',
     attempts: 0,
   });
+});
+
+/** ListenBrainz's validator rejects a decoded U+0000 anywhere in a submitted listen. */
+function containsNul(value: unknown): boolean {
+  if (typeof value === 'string') return value.includes('\u0000');
+  if (value !== null && typeof value === 'object') return Object.values(value).some(containsNul);
+  return false;
+}
+
+it('optional text containing U+0000 from live ingress is left out, so ListenBrainz accepts the listen', async () => {
+  const w = await world();
+  w.link();
+  const accepted = await acceptListens(w.app.composed.core.deps, {
+    did: ALICE,
+    origin: 'web',
+    receiptMs: w.clock.nowMs(),
+    listens: [
+      {
+        input: {
+          artist: 'Artist',
+          track: 'Track',
+          listenedAt: '2026-01-14T11:00:00Z',
+          albumArtist: 'Album\u0000Artist',
+          submissionClient: 'Pano\u0000client',
+          album: 'Album',
+        },
+      },
+    ],
+  });
+  expect(accepted.created).toBe(1);
+  let wire: unknown = null;
+  w.intercept(async (req) => {
+    wire = await req.json();
+    return containsNul(wire)
+      ? Response.json({ code: 400, error: 'Unicode null' }, { status: 400 })
+      : Response.json({ status: 'ok' });
+  });
+  await w.run();
+  expect(containsNul(wire)).toBe(false);
+  expect(JSON.stringify(wire)).toContain('"release_name":"Album"');
+  expect(w.rows()[0]).toMatchObject({ state: 'sent' });
+});
+
+it('now-playing and love payloads drop optional text containing U+0000 at the destination boundary', () => {
+  const track = nowPlayingPayload({
+    payload_json: JSON.stringify({
+      track: {
+        artist: 'Artist',
+        track: 'Track',
+        albumArtist: 'Album\u0000Artist',
+        isrc: 'USABC1234567',
+        artistMbids: ['00000000-0000-4000-8000-000000000001', 'bad\u0000'],
+      },
+    }),
+  });
+  expect(track).toEqual({ artist: 'Artist', track: 'Track', isrc: 'USABC1234567' });
 });

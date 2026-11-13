@@ -128,6 +128,18 @@ function str(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() !== '' ? value : undefined;
 }
 
+/**
+ * Optional text a destination can accept. ListenBrainz rejects a listen with a
+ * decoded U+0000 anywhere in it (its recursive unicode-null check covers
+ * additional_info), and the record validators admit NUL in optional fields, so
+ * such a field is left out here, at the one boundary every queued scrobble,
+ * now-playing and love payload passes through, rather than failing the listen.
+ */
+function optStr(value: unknown): string | undefined {
+  const text = str(value);
+  return text === undefined || text.includes('\u0000') ? undefined : text;
+}
+
 function posInt(value: unknown): number | undefined {
   const n = typeof value === 'string' && /^\d{1,9}$/.test(value) ? Number(value) : value;
   return typeof n === 'number' && Number.isSafeInteger(n) && n > 0 ? n : undefined;
@@ -141,19 +153,19 @@ function trackOf(src: Record<string, unknown>): ForwardTrack | null {
   const set = <K extends keyof ForwardTrack>(key: K, value: ForwardTrack[K] | undefined) => {
     if (value !== undefined) out[key] = value;
   };
-  set('album', str(src.album));
-  set('albumArtist', str(src.albumArtist));
+  set('album', optStr(src.album));
+  set('albumArtist', optStr(src.albumArtist));
   set('durationSeconds', posInt(src.durationSeconds) ?? posInt(src.duration));
   set('trackNumber', posInt(src.trackNumber));
-  set('recordingMbid', str(src.recordingMbid) ?? str(src.mbid));
-  set('releaseMbid', str(src.releaseMbid));
-  set('releaseGroupMbid', str(src.releaseGroupMbid));
-  if (Array.isArray(src.artistMbids) && src.artistMbids.every((m) => typeof m === 'string')) {
+  set('recordingMbid', optStr(src.recordingMbid) ?? optStr(src.mbid));
+  set('releaseMbid', optStr(src.releaseMbid));
+  set('releaseGroupMbid', optStr(src.releaseGroupMbid));
+  if (Array.isArray(src.artistMbids) && src.artistMbids.every((m) => typeof m === 'string' && !m.includes('\u0000'))) {
     out.artistMbids = [...(src.artistMbids as string[])];
   }
-  set('isrc', str(src.isrc));
-  set('submissionClient', str(src.submissionClient));
-  set('musicService', str(src.musicService));
+  set('isrc', optStr(src.isrc));
+  set('submissionClient', optStr(src.submissionClient));
+  set('musicService', optStr(src.musicService));
   return out;
 }
 
