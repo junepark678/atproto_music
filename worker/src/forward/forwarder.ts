@@ -147,7 +147,7 @@ export { MAX_LOVE_FRAMING_PER_RUN };
 const RETRYABLE_LASTFM_CODES: ReadonlySet<number> = new Set([8, 11, 16, 29]);
 const REVOKING_LASTFM_CODES: ReadonlySet<number> = new Set([4, 9]);
 const KEY_LASTFM_CODES: ReadonlySet<number> = new Set([10, 26]);
-const MAX_RETRY_AFTER_MS = 6 * 3_600_000;
+const MAX_RETRY_AFTER_MS = 3_600_000;
 
 /** Everything one run needs. Built once by the composition (http/links.ts linksFeature). */
 export interface ForwardRuntime {

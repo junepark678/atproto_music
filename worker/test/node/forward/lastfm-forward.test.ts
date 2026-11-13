@@ -964,6 +964,32 @@ describe('Last.fm forwarding', () => {
     expect(w.lastfm.scrobbles.at(-1)?.items.map((i) => i.track)).toEqual([`Track 5`]);
   });
 
+  it.each([
+    ['HTTP 429', { httpStatus: 429, retryAfter: 21_600 }],
+    ['Last.fm code 29', { code: 29, retryAfter: 21_600 }],
+  ] as const)('caps %s Retry-After pacing at one hour and resumes scheduler delivery', async (_label, fault) => {
+    const w = await world();
+    w.linkLastfm(ALICE, 'alice_fm');
+    w.scrobbles(ALICE, 1, 'retry-after-cap');
+    const startedAt = w.clock.nowMs();
+    w.lastfm.fail({ ...fault, method: 'track.scrobble' });
+
+    const deferred = await w.run();
+    expect(deferred.requests).toBe(1);
+    expect(deferred.nextDueMs).toBe(startedAt + 3_600_000);
+    expect(w.rows()[0]).toMatchObject({ state: 'queued', attempts: 1 });
+    const requestCount = w.lastfm.calls.count({ nsid: 'track.scrobble' });
+
+    w.clock.advance(3_600_000 - 1);
+    expect((await w.run()).requests).toBe(0);
+    expect(w.lastfm.calls.count({ nsid: 'track.scrobble' })).toBe(requestCount);
+
+    w.clock.advance(1);
+    expect((await w.run()).requests).toBe(1);
+    expect(w.lastfm.calls.count({ nsid: 'track.scrobble' })).toBe(requestCount + 1);
+    expect(w.rows()[0]).toMatchObject({ state: 'sent', attempts: 2 });
+  });
+
   it('retries transient failures past eight attempts, caps backoff at one hour, and expires at the Last.fm age limit', async () => {
     const w = await world();
     w.linkLastfm(ALICE, 'alice_fm');
