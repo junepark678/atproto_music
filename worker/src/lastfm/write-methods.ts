@@ -493,6 +493,11 @@ export async function removeScrobble(m: ModuleDeps, args: RemoveScrobbleArgs): P
       did: args.did,
       recordJson: candidate.record_json,
       listenKey: key,
+      tuple: {
+        artistKey: keys.artist_key,
+        trackKey: keys.track_key,
+        listenedSecond: BigInt(args.timestamp),
+      },
     });
     if (entryId === null) continue;
     batchMembers.set(operationId, { entryId, recordJson: candidate.record_json });
