@@ -65,6 +65,7 @@ export const TIMER_NAMES = [
   'identity-sweep',
   'discovery',
   'gc',
+  'owner-resnapshot',
 ] as const;
 
 export type TimerName = (typeof TIMER_NAMES)[number];

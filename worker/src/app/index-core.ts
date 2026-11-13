@@ -101,6 +101,7 @@ import { type IngestDeps, jetstreamWatchdog } from '../do/ingest/ingest-mode';
 import type { ConnectJetstream } from '../do/ingest/jetstream-socket';
 import { nextPendingRemovalDue } from '../do/ingest/live-pending-removals';
 import { notify, recordStatus } from '../do/ingest/notify';
+import { ensureOwnerResnapshotTimer, runOwnerResnapshot } from '../do/ingest/owner-resnapshot';
 import { clearExpiredHostPauses } from '../do/ingest/pds-budget';
 import { maybeClearGap, SNAPSHOT_MIN_INTERVAL_MS, scheduleGapRecovery, snapshotStep } from '../do/ingest/snapshot-job';
 import { identitySweep, statusSweep } from '../do/ingest/sweeps';
@@ -444,6 +445,7 @@ export class IndexCore implements IndexRpc, AdminRpc {
       if (watchdogWanted && (o.startup === true || !timerRowExists(db, 'jetstream-watchdog'))) {
         schedule(db, 'jetstream-watchdog', now);
       }
+      ensureOwnerResnapshotTimer(db, now, config.prefix !== null && config.ingestMode === 'socket');
     });
     ensureDiscoveryTimer(db, now);
     this.reconcileTimers(now);
@@ -525,6 +527,11 @@ export class IndexCore implements IndexRpc, AdminRpc {
         const report = runGc(m.db, now);
         schedule(m.db, 'gc', now + GC_INTERVAL_MS, { force: true });
         m.log.log('info', 'gc.done', { ...report });
+      },
+      'owner-resnapshot': async (now) => {
+        if (m.config.prefix === null || m.config.ingestMode !== 'socket') return;
+        const report = runOwnerResnapshot(m.db, now);
+        m.log.log('info', 'owner_resnapshot.done', report);
       },
     };
   }
