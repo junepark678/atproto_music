@@ -131,8 +131,41 @@ export function lateAccept(
         track: string;
         album: string | null;
         recording_mbid: string | null;
-      }>('SELECT cid,artist,track,album,recording_mbid FROM loves WHERE uri=?', candidate.member_uri);
+        created_at: string;
+        artist_key: string;
+        track_key: string;
+      }>(
+        'SELECT cid,artist,track,album,recording_mbid,created_at,artist_key,track_key FROM loves WHERE uri=?',
+        candidate.member_uri,
+      );
       if (row?.cid === evidence.up_cid) {
+        const links = db.all<{
+          id: string;
+          did: string;
+          generation: number;
+          service: 'lastfm' | 'listenbrainz';
+          generation_start_seq: number;
+        }>(`SELECT * FROM linked_accounts WHERE did=? AND status='active' AND forward_scrobbles=1`, input.did);
+        const historyRow: HistoryRow = {
+          kind: 'love',
+          uri: candidate.member_uri,
+          cid: row.cid,
+          event_at: row.created_at,
+          artist: row.artist,
+          track: row.track,
+          album: row.album,
+          recording_mbid: row.recording_mbid,
+          artist_key: row.artist_key,
+          track_key: row.track_key,
+          album_key: null,
+          listened_at: null,
+        };
+        const admitted = links.flatMap((link) => {
+          const result = payloadForHistoryRow(db, link, historyRow, candidate.identity_key, {
+            allowLiveAdmission: true,
+          });
+          return result ? [{ link, result }] : [];
+        });
         const changed = db.run(
           `UPDATE love_incarnations SET path='live',updated_at_ms=? WHERE uri=? AND incarnation_key=? AND state='present' AND path='snapshot'`,
           input.nowMs,
@@ -140,25 +173,17 @@ export function lateAccept(
           candidate.identity_key,
         ).rowsWritten;
         if (changed === 1) {
-          enqueueForwards(db, {
-            did: input.did,
-            items: [
-              {
-                kind: 'love',
-                operationId: candidate.identity_key,
-                payload: {
-                  artist: row.artist,
-                  track: row.track,
-                  album: row.album ?? undefined,
-                  recordingMbid: row.recording_mbid ?? undefined,
-                  origin: 'web',
-                },
-              },
-            ],
-            now: input.nowMs,
-            random: input.random,
-          });
-          accepted++;
+          if (admitted.length === 0) accepted++;
+          for (const { link, result } of admitted) {
+            enqueueForwards(db, {
+              did: input.did,
+              linkId: link.id,
+              items: [{ kind: 'love', operationId: result.key, payload: result.payload }],
+              now: input.nowMs,
+              random: input.random,
+            });
+            accepted++;
+          }
         }
       }
     }
