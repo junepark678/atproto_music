@@ -680,4 +680,8 @@ upstream refusals remain terminal and contribute to the failed count exposed
 in each linked account's sync status. Last.fm code 5 continues to wait until
 the next UTC midnight without consuming an attempt. Revocation, global Last.fm
 key rejection and now-playing's single-send 60-second lifetime keep their
-existing behavior. No migration is required.
+existing behavior. A malformed Last.fm answer (an unparseable body or an
+incomplete scrobble envelope) is not a payload refusal, so it is retried with
+the same backoff, but it is not proven transient either, so it keeps the former
+ceiling: the row fails as `retry_exhausted` at its eighth attempt. No migration
+is required.

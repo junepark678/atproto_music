@@ -29,6 +29,7 @@ import {
   holdLinkRows,
   LASTFM_EXPIRY_MS,
   LASTFM_KEY_REJECTED,
+  MAX_MALFORMED_ATTEMPTS,
   resumeHeldRows,
   rowStates,
 } from '../../../src/forward/forward-outbox';
@@ -1006,6 +1007,35 @@ describe('Last.fm forwarding', () => {
     w.clock.set(new Date(row().created_at_ms + LASTFM_EXPIRY_MS + 1).toISOString());
     expect((await w.run()).expired?.aged).toBe(1);
     expect(row()).toMatchObject({ state: 'expired', attempts: 10, last_error: 'expired' });
+  });
+
+  it('retries a malformed Last.fm answer instead of failing the batch, then delivers it', async () => {
+    const w = await world();
+    w.linkLastfm(ALICE, 'alice_fm');
+    w.scrobbles(ALICE, 2, 'malformed-once');
+    w.lastfm.fail({ httpStatus: 200, body: 'not a Last.fm answer', method: 'track.scrobble' });
+    expect((await w.run()).requests).toBe(1);
+    for (const row of w.rows(ALICE)) {
+      expect(row).toMatchObject({ state: 'queued', attempts: 1, last_error: 'malformed_answer' });
+    }
+    w.clock.set(new Date(Math.max(...w.rows(ALICE).map((r) => r.due_at))).toISOString());
+    await w.run();
+    expect(w.rows(ALICE).map((r) => r.state)).toEqual(['sent', 'sent']);
+  });
+
+  it('fails a row after MAX_MALFORMED_ATTEMPTS consecutive malformed Last.fm answers', async () => {
+    const w = await world();
+    w.linkLastfm(ALICE, 'alice_fm');
+    w.scrobbles(ALICE, 1, 'malformed-cap');
+    const row = () => w.rows(ALICE)[0]!;
+    for (let attempt = 1; attempt <= MAX_MALFORMED_ATTEMPTS; attempt++) {
+      if (attempt > 1) w.clock.set(new Date(row().due_at).toISOString());
+      w.lastfm.fail({ httpStatus: 200, body: 'not a Last.fm answer', method: 'track.scrobble' });
+      expect((await w.run()).requests).toBe(1);
+      if (attempt < MAX_MALFORMED_ATTEMPTS)
+        expect(row()).toMatchObject({ state: 'queued', attempts: attempt, last_error: 'malformed_answer' });
+    }
+    expect(row()).toMatchObject({ state: 'failed', attempts: MAX_MALFORMED_ATTEMPTS, last_error: 'retry_exhausted' });
   });
 
   it('keeps permanent refusals terminal and exposes them in link sync status', async () => {

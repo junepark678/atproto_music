@@ -33,6 +33,7 @@
 // | Last.fm other item code                 | ignored (`ignored_<code>`)              |                        |
 // | Last.fm 8, 11, 16, 29; HTTP 5xx, 429;   | backoff 30 s·2^n + U[0,25%], ≤ 1 h      | 29/429 hold the global |
 // |   network errors                       | until destination age expiry            | bucket (Retry-After) |
+// | Last.fm malformed answer               | same backoff, failed after 8 attempts   |                        |
 // | Last.fm 9 or 4                          | held                                    | link revoked           |
 // | Last.fm 10 or 26                        | stay queued                             | all Last.fm paused     |
 // | Last.fm other error code, HTTP 4xx      | failed                                  |                        |
@@ -82,6 +83,7 @@ import { canonicalForwardDedupeKey } from '../outbox/forward-key';
 import { hasPresentTrackLove } from '../outbox/live-track-survivor';
 import { nextDeleteWakeAt, runDeleteSlice } from './delete-forwarder';
 import {
+  backoffMalformedRows,
   backoffRows,
   clearLastfmKeyRejected,
   dueRows,
@@ -857,7 +859,8 @@ function lastfmFailed(rt: ForwardRuntime, job: Job, out: LastfmFailure, now: num
       (out.kind === 'error' && RETRYABLE_LASTFM_CODES.has(out.code)) ||
       (out.kind === 'http' && (out.httpStatus >= 500 || out.httpStatus === 429)) ||
       out.kind === 'network';
-    if (!retryable || once) {
+    const malformed = out.kind === 'malformed';
+    if ((!retryable && !malformed) || once) {
       noteLinkError(db, job.link, error, now, true);
       settleJobRows(db, job, 'failed', now, error);
       return;
@@ -867,7 +870,8 @@ function lastfmFailed(rt: ForwardRuntime, job: Job, out: LastfmFailure, now: num
     if (rateLimited && 'retryAfterS' in out && out.retryAfterS !== null) {
       rt.pacing.deferLastfm(now + Math.min(MAX_RETRY_AFTER_MS, out.retryAfterS * 1000));
     }
-    backoffRows(db, job.rows, now, rt.random, error);
+    if (malformed) backoffMalformedRows(db, job.rows, now, rt.random, error);
+    else backoffRows(db, job.rows, now, rt.random, error);
   });
   rt.log.log('warn', 'forward.failed', { service: 'lastfm', kind: job.kind, rows: job.rows.length, error });
 }

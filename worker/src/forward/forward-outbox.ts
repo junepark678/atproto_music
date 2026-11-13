@@ -72,6 +72,14 @@ export const HELD_RETENTION_MS = 30 * DAY;
 export const NOW_PLAYING_MAX_AGE_MS = 60 * SECOND;
 export const BACKOFF_BASE_MS = 30 * SECOND;
 export const BACKOFF_CAP_MS = HOUR;
+/**
+ * Attempt ceiling for rows whose upstream answered with something unparseable
+ * (Last.fm `malformed`): retried like a transient failure, because one bad
+ * answer is not a payload refusal, but not until expiry, because it is not
+ * proven transient either. This keeps the policy those answers had before the
+ * retry-until-expiry change (ADR §12.3 amendment).
+ */
+export const MAX_MALFORMED_ATTEMPTS = 8;
 /** The counters row that pauses all Last.fm forwarding (ADR §12.3). */
 export const LASTFM_KEY_REJECTED = 'lastfm_key_rejected';
 /** The longest `last_error` kept on a row. */
@@ -414,6 +422,26 @@ export function requeueRows(
 /** Queues each row again after its own backoff (attempts counted). */
 export function backoffRows(db: Db, rows: readonly QueuedRow[], now: number, random: Random, error: string): void {
   retryRowsAt(db, rows, now, (row) => now + forwardBackoffMs(row.attempts, random), error);
+}
+
+/**
+ * Backs rows off after a malformed upstream answer; a row whose attempts reach
+ * MAX_MALFORMED_ATTEMPTS fails as `retry_exhausted` instead.
+ */
+export function backoffMalformedRows(
+  db: Db,
+  rows: readonly QueuedRow[],
+  now: number,
+  random: Random,
+  error: string,
+): void {
+  db.tx(() => {
+    for (const row of rows) {
+      if (row.attempts + 1 >= MAX_MALFORMED_ATTEMPTS)
+        settleRows(db, [row.id], 'failed', now, 'retry_exhausted', true, row.generation);
+      else requeueRows(db, [row.id], now + forwardBackoffMs(row.attempts, random), now, error, true, row.generation);
+    }
+  });
 }
 
 /** Retries rows after an attempted transient failure until their age expiry. */
