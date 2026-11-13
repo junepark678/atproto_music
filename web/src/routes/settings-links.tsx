@@ -102,6 +102,7 @@ export default function SettingsLinks() {
   const [dataSession, setDataSession] = useState(session);
   const requestGeneration = useRef(0);
   const actionGeneration = useRef(0);
+  const currentActionError = useRef<{ session: typeof session; generation: number; error: unknown } | null>(null);
   const mounted = useRef(true);
   const mutationInFlight = useRef(0);
   const refresh = useCallback(async (preserveError = false) => {
@@ -130,6 +131,7 @@ export default function SettingsLinks() {
       lifecycleSession.current = null;
       mutationInFlight.current = 0;
       actionGeneration.current++;
+      currentActionError.current = null;
       return;
     }
     mounted.current = true;
@@ -143,6 +145,7 @@ export default function SettingsLinks() {
       setBusy(false);
       mutationInFlight.current = 0;
       actionGeneration.current++;
+      currentActionError.current = null;
     }
     void refresh();
     let polling = false;
@@ -161,7 +164,7 @@ export default function SettingsLinks() {
         ) {
           setLinks(result.items);
           setDataSession(pollSession);
-          setError(null);
+          if (currentActionError.current === null) setError(null);
         }
       } catch (e) {
         if (
@@ -170,7 +173,7 @@ export default function SettingsLinks() {
           mutationInFlight.current === 0 &&
           generation === requestGeneration.current
         )
-          setError(e);
+          if (currentActionError.current === null) setError(e);
       } finally {
         polling = false;
       }
@@ -203,6 +206,7 @@ export default function SettingsLinks() {
     setError(null);
     const operationSession = session;
     const generation = ++actionGeneration.current;
+    currentActionError.current = null;
     requestGeneration.current++;
     mutationInFlight.current++;
     let actionError: unknown = null;
@@ -274,6 +278,7 @@ export default function SettingsLinks() {
   async function changeSetting(link: Link, patch: Parameters<typeof patchLink>[1]) {
     const operationSession = session;
     const generation = ++actionGeneration.current;
+    currentActionError.current = null;
     requestGeneration.current++;
     mutationInFlight.current++;
     setLinks(
@@ -304,18 +309,20 @@ export default function SettingsLinks() {
       if (!mounted.current || activeSession.current !== operationSession || generation !== actionGeneration.current)
         return;
       actionError = e;
+      currentActionError.current = { session: operationSession, generation, error: e };
     } finally {
       if (activeSession.current === operationSession) mutationInFlight.current--;
       if (mounted.current && activeSession.current === operationSession && generation === actionGeneration.current)
         setBusy(false);
       if (mounted.current && activeSession.current === operationSession && generation === actionGeneration.current) {
-        const currentRead = await refresh(Boolean(actionError));
+        await refresh(Boolean(actionError));
         if (
-          currentRead &&
           actionError &&
           mounted.current &&
           activeSession.current === operationSession &&
-          generation === actionGeneration.current
+          generation === actionGeneration.current &&
+          currentActionError.current?.session === operationSession &&
+          currentActionError.current.generation === generation
         )
           setError(actionError);
       }

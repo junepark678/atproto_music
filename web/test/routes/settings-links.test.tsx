@@ -737,7 +737,7 @@ it('still connects and disconnects ListenBrainz links', async () => {
 });
 
 it.each(['success', 'failure'])(
-  'discards a PATCH error when its recovery %s is superseded by a poll',
+  'announces a PATCH error when its recovery %s is superseded by a poll',
   async (outcome) => {
     vi.useFakeTimers();
     Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
@@ -777,7 +777,7 @@ it.each(['success', 'failure'])(
       if (outcome === 'success') reads[1]!.resolve(Response.json({ items: [link()] }));
       else reads[1]!.reject(new Error('discarded recovery'));
       await flush();
-      expect(view.root.querySelector('[role=alert]')).toBeNull();
+      expect(view.root.querySelector('[role=alert]')).not.toBeNull();
       expect(view.root.textContent).toContain('latest-poll');
     } finally {
       await act(() => view.unmount());
