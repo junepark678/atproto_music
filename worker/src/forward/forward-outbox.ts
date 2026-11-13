@@ -27,9 +27,9 @@
 // across retries.
 //
 // Retry (ADR §12.3): `forwardBackoffMs(n)` = 30 s·2^n + U[0, 25%] of it,
-// capped at 6 h, with n the row's attempts before this one. At most eight
-// attempted retryable requests are made per row. An actual upstream 429
-// counts; a local pacing deferral does not. Last.fm code 5 re-queues at the
+// capped at 1 h, with n the row's attempts before this one. Transient errors
+// retry until the destination-specific row age expires. An actual upstream
+// 429 counts; a local pacing deferral does not. Last.fm code 5 re-queues at the
 // next 00:00 UTC without counting an attempt; service age limits still apply.
 // Admission and destination generations persist locally. A crash after
 // upstream acceptance but before the outbox transition commits can still
@@ -71,9 +71,7 @@ export const HELD_RETENTION_MS = 30 * DAY;
 /** Now playing older than this is not sent (ADR §12.3). */
 export const NOW_PLAYING_MAX_AGE_MS = 60 * SECOND;
 export const BACKOFF_BASE_MS = 30 * SECOND;
-export const BACKOFF_CAP_MS = 6 * HOUR;
-/** Maximum upstream attempts for a retryable forward row, including 429 responses. */
-export const MAX_FORWARD_ATTEMPTS = 8;
+export const BACKOFF_CAP_MS = HOUR;
 /** The counters row that pauses all Last.fm forwarding (ADR §12.3). */
 export const LASTFM_KEY_REJECTED = 'lastfm_key_rejected';
 /** The longest `last_error` kept on a row. */
@@ -84,7 +82,7 @@ export const EXPIRY_MS: Readonly<Record<LinkService, number>> = {
   listenbrainz: LISTENBRAINZ_EXPIRY_MS,
 };
 
-/** 30 s·2^n + U[0, 25%], capped at 6 h (ADR §12.3). `n` is the attempts already made. */
+/** 30 s·2^n + U[0, 25%], capped at 1 h (ADR §12.3). `n` is the attempts already made. */
 export function forwardBackoffMs(n: number, random: Random): number {
   const base = BACKOFF_BASE_MS * 2 ** Math.min(Math.max(0, n), 20);
   return Math.min(BACKOFF_CAP_MS, Math.floor(base + random.float() * base * 0.25));
@@ -418,7 +416,7 @@ export function backoffRows(db: Db, rows: readonly QueuedRow[], now: number, ran
   retryRowsAt(db, rows, now, (row) => now + forwardBackoffMs(row.attempts, random), error);
 }
 
-/** Retries rows after an attempted request; exhausted rows become terminal failed rows. */
+/** Retries rows after an attempted transient failure until their age expiry. */
 export function retryRowsAt(
   db: Db,
   rows: readonly QueuedRow[],
@@ -427,11 +425,7 @@ export function retryRowsAt(
   error: string,
 ): void {
   db.tx(() => {
-    for (const row of rows) {
-      if (row.attempts + 1 >= MAX_FORWARD_ATTEMPTS)
-        settleRows(db, [row.id], 'failed', now, 'retry_exhausted', true, row.generation);
-      else requeueRows(db, [row.id], dueAt(row), now, error, true, row.generation);
-    }
+    for (const row of rows) requeueRows(db, [row.id], dueAt(row), now, error, true, row.generation);
   });
 }
 

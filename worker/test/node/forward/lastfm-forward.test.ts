@@ -20,21 +20,21 @@ import { type FixedClock, fixedClock } from '@atmusic/core/test-support/clock';
 import { seededRandom } from '@atmusic/core/test-support/random';
 import { afterEach, describe, expect, it } from 'vitest';
 import { MemoryRevocations } from '../../../src/app/revocations';
-import type { ForwardOutboxRow } from '../../../src/app/rows';
+import type { ForwardOutboxRow, LinkedAccountRow } from '../../../src/app/rows';
 import { ensureAccount } from '../../../src/credentials/accounts';
 import { runLinkBackfill } from '../../../src/forward/backfill';
 import {
   BACKOFF_BASE_MS,
+  BACKOFF_CAP_MS,
   holdLinkRows,
   LASTFM_EXPIRY_MS,
   LASTFM_KEY_REJECTED,
-  MAX_FORWARD_ATTEMPTS,
   resumeHeldRows,
   rowStates,
 } from '../../../src/forward/forward-outbox';
 import { type ForwardRuntime, KEY_REJECTED_PROBE_MS, runForward } from '../../../src/forward/forwarder';
 import { LASTFM_CAPS, LastfmClient } from '../../../src/forward/lastfm-client';
-import { patchLink, saveLink } from '../../../src/forward/links';
+import { linkDto, patchLink, saveLink } from '../../../src/forward/links';
 import { admitForwardIdentity, projectionListenKey } from '../../../src/forward/projection';
 import { UpstreamPacing } from '../../../src/forward/upstream-pacing';
 import { type LinksService, linksFeature } from '../../../src/http/links';
@@ -964,40 +964,35 @@ describe('Last.fm forwarding', () => {
     expect(w.lastfm.scrobbles.at(-1)?.items.map((i) => i.track)).toEqual([`Track 5`]);
   });
 
-  it('stops after exactly the configured maximum of attempted retryable requests', async () => {
+  it('retries transient failures past eight attempts, caps backoff at one hour, and expires at the Last.fm age limit', async () => {
     const w = await world();
     w.linkLastfm(ALICE, 'alice_fm');
-    w.scrobbles(ALICE, 1, 'retry-cap');
+    w.scrobbles(ALICE, 1, 'retry-lifetime');
     const row = () => w.rows(ALICE)[0]!;
-    for (let attempt = 1; attempt <= MAX_FORWARD_ATTEMPTS; attempt++) {
+    for (let attempt = 1; attempt <= 10; attempt++) {
       if (attempt > 1) w.clock.set(new Date(row().due_at).toISOString());
       w.lastfm.fail({ httpStatus: 503, method: 'track.scrobble' });
       expect((await w.run()).requests).toBe(1);
-      if (attempt < MAX_FORWARD_ATTEMPTS) expect(row()).toMatchObject({ state: 'queued', attempts: attempt });
+      expect(row()).toMatchObject({ state: 'queued', attempts: attempt, last_error: 'http_503' });
+      expect(row().due_at - w.clock.nowMs()).toBeLessThanOrEqual(BACKOFF_CAP_MS);
     }
-    expect(row()).toMatchObject({ state: 'failed', attempts: MAX_FORWARD_ATTEMPTS, last_error: 'retry_exhausted' });
-    const calls = w.lastfm.calls.count({ nsid: 'track.scrobble' });
-    expect(calls).toBe(MAX_FORWARD_ATTEMPTS);
-    expect((await w.run()).requests).toBe(0);
-    expect(w.lastfm.calls.count({ nsid: 'track.scrobble' })).toBe(calls);
+    expect(w.lastfm.calls.count({ nsid: 'track.scrobble' })).toBe(10);
+    w.clock.set(new Date(row().created_at_ms + LASTFM_EXPIRY_MS + 1).toISOString());
+    expect((await w.run()).expired?.aged).toBe(1);
+    expect(row()).toMatchObject({ state: 'expired', attempts: 10, last_error: 'expired' });
   });
 
-  it('stops after exactly the configured maximum of attempted retryable requests', async () => {
+  it('keeps permanent refusals terminal and exposes them in link sync status', async () => {
     const w = await world();
-    w.linkLastfm(ALICE, 'alice_fm');
-    w.scrobbles(ALICE, 1, 'retry-cap');
-    const row = () => w.rows(ALICE)[0]!;
-    for (let attempt = 1; attempt <= MAX_FORWARD_ATTEMPTS; attempt++) {
-      if (attempt > 1) w.clock.set(new Date(row().due_at).toISOString());
-      w.lastfm.fail({ httpStatus: 503, method: 'track.scrobble' });
-      expect((await w.run()).requests).toBe(1);
-      if (attempt < MAX_FORWARD_ATTEMPTS) expect(row()).toMatchObject({ state: 'queued', attempts: attempt });
-    }
-    expect(row()).toMatchObject({ state: 'failed', attempts: MAX_FORWARD_ATTEMPTS, last_error: 'retry_exhausted' });
-    const calls = w.lastfm.calls.count({ nsid: 'track.scrobble' });
-    expect(calls).toBe(MAX_FORWARD_ATTEMPTS);
+    const link = w.linkLastfm(ALICE, 'alice_fm');
+    w.scrobbles(ALICE, 1, 'permanent-refusal');
+    w.lastfm.fail({ code: 6, method: 'track.scrobble' });
+    await w.run();
+    expect(w.rows(ALICE)[0]).toMatchObject({ state: 'failed', attempts: 1, last_error: 'lastfm_error_6' });
+    const row = w.app.db.one<LinkedAccountRow>('SELECT * FROM linked_accounts WHERE id=?', link.id)!;
+    expect(linkDto(row, w.app.db).sync).toMatchObject({ failed: 1, lastError: 'lastfm_error_6' });
+    w.clock.advance(MINUTE);
     expect((await w.run()).requests).toBe(0);
-    expect(w.lastfm.calls.count({ nsid: 'track.scrobble' })).toBe(calls);
   });
 
   it('code 9 marks the link revoked and holds its rows, which resume after relinking; code 26 pauses all Last.fm forwarding and adminStatus reports lastfm_key_rejected', async () => {

@@ -31,8 +31,8 @@
 // | Last.fm ok, item code 0                 | sent                                    |                        |
 // | Last.fm item code 5                     | queued at the next 00:00 UTC            |                        |
 // | Last.fm other item code                 | ignored (`ignored_<code>`)              |                        |
-// | Last.fm 8, 11, 16, 29; HTTP 5xx, 429;   | backoff 30 s·2^n + U[0,25%], ≤ 6 h      | 29/429 hold the global |
-// |   network or redirect; malformed answer |                                         |   bucket (Retry-After) |
+// | Last.fm 8, 11, 16, 29; HTTP 5xx, 429;   | backoff 30 s·2^n + U[0,25%], ≤ 1 h      | 29/429 hold the global |
+// |   network errors                       | until destination age expiry            | bucket (Retry-After) |
 // | Last.fm 9 or 4                          | held                                    | link revoked           |
 // | Last.fm 10 or 26                        | stay queued                             | all Last.fm paused     |
 // | Last.fm other error code, HTTP 4xx      | failed                                  |                        |
@@ -56,8 +56,8 @@
 //
 // Delivery is at least once: a request that timed out after the upstream
 // accepted it is sent again (neither service has an idempotency key).
-// Retryable row requests stop after eight attempted requests, including
-// upstream 429 responses. Local pacing waits do not consume attempts. Link
+// Retryable row requests continue until their destination age expiry.
+// Upstream responses count as attempts; local pacing waits do not. Link
 // health stores the last success/failure times and shows transient errors
 // after three consecutive failures; a successful response clears that error.
 //
@@ -856,8 +856,7 @@ function lastfmFailed(rt: ForwardRuntime, job: Job, out: LastfmFailure, now: num
     const retryable =
       (out.kind === 'error' && RETRYABLE_LASTFM_CODES.has(out.code)) ||
       (out.kind === 'http' && (out.httpStatus >= 500 || out.httpStatus === 429)) ||
-      out.kind === 'network' ||
-      out.kind === 'malformed';
+      out.kind === 'network';
     if (!retryable || once) {
       noteLinkError(db, job.link, error, now, true);
       settleJobRows(db, job, 'failed', now, error);
