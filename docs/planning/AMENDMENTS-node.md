@@ -663,3 +663,25 @@ was discarded before deployment. S1 migrations take the next free versions
 after final N/M/M4: currently planned as 22–23 because M4 reserves 21; if M4
 is deferred, S1 uses 21–22. There is no sent ledger or per-destination sent
 retention.
+
+### ADR 0005 §12.3 outbox retry policy (DRAFT; owner publication required)
+
+**Demonstrated gap:** the eight-attempt ceiling can make an otherwise retryable
+forward terminal while the upstream is still unavailable, before its
+destination-specific retention window ends.
+
+**Amendment text:** Transient ListenBrainz failures (network errors and
+timeouts, HTTP 5xx and 429) and Last.fm failures (network errors and timeouts,
+HTTP 5xx and 429, and Last.fm codes 8, 11, 16 and 29) remain queued for retry
+until the row reaches its existing age limit: 13 days for Last.fm and 30 days
+for ListenBrainz. Retry delay remains `30 s · 2^n + U[0, 25%]` with a one-hour
+cap; the attempt count is diagnostic and does not exhaust the row. Permanent
+upstream refusals remain terminal and contribute to the failed count exposed
+in each linked account's sync status. Last.fm code 5 continues to wait until
+the next UTC midnight without consuming an attempt. Revocation, global Last.fm
+key rejection and now-playing's single-send 60-second lifetime keep their
+existing behavior. A malformed Last.fm answer (an unparseable body or an
+incomplete scrobble envelope) is not a payload refusal, so it is retried with
+the same backoff, but it is not proven transient either, so it keeps the former
+ceiling: the row fails as `retry_exhausted` at its eighth attempt. No migration
+is required.

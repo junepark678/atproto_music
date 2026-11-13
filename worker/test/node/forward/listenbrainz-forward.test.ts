@@ -35,6 +35,7 @@ import { applyRecordProof } from '../../../src/do/write/apply-record';
 import { runLinkBackfill } from '../../../src/forward/backfill';
 import { runDeleteSlice } from '../../../src/forward/delete-forwarder';
 import {
+  BACKOFF_CAP_MS,
   EXPIRY_PROBE_SQL,
   EXPIRY_SELECT_SQL,
   HELD_EXPIRY_PROBE_SQL,
@@ -2563,6 +2564,29 @@ describe('ListenBrainz forwarding', () => {
     ]);
   });
 
+  it('repeated 429s without X-RateLimit-Reset-In back off exponentially instead of retrying every second', async () => {
+    const w = await world();
+    w.link();
+    w.scrobbles(1);
+    const limited = () => Response.json({ code: 429, error: 'slow down' }, { status: 429 });
+    const delays: number[] = [];
+    for (let attempt = 1; attempt <= 4; attempt++) {
+      const row = w.rows()[0]!;
+      if (attempt > 1) w.clock.set(new Date(row.due_at).toISOString());
+      const sentAt = w.clock.nowMs();
+      w.intercept(limited);
+      await w.run();
+      const next = w.rows()[0]!;
+      expect(next).toMatchObject({ state: 'queued', attempts: attempt, last_error: 'http_429' });
+      delays.push(next.due_at - sentAt);
+    }
+    // 30 s * 2^n (+ up to 25% jitter), not the one-second default reset.
+    for (const [n, delay] of delays.entries()) {
+      expect(delay).toBeGreaterThanOrEqual(30 * SECOND * 2 ** n);
+      expect(delay).toBeLessThanOrEqual(Math.ceil(37.5 * SECOND * 2 ** n));
+    }
+  });
+
   it('401 revokes the link; an attempted 429 counts and waits X-RateLimit-Reset-In; 400 is terminal', async () => {
     const w = await world();
     const id = w.link();
@@ -2641,6 +2665,60 @@ describe('ListenBrainz forwarding', () => {
     expect(batch.map((r) => r.state)).toEqual(['failed', 'sent', 'sent']);
     expect(w.seen.slice(seenAfter400).map(([m, p]) => `${m} ${p}`)).toEqual(Array(4).fill('POST /1/submit-listens'));
     expect(w.lb.submissions.slice(-2).map((s) => s.listenType)).toEqual(['single', 'single']);
+  });
+
+  it('retries transient ListenBrainz failures past eight attempts and expires them at the 30-day age limit', async () => {
+    const w = await world();
+    w.link();
+    w.scrobbles(1, 'retry-lifetime');
+    const row = () => w.rows()[0]!;
+    for (let attempt = 1; attempt <= 10; attempt++) {
+      if (attempt > 1) w.clock.set(new Date(row().due_at).toISOString());
+      w.lb.fail({ status: 503 });
+      expect((await w.run()).requests).toBe(1);
+      expect(row()).toMatchObject({ state: 'queued', attempts: attempt, last_error: 'http_503' });
+      expect(row().due_at - w.clock.nowMs()).toBeLessThanOrEqual(BACKOFF_CAP_MS);
+    }
+    w.clock.set(new Date(row().created_at_ms + LISTENBRAINZ_EXPIRY_MS + 1).toISOString());
+    expect((await w.run()).expired?.aged).toBe(1);
+    expect(row()).toMatchObject({ state: 'expired', attempts: 10, last_error: 'expired' });
+  });
+
+  it('retries a transient love head past eight attempts without letting a later unlove pass it', async () => {
+    const w = await world();
+    w.link();
+    const deps = w.app.composed.core.deps;
+    const artist = 'Retry Lane Artist';
+    const track = 'Retry Lane Track';
+    expect(
+      (await enqueueLove(deps, { did: ALICE, input: { artist, track, recordingMbid: MBID }, origin: 'web' })).ok,
+    ).toBe(true);
+    expect((await enqueueUnlove(deps, { did: ALICE, artist, track, origin: 'web' })).ok).toBe(true);
+
+    const rows = () => w.rows();
+    for (let attempt = 1; attempt <= 10; attempt++) {
+      const head = rows().find((row) => row.kind === 'love')!;
+      if (attempt > 1) w.clock.set(new Date(head.due_at).toISOString());
+      w.lb.fail({ status: 503 });
+      expect((await w.run()).requests).toBe(1);
+      expect(rows().map((row) => [row.kind, row.state, row.attempts])).toEqual([
+        ['love', 'queued', attempt],
+        ['unlove', 'queued', 0],
+      ]);
+      expect(w.lb.feedback).toHaveLength(0);
+    }
+
+    const head = rows().find((row) => row.kind === 'love')!;
+    w.clock.set(new Date(head.due_at).toISOString());
+    await w.run();
+    expect(w.lb.feedback.map((item) => item.json)).toEqual([{ recording_mbid: MBID, score: 1 }]);
+    w.clock.advance(SECOND);
+    await w.run();
+    expect(w.lb.feedback.map((item) => item.json)).toEqual([
+      { recording_mbid: MBID, score: 1 },
+      { recording_mbid: MBID, score: 0 },
+    ]);
+    expect(rows().map((row) => row.state)).toEqual(['sent', 'sent']);
   });
 
   it('a 401 for a request sent before a relink leaves the relinked account active with its rows queued', async () => {
