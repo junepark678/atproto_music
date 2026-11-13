@@ -2688,10 +2688,13 @@ describe('ListenBrainz forwarding', () => {
     const head = rows().find((row) => row.kind === 'love')!;
     w.clock.set(new Date(head.due_at).toISOString());
     await w.run();
-    expect(w.lb.feedback.map((item) => item.json.score)).toEqual([1]);
+    expect(w.lb.feedback.map((item) => item.json)).toEqual([{ recording_mbid: MBID, score: 1 }]);
     w.clock.advance(SECOND);
     await w.run();
-    expect(w.lb.feedback.map((item) => item.json.score)).toEqual([1, 0]);
+    expect(w.lb.feedback.map((item) => item.json)).toEqual([
+      { recording_mbid: MBID, score: 1 },
+      { recording_mbid: MBID, score: 0 },
+    ]);
     expect(rows().map((row) => row.state)).toEqual(['sent', 'sent']);
   });
 
