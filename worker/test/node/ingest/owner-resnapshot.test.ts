@@ -121,6 +121,38 @@ describe('owner signed resnapshot scheduler', () => {
     });
   });
 
+  it('makes bounded progress on known owners across passes while unknown owners remain budget-refused', async () => {
+    await withMigratedDb((db) => {
+      for (let i = 0; i < 50; i++) {
+        const did = `did:plc:${String(i).padStart(24, '0')}`;
+        owner(db, did, `unknown${String(i).padStart(2, '0')}`);
+      }
+      const known = 'did:plc:zzzzzzzzzzzzzzzzzzzzzzzz';
+      owner(db, known, 'known');
+      user(db, known);
+      for (let hour = 0; hour < 4; hour++) {
+        const passAt = NOW + hour * OWNER_RESNAPSHOT_INTERVAL_MS;
+        db.run(
+          `INSERT INTO admission(window_start_ms,admitted) VALUES(?,50)
+           ON CONFLICT(window_start_ms) DO UPDATE SET admitted=excluded.admitted`,
+          passAt - (passAt % 3_600_000),
+        );
+        const report = runOwnerResnapshot(db, passAt);
+        expect(report.examined).toBeLessThanOrEqual(50);
+        expect(report.refused).toBe(49);
+        expect(report.accepted).toBe(1);
+        expect(db.one('SELECT 1 AS x FROM users WHERE did=?', known)).toEqual({ x: 1 });
+        expect(db.one("SELECT value FROM counters WHERE name='owner_resnapshot_receipt' AND label=?", known)).toEqual({
+          value: passAt,
+        });
+        expect(db.one("SELECT count(*) AS n FROM counters WHERE name='owner_resnapshot_receipt'")?.n).toBe(1);
+      }
+
+      expect(db.one('SELECT 1 AS x FROM users WHERE did=?', 'did:plc:000000000000000000000000')).toBeNull();
+      expect(db.one("SELECT value FROM counters WHERE name='owner_resnapshot_receipt' AND label=?", 'did:plc:000000000000000000000000')).toBeNull();
+    });
+  });
+
   it('does not receipt a queue-refused known owner and schedules it after capacity returns', async () => {
     await withMigratedDb((db) => {
       owner(db, A, 'alice');

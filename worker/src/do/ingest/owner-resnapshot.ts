@@ -43,7 +43,9 @@ export function runOwnerResnapshot(db: Db, now: number): OwnerResnapshotReport {
           AND (u.did IS NULL OR (u.active=1 AND u.account_status='active'))
           AND NOT EXISTS (SELECT 1 FROM suppression s WHERE s.did=a.did)
           AND (c.value IS NULL OR c.value + ? <= ?)
-        ORDER BY COALESCE(c.value,0), a.did
+        -- Known active owners need no admission token; let them progress even
+        -- when older unknown owners are repeatedly refused by the shared cap.
+        ORDER BY CASE WHEN u.did IS NOT NULL THEN 0 ELSE 1 END, COALESCE(c.value,0), a.did
         LIMIT ?`,
       RECEIPT_COUNTER,
       OWNER_RESNAPSHOT_INTERVAL_MS,
