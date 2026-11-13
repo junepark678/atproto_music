@@ -138,8 +138,92 @@ export function matchedEntityMbid(
       ? [key as string]
       : [(key as { artistKey: string }).artistKey, (key as { albumKey: string }).albumKey]),
   );
-  const values = [...new Set(rows.map((row) => row.value).filter(isUUID))];
-  return values.length === 1 ? values[0]! : null;
+  return entityMbidConsensus(rows.map((row) => row.value));
+}
+
+/** Reduce cached entity identifiers with the same UUID and unanimous-consensus policy. */
+export function entityMbidConsensus(values: Iterable<string | null>): string | null {
+  const distinct = new Set([...values].filter((value): value is string => value !== null && isUUID(value)));
+  return distinct.size === 1 ? (distinct.values().next().value ?? null) : null;
+}
+
+/** Read artist identifiers for a candidate set once, rather than rescanning per artist. */
+export function matchedArtistMbids(db: Db, keys: string[]): Map<string, string | null> {
+  const result = new Map<string, string | null>(keys.map((key) => [key, null]));
+  if (keys.length === 0) return result;
+  const rows = db.all<{ artistKey: string; value: string | null }>(
+    `SELECT m.artist_key AS artistKey,j.value AS value FROM mb_tracks m, json_each(m.artist_mbids) j
+     WHERE m.status='matched' AND m.artist_key IN (SELECT value FROM json_each(?))`,
+    JSON.stringify([...new Set(keys)]),
+  );
+  const grouped = new Map<string, (string | null)[]>();
+  for (const row of rows) {
+    const values = grouped.get(row.artistKey) ?? [];
+    values.push(row.value);
+    grouped.set(row.artistKey, values);
+  }
+  for (const key of result.keys()) result.set(key, entityMbidConsensus(grouped.get(key) ?? []));
+  return result;
+}
+
+/** Read release identifiers for candidate tuples in one cache query. */
+export function matchedReleaseMbids(
+  db: Db,
+  keys: { artistKey: string; albumKey: string }[],
+): Map<string, string | null> {
+  const tuple = (artistKey: string, albumKey: string) => JSON.stringify([artistKey, albumKey]);
+  const result = new Map<string, string | null>(
+    keys.map(({ artistKey, albumKey }) => [tuple(artistKey, albumKey), null]),
+  );
+  if (keys.length === 0) return result;
+  const rows = db.all<{ artistKey: string; albumKey: string; value: string | null }>(
+    `SELECT artist_key AS artistKey,album_key AS albumKey,release_mbid AS value FROM mb_tracks
+     WHERE status='matched' AND (artist_key,album_key) IN (
+       SELECT json_extract(value,'$.artistKey'),json_extract(value,'$.albumKey') FROM json_each(?)
+     ) AND release_mbid IS NOT NULL`,
+    JSON.stringify(keys),
+  );
+  const grouped = new Map<string, (string | null)[]>();
+  for (const row of rows) {
+    const key = tuple(row.artistKey, row.albumKey);
+    const values = grouped.get(key) ?? [];
+    values.push(row.value);
+    grouped.set(key, values);
+  }
+  for (const key of result.keys()) result.set(key, entityMbidConsensus(grouped.get(key) ?? []));
+  return result;
+}
+
+/** Distinct matched recording tuples that may forward-emit this MBID. */
+export function matchedRecordingKeys(db: Db, mbid: string): { artistKey: string; trackKey: string }[] {
+  if (!isUUID(mbid)) return [];
+  return db.all(
+    `SELECT DISTINCT artist_key AS artistKey, track_key AS trackKey FROM mb_tracks
+     WHERE status='matched' AND recording_mbid=?`,
+    mbid,
+  );
+}
+
+/** Distinct matched artist keys crediting this MBID. */
+export function matchedArtistKeys(db: Db, mbid: string): string[] {
+  if (!isUUID(mbid)) return [];
+  return db
+    .all<{ k: string }>(
+      `SELECT DISTINCT m.artist_key AS k FROM mb_tracks m, json_each(m.artist_mbids) j
+     WHERE m.status='matched' AND m.artist_mbids IS NOT NULL AND j.value=?`,
+      mbid,
+    )
+    .map(({ k }) => k);
+}
+
+/** Distinct matched album tuples crediting this release MBID. */
+export function matchedReleaseKeys(db: Db, mbid: string): { artistKey: string; albumKey: string }[] {
+  if (!isUUID(mbid)) return [];
+  return db.all(
+    `SELECT DISTINCT artist_key AS artistKey, album_key AS albumKey FROM mb_tracks
+     WHERE status='matched' AND release_mbid=? AND album_key<>''`,
+    mbid,
+  );
 }
 
 export interface LoveReviveJob extends TrackKey {
