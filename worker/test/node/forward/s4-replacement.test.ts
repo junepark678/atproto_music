@@ -3,10 +3,11 @@ import { seededRandom } from '@atmusic/core/test-support/random';
 import { describe, expect, it } from 'vitest';
 import type { Db } from '../../../src/do/db';
 import { applyRecordProof } from '../../../src/do/write/apply-record';
-import { enqueueListenDelete } from '../../../src/forward/delete-enqueue';
+import { enqueueListenDelete, hasCanonicalListenSurvivor } from '../../../src/forward/delete-enqueue';
 import { projectionListenKey } from '../../../src/forward/projection';
 import { enqueueForwards } from '../../../src/outbox/forward-enqueue';
-import { ALICE, NOW_MS, OPTS, putProof, repoFor, SCROBBLE, scrobble, seedUser } from '../../write/support';
+import { tombstoneListen } from '../../../src/sync/tombstones';
+import { ALICE, deleteProof, NOW_MS, OPTS, putProof, repoFor, SCROBBLE, scrobble, seedUser } from '../../write/support';
 import { withMigratedDb } from '../support/node-db';
 
 const record = scrobble({ artist: 'Björk', track: 'Jóga' });
@@ -51,6 +52,31 @@ const deletion = {
 };
 
 describe('S4 generation and single replacement', () => {
+  it('does not let an old replacement tombstone hide a recreated same-URI survivor', async () => {
+    const repo = await repoFor('alice');
+    const original = await putProof(repo, SCROBBLE, 'recreated', record);
+    const recreated = await putProof(repo, SCROBBLE, 'recreated', { ...record, album: 'Recreated album' });
+    const uri = `at://${ALICE}/${SCROBBLE}/recreated`;
+    await withMigratedDb((db) => {
+      seedLink(db);
+      db.tx(() => applyRecordProof(db, original, OPTS));
+      const oldCid = db.one<{ cid: string }>('SELECT cid FROM scrobbles WHERE uri=?', uri)!.cid;
+      tombstoneListen(db, {
+        did: ALICE,
+        identity: `batch-replaced:${uri}:${oldCid}`,
+        second,
+        artistKey,
+        trackKey: musicTrackKey,
+        nowMs: NOW_MS,
+      });
+      db.tx(() => applyRecordProof(db, recreated, OPTS));
+      expect(db.one<{ cid: string }>('SELECT cid FROM scrobbles WHERE uri=?', uri)!.cid).not.toBe(oldCid);
+      expect(
+        hasCanonicalListenSurvivor(db, { did: ALICE, listenedAt: second, artistKey, trackKey: musicTrackKey }),
+      ).toBe(true);
+    });
+  });
+
   it('retains independent deletion evidence for a replacement destination generation', async () => {
     await withMigratedDb((db) => {
       seedLink(db);
@@ -109,6 +135,26 @@ describe('S4 generation and single replacement', () => {
       db.tx(() => applyRecordProof(db, replacement, mode === 'snapshot' ? OPTS : live));
       expect(db.all('SELECT id FROM listenbrainz_deletes')).toHaveLength(0);
       expect(db.all('SELECT identity_key FROM linked_pull_tombstones')).toHaveLength(0);
+    });
+  });
+
+  it('does not enqueue deletion of one single record while an equal canonical batch member survives', async () => {
+    const repo = await repoFor('alice');
+    const single = await putProof(repo, SCROBBLE, 'same-single', record);
+    const { $type, ...entry } = record;
+    const batch = await putProof(repo, `${SCROBBLE}Batch`, 'same-batch', {
+      $type: `${SCROBBLE}Batch`,
+      createdAt: record.createdAt,
+      listens: [{ ...entry, id: '2222222222222' }],
+    });
+    const gone = await deleteProof(repo, SCROBBLE, 'same-single');
+    await withMigratedDb((db) => {
+      seedLink(db);
+      db.tx(() => applyRecordProof(db, single, OPTS));
+      db.tx(() => applyRecordProof(db, batch, OPTS));
+      delivered(db);
+      db.tx(() => applyRecordProof(db, gone, live));
+      expect(db.all('SELECT id FROM listenbrainz_deletes')).toHaveLength(0);
     });
   });
 });

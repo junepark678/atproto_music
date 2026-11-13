@@ -3,6 +3,7 @@ import { trackKey } from '@atmusic/core/music-key';
 import type { LinkedAccountRow } from '../app/rows';
 import type { Box } from '../crypto/box';
 import type { Db } from '../do/db';
+import { hasCanonicalListenSurvivor } from './delete-enqueue';
 import { noteLinkError, noteLinkSuccess, openLinkCredential, revokeLink } from './links';
 import type { ListenbrainzClient, ListenWindowEntry } from './listenbrainz-client';
 import type { UpstreamPacing } from './upstream-pacing';
@@ -202,6 +203,21 @@ export async function runDeleteSlice(
     if (row !== null) break;
   }
   if (!row) return { requests: 0, state: null, nextDueMs: nextCandidateAt ?? nextDeleteWakeAt(deps, now) };
+  if (
+    hasCanonicalListenSurvivor(deps.db, {
+      did: row.did,
+      listenedAt: row.listened_at,
+      artistKey: row.artist_key,
+      trackKey: row.track_key,
+    })
+  ) {
+    deps.db.run(
+      "UPDATE listenbrainz_deletes SET state='ignored',last_error='canonical_survivor',updated_at_ms=? WHERE id=? AND state='queued'",
+      now,
+      row.id,
+    );
+    return { requests: 0, state: 'survivor_present', nextDueMs: nextDeleteWakeAt(deps, now) };
+  }
   if (row.deadline_at <= now) {
     deps.db.run(
       "UPDATE listenbrainz_deletes SET state='expired',last_error='retry_deadline',updated_at_ms=? WHERE id=? AND state='queued'",
@@ -266,6 +282,21 @@ export async function runDeleteSlice(
         row.generation,
         row.target_msid,
         row.target_listened_at,
+      );
+      // Several removal events can resolve to the same upstream listen while
+      // paced calls are in flight. Once one delete succeeds, retire only the
+      // currently outstanding equivalent intents; later re-forwarding creates
+      // a new event key and remains eligible.
+      deps.db.run(
+        `UPDATE listenbrainz_deletes SET state='ignored',last_error='canonical_delete_sent',updated_at_ms=?
+         WHERE link_id=? AND generation=? AND did=? AND state='queued' AND listened_at=? AND artist_key=? AND track_key=?`,
+        deps.clock.nowMs(),
+        row.link_id,
+        row.generation,
+        row.did,
+        row.listened_at,
+        row.artist_key,
+        row.track_key,
       );
       return { requests: 1, state: 'sent', nextDueMs: null };
     }

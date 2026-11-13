@@ -1,5 +1,62 @@
+import { toStorage } from '@atmusic/core/timestamp';
 import type { Db } from '../do/db';
 import { storedForwardDedupeKey } from '../outbox/forward-key';
+
+/** True while another non-removed projection row still represents this canonical listen. */
+export function hasCanonicalListenSurvivor(
+  db: Db,
+  args: { did: string; listenedAt: number; artistKey: string; trackKey: string; excluding?: ReadonlySet<string> },
+): boolean {
+  const second = BigInt(args.listenedAt) * 1_000_000_000n;
+  const rows = db.all<{ uri: string }>(
+    `SELECT s.uri FROM scrobbles s WHERE s.did=? AND s.artist_key=? AND s.track_key=?
+     AND s.listened_at>=? AND s.listened_at<?`,
+    args.did,
+    args.artistKey,
+    args.trackKey,
+    toStorage(second),
+    toStorage(second + 1_000_000_000n),
+  );
+  return rows.some((row) => {
+    if (args.excluding?.has(row.uri)) return false;
+    // Only tombstones for this exact projected incarnation are removal intent.
+    // In particular, a replacement tombstone for an older CID must not hide a
+    // newly recreated row at the same AT URI.
+    const current = db.one<{
+      cid: string;
+      listened_at: string;
+      artist_key: string;
+      track_key: string;
+      record_uri: string | null;
+    }>(
+      'SELECT cid,listened_at,artist_key,track_key,record_uri FROM scrobbles WHERE did=? AND uri=?',
+      args.did,
+      row.uri,
+    );
+    if (current === null) return false;
+    const exactSecond = Math.floor(Date.parse(current.listened_at) / 1000);
+    if (current.artist_key !== args.artistKey || current.track_key !== args.trackKey || exactSecond !== args.listenedAt)
+      return true;
+    // Tombstone identity alone is not enough: replacement tombstones name the
+    // new CID but carry the old listen tuple. Only matching removal intent can
+    // hide a row, and a later accepted present proof clears that intent.
+    const removal = db.one<{ identity_key: string }>(
+      `SELECT identity_key FROM linked_pull_tombstones WHERE did=? AND kind='listen'
+       AND identity_key IN (?,?,?,?,?,?) AND listen_second=? AND artist_key=? AND track_key=? LIMIT 1`,
+      args.did,
+      `uri:${row.uri}:${current.cid}`,
+      `uri:${row.uri}`,
+      `live:${row.uri}`,
+      `live:${row.uri}:${current.cid}`,
+      `single-replaced:${row.uri}:${current.cid}`,
+      `batch-replaced:${row.uri}:${current.cid}`,
+      exactSecond,
+      args.artistKey,
+      args.trackKey,
+    );
+    return removal === null;
+  });
+}
 
 /** Enqueue one local deletion only for a ListenBrainz listen proven delivered to that account generation. */
 export function enqueueListenDelete(
@@ -15,8 +72,10 @@ export function enqueueListenDelete(
     track: string;
     sourcePath: string;
     now: number;
+    excluding?: ReadonlySet<string>;
   },
 ): number {
+  if (hasCanonicalListenSurvivor(db, args)) return 0;
   const links = db.all<{ id: string; generation: number; service: string }>(
     'SELECT id,generation,service FROM linked_accounts WHERE did=?',
     args.did,

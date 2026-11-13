@@ -55,7 +55,7 @@ import { reasonText, type ScrobbleRow, validateScrobbleRecord } from '@atmusic/c
 import { MAX_INGEST_CBOR_BYTES, validateScrobbleBatchRecord } from '@atmusic/core/scrobble-batch';
 import { isTid } from '@atmusic/core/syntax';
 import { toStorage } from '@atmusic/core/timestamp';
-import { enqueueListenDelete } from '../../forward/delete-enqueue';
+import { enqueueListenDelete, hasCanonicalListenSurvivor } from '../../forward/delete-enqueue';
 import {
   admitForwardIdentity,
   admitProjectedIdentity,
@@ -66,7 +66,12 @@ import {
 import { enqueueTrack } from '../../musicbrainz/store';
 import { enqueueForwards } from '../../outbox/forward-enqueue';
 import { pullLoveAdmissionForUri, retirePullLoveAdmissionUri } from '../../sync/pull-love-admissions';
-import { tombstoneListen, tombstoneLove } from '../../sync/tombstones';
+import {
+  archiveMatchingLiveListenTombstones,
+  hasListenRemovalTombstones,
+  tombstoneListen,
+  tombstoneLove,
+} from '../../sync/tombstones';
 import type { Db } from '../db';
 import { advanceUser, bumpStatsVersion, isSuppressed, loadUser } from './account-state';
 import {
@@ -222,13 +227,14 @@ function scrobbleVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, 
     ok: true,
     write: () => {
       const before = db.one<{
+        uri: string;
         cid: string;
         listened_at: string;
         artist_key: string;
         track_key: string;
         artist: string;
         track: string;
-      }>('SELECT cid,listened_at,artist_key,track_key,artist,track FROM scrobbles WHERE uri = ?', t.uri);
+      }>('SELECT uri,cid,listened_at,artist_key,track_key,artist,track FROM scrobbles WHERE uri = ?', t.uri);
       enqueueTrack(
         db,
         { artistKey: keys.artist_key, trackKey: keys.track_key, albumKey: keys.album_key },
@@ -265,17 +271,16 @@ function scrobbleVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, 
         priorIdentityKey !== identityKey
       ) {
         const priorSecond = BigInt(Math.floor(Date.parse(before.listened_at) / 1000)) * 1_000_000_000n;
-        const retained = db.one(
-          `SELECT 1 FROM scrobbles WHERE did=? AND artist_key=? AND track_key=?
-           AND listened_at>=? AND listened_at<? AND uri<>? LIMIT 1`,
-          t.did,
-          before.artist_key,
-          before.track_key,
-          toStorage(priorSecond),
-          toStorage(priorSecond + 1_000_000_000n),
-          t.uri,
-        );
-        if (retained === null) {
+        const removalScope = new Set([t.uri]);
+        if (
+          !hasCanonicalListenSurvivor(db, {
+            did: t.did,
+            listenedAt: Number(priorSecond / 1_000_000_000n),
+            artistKey: before.artist_key,
+            trackKey: before.track_key,
+            excluding: removalScope,
+          })
+        ) {
           tombstoneListen(db, {
             did: t.did,
             identity: `single-replaced:${t.uri}:${cid}`,
@@ -287,7 +292,7 @@ function scrobbleVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, 
           enqueueListenDelete(db, {
             did: t.did,
             identityKey: priorIdentityKey,
-            eventKey: `${priorIdentityKey}:${before.cid}`,
+            eventKey: `${priorIdentityKey}:${before.cid}:rev:${t.rev}`,
             listenedAt: Number(priorSecond / 1_000_000_000n),
             artistKey: before.artist_key,
             trackKey: before.track_key,
@@ -295,6 +300,7 @@ function scrobbleVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, 
             track: before.track,
             sourcePath: 'live',
             now,
+            excluding: removalScope,
           });
         }
       }
@@ -442,6 +448,7 @@ function batchVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: 
       const priorByUri = new Map(prior.map((row) => [row.uri, row]));
       const now = Number(o.nowNs / 1_000_000n);
       if (o.forwarding) {
+        const removalScope = new Set(prior.map((old) => old.uri));
         const retainedIdentities = new Set(
           batch.listens.map((listen) => {
             const keys = musicKeyColumns(listen.row.artist, listen.row.track, listen.row.album);
@@ -454,18 +461,16 @@ function batchVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: 
           const identityKey = projectionListenKey(t.did, old.listened_at, old.artist_key, old.track_key);
           if (retainedIdentities.has(identityKey) || (old.listen_id !== null && excludedIds.has(old.listen_id)))
             continue;
-          const second = BigInt(Math.floor(Date.parse(old.listened_at) / 1000)) * 1_000_000_000n;
-          const retained = db.one(
-            `SELECT 1 FROM scrobbles WHERE did=? AND artist_key=? AND track_key=?
-             AND listened_at>=? AND listened_at<? AND (record_uri IS NULL OR record_uri<>?) LIMIT 1`,
-            t.did,
-            old.artist_key,
-            old.track_key,
-            toStorage(second),
-            toStorage(second + 1_000_000_000n),
-            t.uri,
-          );
-          if (retained !== null) continue;
+          if (
+            hasCanonicalListenSurvivor(db, {
+              did: t.did,
+              listenedAt: Math.floor(Date.parse(old.listened_at) / 1000),
+              artistKey: old.artist_key,
+              trackKey: old.track_key,
+              excluding: removalScope,
+            })
+          )
+            continue;
           tombstoneListen(db, {
             did: t.did,
             identity: `batch-replaced:${old.uri}:${cid}`,
@@ -477,7 +482,7 @@ function batchVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: 
           enqueueListenDelete(db, {
             did: t.did,
             identityKey,
-            eventKey: `${identityKey}:${old.cid}`,
+            eventKey: `${identityKey}:${old.cid}:rev:${t.rev}`,
             listenedAt: Math.floor(Date.parse(old.listened_at) / 1000),
             artistKey: old.artist_key,
             trackKey: old.track_key,
@@ -485,6 +490,7 @@ function batchVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: 
             track: old.track,
             sourcePath: 'live',
             now,
+            excluding: removalScope,
           });
         }
       }
@@ -854,7 +860,7 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
       for (const listen of listens)
         tombstoneListen(db, {
           did: t.did,
-          identity: `live:${listen.uri}`,
+          identity: `live:${listen.uri}:${listen.cid}`,
           second: Math.floor(Date.parse(listen.listened_at) / 1000),
           artistKey: listen.artist_key,
           trackKey: listen.track_key,
@@ -865,7 +871,7 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
         enqueueListenDelete(db, {
           did: t.did,
           identityKey,
-          eventKey: `${identityKey}:${listen.cid}`,
+          eventKey: `${identityKey}:${listen.cid}:rev:${t.rev}`,
           listenedAt: Math.floor(Date.parse(listen.listened_at) / 1000),
           artistKey: listen.artist_key,
           trackKey: listen.track_key,
@@ -873,6 +879,7 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
           track: listen.track,
           sourcePath: 'live',
           now: Number(o.nowNs / 1_000_000n),
+          excluding: new Set(listens.map((entry) => entry.uri)),
         });
       }
     }
@@ -902,7 +909,7 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
       const key = `${artistKeyValue}\u0000${trackKeyValue}`;
       tombstoneLove(db, {
         did: t.did,
-        identity: `live:${t.uri}`,
+        identity: `live:${t.uri}:${priorLove.cid}`,
         loveKey: key,
         recordingMbid: priorLove.recording_mbid,
         nowMs: Number(o.nowNs / 1_000_000n),
@@ -1079,7 +1086,46 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
     }
   }
   if (out.statsChanged) bumpStatsVersion(db, t.did);
+  if (t.present !== null && out.outcome === 'applied' && (t.kind === 'scrobble' || t.kind === 'scrobbleBatch')) {
+    archiveAcceptedListenTombstones(db, t.did, t.uri, t.rev);
+  }
   return out;
+}
+
+function archiveAcceptedListenTombstones(db: Db, did: string, uri: string, revision: string): void {
+  if (!hasListenRemovalTombstones(db, did)) return;
+  const listens = db.all<{
+    uri: string;
+    record_uri: string | null;
+    listen_id: string | null;
+    cid: string;
+    listened_at: string;
+    artist_key: string;
+    track_key: string;
+  }>(
+    `SELECT uri,record_uri,listen_id,cid,listened_at,artist_key,track_key
+       FROM scrobbles WHERE uri=? AND did=?
+     UNION ALL
+     SELECT uri,record_uri,listen_id,cid,listened_at,artist_key,track_key
+       FROM scrobbles WHERE record_uri=? AND did=?`,
+    uri,
+    did,
+    uri,
+    did,
+  );
+  for (const listen of listens) {
+    archiveMatchingLiveListenTombstones(db, {
+      did,
+      uri: listen.uri,
+      recordUri: listen.record_uri,
+      listenId: listen.listen_id,
+      revision,
+      cid: listen.cid,
+      second: Math.floor(Date.parse(listen.listened_at) / 1000),
+      artistKey: listen.artist_key,
+      trackKey: listen.track_key,
+    });
+  }
 }
 
 /**
@@ -1142,6 +1188,7 @@ export function reaffirmRecordTarget(
       t.uri,
       t.rev,
     );
+    archiveAcceptedListenTombstones(db, t.did, t.uri, t.rev);
   }
   const verified = { did: t.did, uri: t.uri, rev: t.rev, cid, state, reason };
   if (!batch) {
