@@ -216,6 +216,11 @@ export function kickOutbox(ctx: RequestCtx): void {
   if (ctx.index instanceof IndexCore) ctx.index.extensionTimers.kick('outbox');
 }
 
+/** Kicks the forward timer after a compatibility now-playing enqueue. */
+export function kickForward(ctx: RequestCtx): void {
+  if (ctx.index instanceof IndexCore) ctx.index.extensionTimers.kick('forward');
+}
+
 // ---------------------------------------------------------------------------
 // Bodies
 

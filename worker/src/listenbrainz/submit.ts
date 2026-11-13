@@ -70,12 +70,14 @@ import { NS_PER_SECOND, toStorage } from '@atmusic/core/timestamp';
 import type { ModuleDeps } from '../do/contracts';
 import { upsertNowPlaying } from '../do/read/now-playing';
 import { need, type RequestCtx } from '../http/types';
+import { noteListenbrainzType } from '../http/routes';
 import { enqueueForwards } from '../outbox/forward-enqueue';
 import { acceptListens, DAILY_CAP_WINDOW_MS, DEFAULT_DAILY_LISTEN_CAP, type IngressListen } from '../outbox/ingress';
 import { LB_UNAVAILABLE_MESSAGE, lbError, lbJson, lbPreflight, lbTooManyRequests } from './errors';
 import { rateLimitHeaders } from './rate-headers';
 import {
   kickOutbox,
+  kickForward,
   type LbDispatch,
   type LbModuleRouteDef,
   type LbRouteOptions,
@@ -285,6 +287,7 @@ async function playingNow(
 ): Promise<Response> {
   const m = need(ctx, 'deps');
   const track: MappedTrack | null = listen.track;
+  let enqueued = false;
   if (listen.disposition.kind !== 'ignore' && track !== null) {
     const info = additionalInfo(listen);
     m.db.tx(() => {
@@ -329,8 +332,10 @@ async function playingNow(
         now,
         random: m.random,
       });
+      enqueued = true;
     });
   }
+  if (enqueued) kickForward(ctx);
   if (!returnMsid) return lbJson({ status: 'ok' }, 200, headers);
   const msid = await msidOf(listen);
   return lbJson(msid === null ? { status: 'ok' } : { status: 'ok', recording_msid: msid }, 200, headers);
@@ -361,6 +366,7 @@ async function handleSubmit(
   const now = m.clock.nowMs();
   const validated = validateSubmission(body, now);
   if (!validated.ok) return lbError(400, validated.error.message, headers);
+  noteListenbrainzType(req, validated.listenType);
 
   // 5–6.
   const did = guard.token.did;

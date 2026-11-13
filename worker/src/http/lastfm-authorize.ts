@@ -229,6 +229,9 @@ export function lastfmAuthFeature(options: LastfmAuthFeatureOptions): Feature {
           kickOutbox: () => {
             core.extensionTimers.kick('outbox');
           },
+          kickForward: () => {
+            core.extensionTimers.kick('forward');
+          },
           ...(options.failureLimits !== undefined ? { failureLimits: options.failureLimits } : {}),
         }),
       };

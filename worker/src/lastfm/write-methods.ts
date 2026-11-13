@@ -325,6 +325,7 @@ const updateNowPlayingMethod: LastfmMethodDef = {
         random: m.random,
       });
     });
+    call.services.kickForward();
     return nowPlayingDocument(entry, 0);
   },
 };

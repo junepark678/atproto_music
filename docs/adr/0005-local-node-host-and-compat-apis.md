@@ -1157,7 +1157,9 @@ The UI polls every 5 s.
 Last.fm has no revoke API, so the UI tells the user to revoke at last.fm/settings/applications. ListenBrainz tokens are revoked by resetting them at listenbrainz.org.
 
 ### 12.2 What is forwarded
-Forwarded: scrobbles, now-playing and love/unlove **received through our server**, meaning the Last.fm-compatible API, the ListenBrainz-compatible API and the web form. The forward rows are created **in the same transaction as acceptance**, so forwarding does not wait for the PDS write.
+Forwarded: scrobbles, now-playing and love/unlove **received through our server**, meaning the Last.fm-compatible API and the ListenBrainz-compatible API. There is no web form for now-playing. The forward rows are created **in the same transaction as acceptance**, so forwarding does not wait for the PDS write.
+
+Now-playing forwarding is controlled independently by each linked account's `forwardNowPlaying` setting. The account's `share_now_playing` setting controls visibility on this site only; a private now-playing may still be sent to a linked service when its forwarding setting is enabled.
 
 Not forwarded:
 - imports;

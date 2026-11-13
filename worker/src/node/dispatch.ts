@@ -49,6 +49,7 @@ import {
   createRouteTable,
   invokeRoute,
   lastfmLogMethod,
+  notedListenbrainzType,
   notedLastfmMethod,
   REQUEST_ID_HEADER,
   type RouteTable,
@@ -152,13 +153,15 @@ export function createDispatcher(options: DispatcherOptions): Dispatcher {
     status: number;
     startedMs: number;
     lastfmMethod?: string;
+    listenType?: string;
   }): void => {
-    const { startedMs, lastfmMethod, ...rest } = fields;
+    const { startedMs, lastfmMethod, listenType, ...rest } = fields;
     try {
       log.log('info', 'request', {
         ...rest,
         durationMs: Math.max(0, Math.round(now() - startedMs)),
         ...(lastfmMethod === undefined ? {} : { lastfmMethod }),
+        ...(listenType === undefined ? {} : { listenType }),
       });
     } catch {
       // A broken log sink never changes an answer.
@@ -223,6 +226,7 @@ export function createDispatcher(options: DispatcherOptions): Dispatcher {
       status: response.status,
       startedMs,
       lastfmMethod: notedLastfmMethod(handlerRequest) ?? lastfm,
+      listenType: notedListenbrainzType(handlerRequest),
     });
     return head ? withoutBody(response) : response;
   };

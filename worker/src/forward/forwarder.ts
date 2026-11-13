@@ -766,7 +766,7 @@ export const LANE_FIRST_DUE_SQL = `SELECT priority,head_created_at_ms FROM forwa
 
 function pickJob(rt: ForwardRuntime, now: number, localWork: Map<string, { remaining: number }>): Job | null {
   const links = rt.db.all<LinkRow>("SELECT * FROM linked_accounts WHERE status='active' ORDER BY id");
-  const candidates: Array<{ link: LinkRow; priority: number; oldest: number }> = [];
+  const candidates: Array<{ link: LinkRow; priority: number; oldest: number; nowPlaying: boolean }> = [];
   for (const link of links) {
     const hints: Array<{ priority: number; created_at_ms: number | null } | null> = [];
     for (const kind of ['nowplaying', 'scrobble'] as const) {
@@ -790,9 +790,17 @@ function pickJob(rt: ForwardRuntime, now: number, localWork: Map<string, { remai
     if (due.length === 0) continue;
     const priority = Math.min(...due.map((hint) => hint.priority));
     const oldest = Math.min(...due.filter((hint) => hint.priority === priority).map((hint) => hint.created_at_ms));
-    candidates.push({ link, priority, oldest });
+    candidates.push({ link, priority, oldest, nowPlaying: hints[0] !== null });
   }
-  candidates.sort((a, b) => a.priority - b.priority || a.oldest - b.oldest || a.link.id.localeCompare(b.link.id));
+  // A live now-playing update is useful only while current (60 s). Let it
+  // take the next Last.fm token before historical/live listen backlog.
+  candidates.sort(
+    (a, b) =>
+      Number(b.nowPlaying) - Number(a.nowPlaying) ||
+      a.priority - b.priority ||
+      a.oldest - b.oldest ||
+      a.link.id.localeCompare(b.link.id),
+  );
   for (const { link } of candidates) {
     if (!upstreamFree(rt, link, now)) continue;
     let budget = localWork.get(link.id);
@@ -903,12 +911,18 @@ async function sendLastfm(rt: ForwardRuntime, job: Job, sk: string): Promise<voi
       : await client.love(sk, job.kind === 'love' ? 'track.love' : 'track.unlove', job.track.artist, job.track.track);
   const at = rt.clock.nowMs();
   if (!generationIsCurrent(db, job.link)) return;
-  if (!out.ok) return lastfmFailed(rt, job, out, at);
+  if (!out.ok) {
+    if (job.kind === 'nowplaying')
+      rt.log.log('info', 'forward.nowplaying', { kind: job.kind, status: 'failed', service: 'lastfm' });
+    return lastfmFailed(rt, job, out, at);
+  }
   db.tx(() => {
     clearLastfmKeyRejected(db);
     noteLinkSuccess(db, job.link, at);
     settleJobRows(db, job, 'sent', at);
   });
+  if (job.kind === 'nowplaying')
+    rt.log.log('info', 'forward.nowplaying', { kind: job.kind, status: 'sent', service: 'lastfm' });
 }
 
 // ---------------------------------------------------------------------------
@@ -961,6 +975,8 @@ async function sendListenbrainz(rt: ForwardRuntime, job: Job, token: string): Pr
       noteLinkSuccess(db, job.link, at);
       settleJobRows(db, job, 'sent', at);
     });
+    if (job.kind === 'nowplaying')
+      rt.log.log('info', 'forward.nowplaying', { kind: job.kind, status: 'sent', service: 'listenbrainz' });
     return;
   }
   if (out.kind === 'network') {
@@ -971,6 +987,7 @@ async function sendListenbrainz(rt: ForwardRuntime, job: Job, token: string): Pr
       else backoffRows(db, job.rows, at, rt.random, error);
     });
     rt.log.log('warn', 'forward.failed', { service: 'listenbrainz', kind: job.kind, rows: job.rows.length, error });
+    if (once) rt.log.log('info', 'forward.nowplaying', { kind: job.kind, status: 'failed', service: 'listenbrainz' });
     return;
   }
   const error = `http_${out.status}`;
@@ -1007,6 +1024,7 @@ async function sendListenbrainz(rt: ForwardRuntime, job: Job, token: string): Pr
     rows: job.rows.length,
     status: out.status,
   });
+  if (once) rt.log.log('info', 'forward.nowplaying', { kind: job.kind, status: 'failed', service: 'listenbrainz' });
 }
 
 // ---------------------------------------------------------------------------

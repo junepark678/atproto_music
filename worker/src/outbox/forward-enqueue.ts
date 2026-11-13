@@ -73,6 +73,41 @@ export function nowPlayingKey(did: string, startedAtMs: number, artist: string, 
     .digest('hex');
 }
 
+/** Keep the current delivery's dedupe identity aligned when scrobble proof corrects its start time. */
+export function rewriteNowPlayingForwardStart(
+  db: Db,
+  did: string,
+  artist: string,
+  track: string,
+  oldStartedAtMs: number,
+  startedAtMs: number,
+): void {
+  const oldKey = nowPlayingKey(did, oldStartedAtMs, artist, track);
+  const nextKey = nowPlayingKey(did, startedAtMs, artist, track);
+  const rows = db.all<{ id: string; payload_json: string }>(
+    `SELECT id,payload_json FROM forward_outbox
+     WHERE did=? AND kind='nowplaying' AND dedupe_key=?`,
+    did,
+    oldKey,
+  );
+  for (const row of rows) {
+    let payload: Record<string, unknown>;
+    try {
+      payload = JSON.parse(row.payload_json) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    if (payload === null || typeof payload !== 'object') continue;
+    payload.startedAtMs = startedAtMs;
+    db.run(
+      `UPDATE OR IGNORE forward_outbox SET dedupe_key=?,payload_json=? WHERE id=? AND kind='nowplaying'`,
+      nextKey,
+      JSON.stringify(payload),
+      row.id,
+    );
+  }
+}
+
 export type ForwardItem =
   | { kind: 'scrobble'; listenKey: string; payload: unknown }
   | { kind: 'nowplaying'; startedAtMs: number; artist: string; track: string; payload: unknown }
