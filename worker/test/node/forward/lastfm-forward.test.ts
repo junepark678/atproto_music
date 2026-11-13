@@ -1246,6 +1246,53 @@ describe('Last.fm forwarding', () => {
     expect(w.lastfm.calls.count({ nsid: 'track.updateNowPlaying' })).toBe(2);
   });
 
+  it('sends pending now playing before an older scrobble on another Last.fm link', async () => {
+    const w = await world();
+    const backlogLink = w.linkLastfm(ALICE, 'older_backlog');
+    const playerLink = w.linkLastfm(ALICE, 'current_player');
+    const now = w.clock.nowMs();
+    enqueueForwards(w.app.db, {
+      did: ALICE,
+      linkId: backlogLink.id,
+      items: [
+        {
+          kind: 'scrobble',
+          listenKey: 'older-link-backlog',
+          payload: {
+            listen: { artist: 'Old Artist', track: 'Old Track', listenedAt: '2026-01-14T00:00:00.000Z' },
+            origin: 'lastfm',
+          },
+        },
+      ],
+      now,
+      random: enqueueRandom,
+    });
+    w.clock.advance(SECOND);
+    const startedAtMs = w.clock.nowMs();
+    enqueueForwards(w.app.db, {
+      did: ALICE,
+      linkId: playerLink.id,
+      items: [
+        {
+          kind: 'nowplaying',
+          startedAtMs,
+          artist: 'Current Artist',
+          track: 'Current Track',
+          payload: { track: { artist: 'Current Artist', track: 'Current Track' }, startedAtMs, origin: 'lastfm' },
+        },
+      ],
+      now: startedAtMs,
+      random: enqueueRandom,
+    });
+
+    await w.run();
+
+    expect(w.lastfm.nowPlayingCalls.map((call) => call.track)).toEqual(['Current Track']);
+    expect(w.lastfm.calls.filter({ nsid: 'track.scrobble' })).toHaveLength(0);
+    expect(w.rows().find((row) => row.kind === 'nowplaying')).toMatchObject({ state: 'sent' });
+    expect(w.rows().find((row) => row.kind === 'scrobble')).toMatchObject({ state: 'queued' });
+  });
+
   it('love, unlove, love for one track forwards track.love, track.unlove, track.love in order, and the same track played as now playing twice 10 minutes apart is forwarded twice', async () => {
     const w = await world();
     w.linkLastfm(ALICE, 'alice_fm');

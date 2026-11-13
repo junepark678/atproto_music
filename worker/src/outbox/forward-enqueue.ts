@@ -45,7 +45,7 @@ import { deferredAuthorityValid, materializeLoveAuthority } from '../forward/lov
 import { recordDeferredLoveIntents } from '../forward/love-deferral-storage';
 import { noteForwardLoveCurrent, touchLoveLane } from '../forward/love-lanes';
 import { indexForwardLoveTarget } from '../forward/love-recording-targets';
-import { storedForwardDedupeKey } from './forward-key';
+import { canonicalForwardDedupeKey, storedForwardDedupeKey } from './forward-key';
 import { dropStaleReceipt, forwardCoverage, noteForwardReceipt } from './forward-receipts';
 import { hasPresentTrackLove } from './live-track-survivor';
 import { newOperationId } from './operations';
@@ -84,13 +84,13 @@ export function rewriteNowPlayingForwardStart(
 ): void {
   const oldKey = nowPlayingKey(did, oldStartedAtMs, artist, track);
   const nextKey = nowPlayingKey(did, startedAtMs, artist, track);
-  const rows = db.all<{ id: string; payload_json: string }>(
-    `SELECT id,payload_json FROM forward_outbox
-     WHERE did=? AND kind='nowplaying' AND dedupe_key=?`,
+  const rows = db.all<{ id: string; generation: number; dedupe_key: string; payload_json: string }>(
+    `SELECT id,generation,dedupe_key,payload_json FROM forward_outbox
+     WHERE did=? AND kind='nowplaying'`,
     did,
-    oldKey,
   );
   for (const row of rows) {
+    if (canonicalForwardDedupeKey(row.generation, row.dedupe_key) !== oldKey) continue;
     let payload: Record<string, unknown>;
     try {
       payload = JSON.parse(row.payload_json) as Record<string, unknown>;
@@ -101,7 +101,7 @@ export function rewriteNowPlayingForwardStart(
     payload.startedAtMs = startedAtMs;
     db.run(
       `UPDATE OR IGNORE forward_outbox SET dedupe_key=?,payload_json=? WHERE id=? AND kind='nowplaying'`,
-      nextKey,
+      storedForwardDedupeKey(row.generation, nextKey),
       JSON.stringify(payload),
       row.id,
     );

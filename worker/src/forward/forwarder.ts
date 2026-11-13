@@ -790,7 +790,12 @@ function pickJob(rt: ForwardRuntime, now: number, localWork: Map<string, { remai
     if (due.length === 0) continue;
     const priority = Math.min(...due.map((hint) => hint.priority));
     const oldest = Math.min(...due.filter((hint) => hint.priority === priority).map((hint) => hint.created_at_ms));
-    candidates.push({ link, priority, oldest, nowPlaying: hints[0] !== null });
+    candidates.push({
+      link,
+      priority,
+      oldest,
+      nowPlaying: hints[0] !== null && hints[0].created_at_ms !== null,
+    });
   }
   // A live now-playing update is useful only while current (60 s). Let it
   // take the next Last.fm token before historical/live listen backlog.
