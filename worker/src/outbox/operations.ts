@@ -44,6 +44,7 @@ import { MAX_ATTEMPTS } from '@atmusic/core/write-policy';
 import type { OperationKind, OperationRow, OperationState, Origin } from '../app/rows';
 import type { Db } from '../do/db';
 import { bumpStatsVersion } from '../do/write/account-state';
+import { indexLoveOperationTarget } from '../forward/love-recording-targets';
 import { releaseForwardAdmission } from '../forward/projection';
 import { deleteQueuedForwardIdentity } from './forward-key';
 
@@ -209,6 +210,19 @@ export function insertOperation(db: Db, op: NewOperation, now: number): Operatio
       op.collection,
       op.rkey,
     );
+    if (op.kind === 'love.put' && prepared !== null) {
+      const row = db.one<{ rowid: number; created_at_ms: number }>(
+        'SELECT rowid,created_at_ms FROM operations WHERE id=?',
+        op.id,
+      );
+      if (row !== null)
+        indexLoveOperationTarget(db, {
+          rowid: row.rowid,
+          did: op.did,
+          createdAtMs: row.created_at_ms,
+          recordJson: JSON.stringify(prepared.record),
+        });
+    }
     for (const pred of new Set(op.predecessors ?? [])) {
       if (pred === op.id) continue;
       db.run('INSERT OR IGNORE INTO operation_deps(op_id, pred_id) VALUES (?, ?)', op.id, pred);

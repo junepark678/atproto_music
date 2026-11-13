@@ -602,7 +602,9 @@ describe('worker/test/harness', () => {
   it('the migration ledger is ordered across the N/M, M4, S1, S2, S3 and S4 stack', async () => {
     const versions = MIGRATIONS.map((m) => m.version);
     expect(versions.slice(0, 14)).toEqual(Array.from({ length: 14 }, (_, i) => i + 1));
-    expect(versions.slice(-17)).toEqual([26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42]);
+    expect(versions.slice(-20)).toEqual([
+      27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46,
+    ]);
     expect(versions.every((version, index) => index === 0 || version > (versions[index - 1] ?? 0))).toBe(true);
     expect(SCHEMA_VERSION).toBe(MIGRATIONS[MIGRATIONS.length - 1]?.version);
     expect(MIGRATIONS.length).toBeGreaterThanOrEqual(2);
@@ -691,9 +693,23 @@ describe('worker/test/harness', () => {
       db.run(
         "INSERT INTO linked_pull_love_admissions(did,link_id,generation,operation_id,love_key,recording_mbid,source_service,source_account,state,updated_at_ms) VALUES('did:plc:seed','seed-link',1,'seed-love-op','seed-love-key',NULL,'listenbrainz','seed','accepted',0)",
       );
+      db.run(
+        "INSERT INTO forward_love_recording_targets(forward_rowid,link_id,generation,artist_key,track_key,created_at_ms,recording_mbid) VALUES(1,'seed-link',1,'artist','track',0,'00000000-0000-4000-8000-000000000001')",
+      );
+      db.run('INSERT INTO forward_love_recording_targets_state(singleton,cursor_rowid,complete) VALUES(1,1,1)');
+      db.run(
+        "INSERT INTO forward_love_operation_targets(operation_rowid,did,artist_key,track_key,created_at_ms,recording_mbid) VALUES(1,'did:plc:seed','artist','track',0,'00000000-0000-4000-8000-000000000001')",
+      );
+      db.run('INSERT INTO forward_love_operation_targets_state(singleton,cursor_rowid,complete) VALUES(1,1,1)');
+      db.run(
+        'INSERT INTO forward_unlove_lookup_progress(unlove_rowid,cursor_created_at_ms,cursor_operation_rowid) VALUES(1,0,1)',
+      );
       for (const table of TABLES) {
         if (
           table === 'mb_cover_art_usage' ||
+          table === 'forward_love_lanes' ||
+          table === 'forward_love_recording_history' ||
+          table === 'forward_love_recording_history_state' ||
           table === 'linked_pull_receipt_seed' ||
           table === 'linked_pull_projection_scan'
         )

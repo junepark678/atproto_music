@@ -705,7 +705,7 @@ describe('migrate', () => {
   // database at that version is ready for that code, across restarts.
   // Later additive migrations keep the v2 compatibility floor.
   it('SCHEMA_VERSION includes additive batch provenance and remains compatible with v2 code', async () => {
-    expect(SCHEMA_VERSION).toBe(42);
+    expect(SCHEMA_VERSION).toBe(46);
     expect(MIGRATIONS.map((m) => [m.version, m.name])).toEqual([
       [1, 'initial_workers_schema'],
       [2, 'node_schema'],
@@ -749,6 +749,10 @@ describe('migrate', () => {
       [40, 'listenbrainz_delete_lookup_progress'],
       [41, 'listenbrainz_delete_lookup_tie_fence'],
       [42, 'listenbrainz_delete_lookup_page_boundary'],
+      [43, 'forward_love_key_heads'],
+      [44, 'forward_love_lanes'],
+      [45, 'forward_love_recording_history'],
+      [46, 'forward_love_recording_targets'],
     ]);
 
     const name = 'migrate-v2-ready';
@@ -803,6 +807,10 @@ describe('migrate', () => {
         { version: 40, name: 'listenbrainz_delete_lookup_progress' },
         { version: 41, name: 'listenbrainz_delete_lookup_tie_fence' },
         { version: 42, name: 'listenbrainz_delete_lookup_page_boundary' },
+        { version: 43, name: 'forward_love_key_heads' },
+        { version: 44, name: 'forward_love_lanes' },
+        { version: 45, name: 'forward_love_recording_history' },
+        { version: 46, name: 'forward_love_recording_targets' },
       ]);
       expect(db.all('SELECT min_compatible_version FROM schema_compat')).toEqual([{ min_compatible_version: 2 }]);
       // A row in a migration-2 table survives reopening.

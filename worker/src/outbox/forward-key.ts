@@ -1,5 +1,6 @@
 import type { ForwardKind } from '../app/rows';
 import type { Db } from '../do/db';
+import { touchLoveLane } from '../forward/love-lanes';
 
 /** Stores generation 1 unchanged and namespaces later generations in the legacy unique key. */
 export function storedForwardDedupeKey(generation: number, canonicalKey: string): string {
@@ -30,6 +31,36 @@ export function deleteQueuedForwardIdentity(
   );
   const kindSlots = kinds.map(() => '?').join(',');
   for (const link of links) {
+    if (kinds.includes('love'))
+      db.run(
+        `DELETE FROM forward_love_recording_targets WHERE forward_rowid IN (
+          SELECT rowid FROM forward_outbox WHERE link_id=? AND generation=? AND kind='love' AND dedupe_key=? AND state IN ('queued','held')
+        )`,
+        link.id,
+        link.generation,
+        storedForwardDedupeKey(link.generation, canonicalKey),
+      );
+    const loves = db.all<{ generation: number; love_artist_key: string; love_track_key: string }>(
+      `SELECT generation,love_artist_key,love_track_key FROM forward_outbox
+       WHERE link_id=? AND generation=? AND kind IN (${kindSlots}) AND dedupe_key=? AND state IN ('queued','held')
+         AND love_artist_key IS NOT NULL AND love_track_key IS NOT NULL`,
+      link.id,
+      link.generation,
+      ...kinds,
+      storedForwardDedupeKey(link.generation, canonicalKey),
+    );
+    // The paging cursor is keyed by the canonical unlove rowid. Remove it in
+    // the same deletion transaction so SQLite rowid reuse cannot lend an old
+    // history page to a different unlove.
+    if (kinds.includes('unlove'))
+      db.run(
+        `DELETE FROM forward_unlove_lookup_progress WHERE unlove_rowid IN (
+          SELECT rowid FROM forward_outbox WHERE link_id=? AND generation=? AND kind='unlove' AND dedupe_key=? AND state IN ('queued','held')
+        )`,
+        link.id,
+        link.generation,
+        storedForwardDedupeKey(link.generation, canonicalKey),
+      );
     db.run(
       `DELETE FROM forward_outbox WHERE link_id=? AND generation=? AND kind IN (${kindSlots})
          AND dedupe_key=? AND state IN ('queued','held')`,
@@ -38,5 +69,16 @@ export function deleteQueuedForwardIdentity(
       ...kinds,
       storedForwardDedupeKey(link.generation, canonicalKey),
     );
+    for (const love of loves) {
+      touchLoveLane(db, {
+        linkId: link.id,
+        generation: love.generation,
+        artistKey: love.love_artist_key,
+        trackKey: love.love_track_key,
+        priority: 0,
+        dueAt: 0,
+        createdAtMs: 0,
+      });
+    }
   }
 }

@@ -20,10 +20,11 @@
 //
 // Order. Rows are read oldest first: `created_at_ms`, then `rowid` (the
 // insertion order, which breaks ties between rows accepted in the same
-// millisecond). For love/unlove, the oldest queued row for each normalized
-// love key is eligible; a backoff blocks later toggles of that same key, but
-// does not block another track. Thus each track's toggles reach upstream in
-// order even across retries.
+// millisecond). For love/unlove, the durable lane table schedules keys fairly,
+// while an indexed canonical head probe chooses the oldest queued row for the
+// key. A backoff blocks later toggles of that same key, but does not block a
+// different track. Thus each track's toggles reach upstream in order even
+// across retries.
 //
 // Retry (ADR §12.3): `forwardBackoffMs(n)` = 30 s·2^n + U[0, 25%] of it,
 // capped at 6 h, with n the row's attempts before this one. At most eight
@@ -52,6 +53,7 @@
 import type { Random } from '@atmusic/core/deps';
 import type { ForwardKind, ForwardOutboxRow, LinkService } from '../app/rows';
 import type { Db } from '../do/db';
+import { touchLoveLane } from './love-lanes';
 
 const SECOND = 1_000;
 const MINUTE = 60 * SECOND;
@@ -378,7 +380,8 @@ export function resumeHeldRows(db: Db, linkId: string, now: number, generation?:
     db.one<{ generation: number }>('SELECT generation FROM linked_accounts WHERE id=?', linkId)?.generation;
   if (expected === undefined) return 0;
   return db.run(
-    `UPDATE forward_outbox SET state='queued',due_at=max(due_at,?),updated_at_ms=?
+    `UPDATE forward_outbox SET state='queued',due_at=max(due_at,?),updated_at_ms=?,
+       love_lane=CASE WHEN kind IN ('love','unlove') THEN NULL ELSE love_lane END
      WHERE link_id=? AND generation=? AND state='held'
        AND EXISTS (SELECT 1 FROM linked_accounts AS link WHERE link.id=? AND link.generation=?)`,
     now,
@@ -397,35 +400,98 @@ export interface ExpiryReport {
   staleNowPlaying: number;
   /** Held rows past their retention. */
   held: number;
+  /** More expired work remains; forwarding is paused until a later bounded sweep drains it. */
+  pending?: boolean;
 }
 
-/** Expires what is too old to send (see the header). One transaction. */
+export const MAX_EXPIRY_TRANSITIONS_PER_RUN = 128;
+export const EXPIRY_SELECT_SQL = `SELECT rowid AS seq,generation,love_artist_key,love_track_key FROM forward_outbox INDEXED BY forward_outbox_link_expiry
+  WHERE link_id=? AND state='queued' AND kind=? AND created_at_ms<? ORDER BY created_at_ms,rowid LIMIT ?`;
+export const HELD_EXPIRY_SELECT_SQL = `SELECT rowid AS seq FROM forward_outbox INDEXED BY forward_outbox_held_expiry
+  WHERE state='held' AND updated_at_ms<? ORDER BY updated_at_ms,rowid LIMIT ?`;
+export const EXPIRY_PROBE_SQL = `SELECT rowid FROM forward_outbox INDEXED BY forward_outbox_link_expiry
+  WHERE link_id=? AND state='queued' AND kind=? AND created_at_ms<? LIMIT 1`;
+export const STALE_NOWPLAYING_PROBE_SQL = `SELECT rowid FROM forward_outbox INDEXED BY forward_outbox_link_expiry
+  WHERE link_id=? AND state='queued' AND kind='nowplaying' AND created_at_ms<? LIMIT 1`;
+export const HELD_EXPIRY_PROBE_SQL = `SELECT rowid FROM forward_outbox INDEXED BY forward_outbox_held_expiry
+  WHERE state='held' AND updated_at_ms<? LIMIT 1`;
+
+/** Expires what is too old to send with a fixed transition and probe budget. */
 export function expireRows(db: Db, now: number): ExpiryReport {
   return db.tx(() => {
     let aged = 0;
-    for (const service of ['lastfm', 'listenbrainz'] as const) {
-      aged += db.run(
-        `UPDATE forward_outbox SET state = 'expired', last_error = 'expired', updated_at_ms = ?
-         WHERE state = 'queued' AND created_at_ms < ?
-           AND link_id IN (SELECT id FROM linked_accounts WHERE service = ?)`,
-        now,
-        now - EXPIRY_MS[service],
-        service,
-      ).rowsWritten;
+    let staleNowPlaying = 0;
+    let held = 0;
+    let remaining = MAX_EXPIRY_TRANSITIONS_PER_RUN;
+    const links = db.all<{ id: string; service: LinkService }>('SELECT id,service FROM linked_accounts ORDER BY id');
+    const expireSelected = (
+      linkId: string,
+      kind: ForwardKind,
+      cutoff: number,
+      error: string,
+      bucket: 'aged' | 'stale',
+    ): number => {
+      if (remaining === 0) return 0;
+      const rows = db.all<{
+        seq: number;
+        generation: number;
+        love_artist_key: string | null;
+        love_track_key: string | null;
+      }>(EXPIRY_SELECT_SQL, linkId, kind, cutoff, remaining);
+      for (const row of rows) {
+        db.run(
+          "UPDATE forward_outbox SET state='expired',last_error=?,updated_at_ms=? WHERE rowid=? AND state='queued'",
+          error,
+          now,
+          row.seq,
+        );
+        if ((kind === 'love' || kind === 'unlove') && row.love_artist_key !== null && row.love_track_key !== null) {
+          touchLoveLane(db, {
+            linkId,
+            generation: row.generation,
+            artistKey: row.love_artist_key,
+            trackKey: row.love_track_key,
+            priority: 0,
+            dueAt: now,
+            createdAtMs: now,
+          });
+        }
+      }
+      remaining -= rows.length;
+      if (bucket === 'aged') aged += rows.length;
+      else staleNowPlaying += rows.length;
+      return rows.length;
+    };
+    for (const link of links) {
+      if (remaining === 0) break;
+      expireSelected(link.id, 'nowplaying', now - NOW_PLAYING_MAX_AGE_MS, 'stale', 'stale');
     }
-    const staleNowPlaying = db.run(
-      `UPDATE forward_outbox SET state = 'expired', last_error = 'stale', updated_at_ms = ?
-       WHERE state = 'queued' AND kind = 'nowplaying' AND created_at_ms < ?`,
-      now,
-      now - NOW_PLAYING_MAX_AGE_MS,
-    ).rowsWritten;
-    const held = db.run(
-      `UPDATE forward_outbox SET state = 'expired', last_error = 'held_expired', updated_at_ms = ?
-       WHERE state = 'held' AND updated_at_ms < ?`,
-      now,
-      now - HELD_RETENTION_MS,
-    ).rowsWritten;
-    return { aged, staleNowPlaying, held };
+    for (const link of links) {
+      if (remaining === 0) break;
+      for (const kind of ['scrobble', 'nowplaying', 'love', 'unlove'] as const) {
+        expireSelected(link.id, kind, now - EXPIRY_MS[link.service], 'expired', 'aged');
+        if (remaining === 0) break;
+      }
+    }
+    if (remaining > 0) {
+      const rows = db.all<{ seq: number }>(HELD_EXPIRY_SELECT_SQL, now - HELD_RETENTION_MS, remaining);
+      for (const row of rows)
+        db.run(
+          "UPDATE forward_outbox SET state='expired',last_error='held_expired',updated_at_ms=? WHERE rowid=? AND state='held'",
+          now,
+          row.seq,
+        );
+      held = rows.length;
+      remaining -= rows.length;
+    }
+    const pending =
+      links.some((link) => {
+        if (db.one(STALE_NOWPLAYING_PROBE_SQL, link.id, now - NOW_PLAYING_MAX_AGE_MS)) return true;
+        return (['scrobble', 'nowplaying', 'love', 'unlove'] as const).some(
+          (kind) => db.one(EXPIRY_PROBE_SQL, link.id, kind, now - EXPIRY_MS[link.service]) !== null,
+        );
+      }) || db.one(HELD_EXPIRY_PROBE_SQL, now - HELD_RETENTION_MS) !== null;
+    return { aged, staleNowPlaying, held, pending };
   });
 }
 
