@@ -82,10 +82,11 @@ describe('acceptListens', () => {
           "SELECT dedupe_key,payload_json FROM forward_outbox WHERE kind='nowplaying' ORDER BY link_id",
         ),
       ).toHaveLength(2);
-      expect(
+      const payload = JSON.parse(
         h.db.all<{ payload_json: string }>("SELECT payload_json FROM forward_outbox WHERE kind='nowplaying'")[0]!
           .payload_json,
-      ).toContain(`\"startedAtMs\":${corrected}`);
+      ) as { startedAtMs: number };
+      expect(payload.startedAtMs).toBe(corrected);
     });
   });
 

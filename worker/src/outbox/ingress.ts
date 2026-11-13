@@ -36,8 +36,7 @@ import { parseRfc3339 } from '@atmusic/core/timestamp';
 import type { Origin } from '../app/rows';
 import type { ModuleDeps } from '../do/contracts';
 import { admitForwardIdentity } from '../forward/projection';
-import { enqueueForwards } from './forward-enqueue';
-import { rewriteNowPlayingForwardStart } from './forward-enqueue';
+import { enqueueForwards, rewriteNowPlayingForwardStart } from './forward-enqueue';
 import { type Idempotency, idempotentOperation, newOperationId, type Prepared } from './operations';
 import { insertScrobbleCreate, prepareScrobble } from './scrobble-ops';
 
