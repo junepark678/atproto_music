@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createBox, linkedAad } from '../../../src/crypto/box';
 import { armAlarm, EXTENSION_LANE, runDue, schedule } from '../../../src/do/timers';
+import { linkDto } from '../../../src/forward/links';
 import { IMPORT_FETCH_CAPS } from '../../../src/imports/jobs';
 import type { HostTimers, TimerHandle } from '../../../src/node/alarm';
 import { NodeAlarm } from '../../../src/node/alarm';
@@ -450,7 +451,7 @@ describe('linked Last.fm timer poller', () => {
     });
   });
 
-  it('does not schedule links held for reauthentication or terminal failure', async () => {
+  it('keeps auth and not-found holds terminal and exposes them in link sync status', async () => {
     await withHarness(async (h) => {
       const { linkId, remote, deps } = await setup(h);
       h.db.run("UPDATE linked_pull_state SET poll_phase='love' WHERE link_id=?", linkId);
@@ -458,14 +459,21 @@ describe('linked Last.fm timer poller', () => {
 
       const reauth = await runLinkedLastfmPull(deps());
       expect(reauth).toMatchObject({ requested: 1, held: 'upstream_unauthorized', nextDueMs: null });
+      expect(linkDto(h.db.one('SELECT * FROM linked_accounts WHERE id=?', linkId)!, h.db).sync?.holdReason).toBe(
+        'upstream_unauthorized',
+      );
 
+      remote.fail({ code: 6, method: 'user.getLovedTracks' });
       h.db.run(
-        "UPDATE linked_pull_state SET hold_reason='retry_exhausted',poll_next_at_ms=? WHERE link_id=?",
-        h.m.clock.nowMs() + 60_000,
+        "UPDATE linked_pull_state SET poll_phase='love',poll_next_at_ms=? WHERE link_id=?",
+        h.m.clock.nowMs(),
         linkId,
       );
-      const held = await runLinkedLastfmPull(deps());
-      expect(held.nextDueMs).toBeNull();
+      const notFound = await runLinkedLastfmPull(deps());
+      expect(notFound).toMatchObject({ requested: 1, held: 'remote_user_not_found', nextDueMs: null });
+      expect(linkDto(h.db.one('SELECT * FROM linked_accounts WHERE id=?', linkId)!, h.db).sync?.holdReason).toBe(
+        'remote_user_not_found',
+      );
     });
   });
 
@@ -528,35 +536,29 @@ describe('linked Last.fm timer poller', () => {
     });
   });
 
-  it('persists bounded exponential retry and does not rearm after eight failures', async () => {
+  it('retries transient upstream failures indefinitely with a one-hour cap', async () => {
     await withHarness(async (h) => {
-      const { linkId, deps } = await setup(h);
+      const { linkId, remote, deps } = await setup(h);
       const options = deps();
-      let requests = 0;
-      options.fetch = async () => {
-        requests++;
-        return new Response('{}', { status: 503 });
-      };
-      for (let attempt = 0; attempt < 8; attempt++) {
+      remote.fail(...Array.from({ length: 12 }, () => ({ httpStatus: 503, method: 'user.getRecentTracks' as const })));
+      for (let attempt = 0; attempt < 12; attempt++) {
         const report = await runLinkedLastfmPull(options);
         expect(report.requested).toBe(1);
-        const state = h.db.one<{ poll_next_at_ms: number | null }>(
-          'SELECT poll_next_at_ms FROM linked_pull_state WHERE link_id=?',
+        const state = h.db.one<{ failures: number; hold_reason: string | null; poll_next_at_ms: number | null }>(
+          'SELECT failures,hold_reason,poll_next_at_ms FROM linked_pull_state WHERE link_id=?',
           linkId,
         )!;
         expect(report.nextDueMs).toBe(state.poll_next_at_ms);
-        if (state.poll_next_at_ms !== null) h.kit.clock.advance(state.poll_next_at_ms - h.m.clock.nowMs());
+        expect(state.hold_reason).toBe('upstream_retry');
+        expect(state.poll_next_at_ms).toBeGreaterThan(h.m.clock.nowMs());
+        if (attempt >= 8) expect(state.poll_next_at_ms! - h.m.clock.nowMs()).toBe(3_600_000);
+        h.kit.clock.advance(state.poll_next_at_ms! - h.m.clock.nowMs());
       }
-      expect(requests).toBe(8);
-      expect(
-        h.db.one('SELECT failures,hold_reason,poll_next_at_ms FROM linked_pull_state WHERE link_id=?', linkId),
-      ).toEqual({
-        failures: 8,
-        hold_reason: 'retry_exhausted',
-        poll_next_at_ms: null,
+      expect(remote.calls.entries).toHaveLength(12);
+      expect(h.db.one('SELECT failures,hold_reason FROM linked_pull_state WHERE link_id=?', linkId)).toEqual({
+        failures: 12,
+        hold_reason: 'upstream_retry',
       });
-      expect((await runLinkedLastfmPull(options)).requested).toBe(0);
-      expect(requests).toBe(8);
     });
   });
 });
