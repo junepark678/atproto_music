@@ -226,9 +226,17 @@ export function hasOrphanLiveEvidence(db: Db, now: number): boolean {
  * has not yet covered every row. Once that scan completes, evidence it already
  * re-hinted and that stays retained afterwards (for example with a conflict
  * after its proof) must not keep arming empty drains until it expires.
+ *
+ * This runs on every timer reconciliation, including after each accepted
+ * Jetstream hint, so it touches `live_record_evidence` only before this
+ * instance's first scan page: a completed scan answers false and a paged scan
+ * already under way answers true without a query.
  */
 export function orphanRecoveryPending(db: Db, now: number): boolean {
-  return states.get(db)?.orphanReconciled !== true && hasOrphanLiveEvidence(db, now);
+  const state = states.get(db);
+  if (state?.orphanReconciled === true) return false;
+  if (state !== undefined && state.orphanCursor !== null) return true;
+  return hasOrphanLiveEvidence(db, now);
 }
 
 export function scheduleDrainTimer(db: Db, now: number, orphanRecoveryPending = false): number | null {

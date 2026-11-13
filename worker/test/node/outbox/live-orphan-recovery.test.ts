@@ -1,7 +1,12 @@
-import { expect, it } from 'vitest';
+import { expect, it, vi } from 'vitest';
 import { enqueueHints } from '../../../src/do/ingest/hints';
 import { recordLiveEvidence } from '../../../src/do/ingest/live-evidence';
-import { hasOrphanLiveEvidence, scheduleDrainTimer } from '../../../src/do/ingest/verify-drain';
+import {
+  drainState,
+  hasOrphanLiveEvidence,
+  orphanRecoveryPending,
+  scheduleDrainTimer,
+} from '../../../src/do/ingest/verify-drain';
 import { ALICE } from '../../write/support';
 import { withMigratedDb } from '../support/node-db';
 import { indexCore, runAlarmNow } from '../support/with-index';
@@ -83,5 +88,41 @@ it('evidence retained after the startup orphan scan does not keep rearming empty
     fixture.clock.advance(60_000);
     await runAlarmNow(fixture.core);
     expect(db.one("SELECT due_at FROM timers WHERE name='drain'")).toBeNull();
+  });
+});
+
+it('the per-reconciliation orphan check reads live evidence only before the first scan page', async () => {
+  await withMigratedDb((db) => {
+    recordLiveEvidence(
+      db,
+      {
+        uri: URI,
+        did: ALICE,
+        collection: 'com.example.atmusic.scrobble',
+        rkey: 'orphan',
+        rev: '3mchjvhag2322',
+        action: 'create',
+        cid: 'orphan-cid',
+      },
+      NOW,
+    );
+    const evidenceReads = () =>
+      [...one.mock.calls, ...all.mock.calls].filter(([sql]) => String(sql).includes('live_record_evidence')).length;
+    const one = vi.spyOn(db, 'one');
+    const all = vi.spyOn(db, 'all');
+
+    // Before any drain of this instance the check has to ask the table once per call.
+    expect(orphanRecoveryPending(db, NOW)).toBe(true);
+    expect(evidenceReads()).toBe(1);
+
+    // A paged scan is under way: pending, answered from drain state alone.
+    const state = drainState(db, { concurrentFetches: 1, perHostConcurrency: 1 });
+    state.orphanCursor = URI;
+    for (let i = 0; i < 1000; i++) expect(orphanRecoveryPending(db, NOW)).toBe(true);
+    // The scan has covered every row: never pending again, still without a query.
+    state.orphanReconciled = true;
+    for (let i = 0; i < 1000; i++) expect(orphanRecoveryPending(db, NOW)).toBe(false);
+    expect(evidenceReads()).toBe(1);
+    expect(hasOrphanLiveEvidence(db, NOW)).toBe(true);
   });
 });
