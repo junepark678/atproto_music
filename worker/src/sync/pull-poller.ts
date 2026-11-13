@@ -45,11 +45,9 @@ export const LINKED_PULL_JITTER = 0.1;
 export const LINKED_PULL_MAX_REQUESTS_PER_RUN = 3;
 export const LINKED_PULL_RETRY_BASE_MS = 30_000;
 export const LINKED_PULL_RETRY_CAP_MS = 3_600_000;
-export const LINKED_PULL_MAX_FAILURES = 8;
 const TERMINAL_HOLDS = new Set([
   'reauth_required',
   'upstream_unauthorized',
-  'retry_exhausted',
   'remote_user_not_found',
   'lastfm_key_rejected',
   'lastfm_error',
@@ -124,18 +122,19 @@ function setHold(db: Db, link: PullLink, reason: string, now: number, due: numbe
   );
 }
 
-function retry(db: Db, link: PullLink, state: PullState, reason: string, now: number): number | null {
-  const failures = Math.min(LINKED_PULL_MAX_FAILURES, state.failures + 1);
-  const due =
-    failures >= LINKED_PULL_MAX_FAILURES
-      ? null
-      : now + Math.min(LINKED_PULL_RETRY_CAP_MS, LINKED_PULL_RETRY_BASE_MS * 2 ** (failures - 1));
+function retry(db: Db, link: PullLink, state: PullState, reason: string, now: number): number {
+  // Keep the historical counter bounded, but never turn a transient upstream
+  // failure into a terminal hold. This also revives rows previously marked
+  // retry_exhausted before indefinite retries were introduced.
+  const failures = Math.min(Number.MAX_SAFE_INTEGER, state.failures + 1);
+  const exponent = Math.min(31, Math.max(0, failures - 1));
+  const due = now + Math.min(LINKED_PULL_RETRY_CAP_MS, LINKED_PULL_RETRY_BASE_MS * 2 ** exponent);
   db.run(
     'UPDATE linked_pull_state SET failures=?,retry_at_ms=?,poll_next_at_ms=?,hold_reason=?,updated_at_ms=? WHERE link_id=? AND generation=?',
     failures,
     due,
     due,
-    failures >= LINKED_PULL_MAX_FAILURES ? 'retry_exhausted' : reason,
+    reason,
     now,
     link.id,
     link.generation,
@@ -535,7 +534,6 @@ async function runListenbrainzListenPage(
   if (response.kind === 'rate_limited') {
     if (response.untilMs !== null) pacer.holdUntil(response.untilMs);
     const retryDue = retry(deps.db, link, state, 'upstream_retry', now);
-    if (retryDue === null) return { requested: 1, staged: 0, held: 'retry_exhausted', nextDueMs: null };
     const due = Math.max(retryDue, response.untilMs ?? now + 60_000);
     deps.db.run(
       'UPDATE linked_pull_state SET poll_next_at_ms=?,retry_at_ms=? WHERE link_id=? AND generation=?',
@@ -700,7 +698,6 @@ async function runListenbrainzFeedbackPage(
   if (response.kind === 'rate_limited') {
     if (response.untilMs !== null) pacer.holdUntil(response.untilMs);
     const retryDue = retry(deps.db, link, state, 'upstream_retry', now);
-    if (retryDue === null) return { requested: 1, staged: 0, held: 'retry_exhausted', nextDueMs: null };
     const due = Math.max(retryDue, response.untilMs ?? now + 60_000);
     deps.db.run(
       'UPDATE linked_pull_state SET poll_next_at_ms=?,retry_at_ms=? WHERE link_id=? AND generation=?',

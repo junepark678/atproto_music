@@ -380,34 +380,30 @@ describe('linked ListenBrainz timer poller', () => {
   });
 });
 
-it.each(['listen', 'love'])('429 stops after eight attempts (%s)', async (phase) =>
+it.each(['listen', 'love'])('429 retries beyond eight attempts with capped delay (%s)', async (phase) =>
   withHarness(async (h) => {
-    const { linkId, deps } = await setup(h);
+    const { linkId, remote, deps } = await setup(h);
     h.db.run('UPDATE linked_pull_state SET poll_phase=? WHERE link_id=?', phase, linkId);
-    let calls = 0;
-    const d = {
-      ...deps(),
-      fetch: async () => {
-        calls++;
-        return new Response('{}', { status: 429, headers: { 'x-ratelimit-reset-in': '1' } });
-      },
-    };
+    const path = phase === 'listen' ? '/1/user/remote-lb/listens' : '/1/feedback/user/remote-lb/get-feedback';
+    remote.fail(...Array.from({ length: 10 }, () => ({ status: 429 as const, resetIn: 1, path })));
+    const d = deps();
     for (let i = 0; i < 10; i++) {
-      await runLinkedLastfmPull(d);
+      const report = await runLinkedLastfmPull(d);
       const row = h.db.one<{ poll_next_at_ms: number | null }>(
         'SELECT poll_next_at_ms FROM linked_pull_state WHERE link_id=?',
         linkId,
       );
+      expect(report.nextDueMs).toBe(row?.poll_next_at_ms);
+      expect(row?.poll_next_at_ms).toBeGreaterThan(h.m.clock.nowMs());
+      if (i >= 8) expect(row!.poll_next_at_ms! - h.m.clock.nowMs()).toBe(3_600_000);
       h.kit.clock.advance(Math.max(1, (row?.poll_next_at_ms ?? h.m.clock.nowMs() + 600000) - h.m.clock.nowMs()));
     }
-    expect.soft(calls).toBe(8);
-    expect
-      .soft(
-        h.db.one<{ failures: number; hold_reason: string; poll_next_at_ms: number | null }>(
-          'SELECT failures,hold_reason,poll_next_at_ms FROM linked_pull_state WHERE link_id=?',
-          linkId,
-        ),
-      )
-      .toEqual({ failures: 8, hold_reason: 'retry_exhausted', poll_next_at_ms: null });
+    expect.soft(remote.calls.entries).toHaveLength(10);
+    const row = h.db.one<{ failures: number; hold_reason: string; poll_next_at_ms: number | null }>(
+      'SELECT failures,hold_reason,poll_next_at_ms FROM linked_pull_state WHERE link_id=?',
+      linkId,
+    );
+    expect.soft(row).toMatchObject({ failures: 10, hold_reason: 'upstream_retry' });
+    expect.soft(row?.poll_next_at_ms).not.toBeNull();
   }),
 );
