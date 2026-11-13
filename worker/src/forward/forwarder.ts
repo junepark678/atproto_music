@@ -81,6 +81,7 @@ import { enqueueTrack, matchedRecordingMbid } from '../musicbrainz/store';
 import { canonicalForwardDedupeKey } from '../outbox/forward-key';
 import { hasPresentTrackLove } from '../outbox/live-track-survivor';
 import { nextDeleteWakeAt, runDeleteSlice } from './delete-forwarder';
+import { pendingForwardKick } from './forward-kick';
 import {
   backoffRows,
   clearLastfmKeyRejected,
@@ -1342,11 +1343,17 @@ export function forwardExtension(runtime: () => ForwardRuntime | null): CoreExte
         const after = rt.clock.nowMs();
         const deleteDue = nextDeleteWakeAt({ db: rt.db, pacing: rt.pacing }, after);
         // The report predates the delete and pull awaits above, and this
-        // schedule is forced: rows queued meanwhile (a now-playing update and
-        // its kick, mid-pass) must set the next deadline too, or the forced
-        // schedule would postpone them to the idle poll.
-        const forwardDue = nextForwardDue(rt, after);
-        const due = [report.nextDueMs, forwardDue, deleteDue]
+        // schedule is forced, so work queued meanwhile must set the deadline
+        // too or it would wait for the idle poll:
+        // - a now-playing kick still pending keeps its own (debounced) due time;
+        // - otherwise the current earliest due row counts, but work that is
+        //   already overdue keeps runForward's bounded-work floor (at least
+        //   LASTFM_MIN_INTERVAL_MS away), so a bounded expiry or local-work
+        //   backlog cannot turn this into a busy loop.
+        const current = nextForwardDue(rt, after);
+        const forwardDue = current === null ? null : current <= after ? after + LASTFM_MIN_INTERVAL_MS : current;
+        const kickDue = pendingForwardKick(ctx, after);
+        const due = [report.nextDueMs, forwardDue, kickDue, deleteDue]
           .filter((v): v is number => v !== null)
           .reduce<number | null>((a, v) => (a === null ? v : Math.min(a, v)), null);
         const poll = now + FORWARD_IDLE_POLL_MS;

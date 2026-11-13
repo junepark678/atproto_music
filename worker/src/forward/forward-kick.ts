@@ -38,3 +38,13 @@ export function kickForwardDebounced(timers: ExtensionContext): number {
   timers.schedule('forward', due);
   return due;
 }
+
+/**
+ * The due time of a kick still ahead of `now` for this core, or null. A
+ * forwarding pass that force-reschedules itself keeps it, so a now-playing
+ * update kicked while the pass was running is not postponed.
+ */
+export function pendingForwardKick(timers: ExtensionContext, now: number): number | null {
+  const last = lastKickDue.get(timers);
+  return last !== undefined && last > now ? last : null;
+}

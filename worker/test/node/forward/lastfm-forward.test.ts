@@ -1601,6 +1601,35 @@ describe('Last.fm forwarding', () => {
     expect(nowPlayingBoostCacheSize(w.app.db)).toBe(0);
   });
 
+  it('a bounded expiry backlog keeps its one-second retry floor after the pass reschedules from current state', async () => {
+    const w = await world();
+    const link = w.linkLastfm(ALICE, 'expiry_backlog');
+    const ctx = w.app.composed.core.extensionTimers;
+    const start = w.clock.nowMs();
+    const old = start - LASTFM_EXPIRY_MS - 60 * MINUTE;
+    // More rows past the Last.fm age limit than one pass may expire.
+    enqueueForwards(w.app.db, {
+      did: ALICE,
+      linkId: link.id,
+      items: Array.from({ length: 200 }, (_, i) => ({
+        kind: 'scrobble' as const,
+        listenKey: `expiry-backlog-${i}`,
+        payload: {
+          listen: { artist: 'Old Artist', track: `Old ${i}`, listenedAt: new Date(old).toISOString() },
+          origin: 'lastfm',
+        },
+      })),
+      now: old,
+      random: enqueueRandom,
+    });
+    await forwardExtension(() => w.rt).timers!.forward!(start, ctx);
+    expect(w.rows(ALICE).filter((row) => row.state === 'expired').length).toBeGreaterThan(0);
+    expect(w.rows(ALICE).some((row) => row.state === 'queued')).toBe(true);
+    // Not an immediate re-run: the bounded-work floor holds.
+    const due = w.app.db.one<{ due_at: number }>("SELECT due_at FROM timers WHERE name='forward'")!.due_at;
+    expect(due).toBeGreaterThanOrEqual(start + SECOND);
+  });
+
   it('love, unlove, love for one track forwards track.love, track.unlove, track.love in order, and the same track played as now playing twice 10 minutes apart is forwarded twice', async () => {
     const w = await world();
     w.linkLastfm(ALICE, 'alice_fm');
