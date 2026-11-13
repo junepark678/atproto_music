@@ -1206,6 +1206,7 @@ describe('verify drain', () => {
         'identity-sweep': noop,
         discovery: noop,
         gc: noop,
+        'owner-resnapshot': noop,
       };
       // Alarms until the queue is empty (each run re-arms `drain` while hints are due).
       for (let alarm = 0; alarm < 10 && db.one<{ n: number }>('SELECT count(*) AS n FROM hints')!.n > 0; alarm++) {
