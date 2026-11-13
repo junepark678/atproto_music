@@ -220,6 +220,17 @@ export function hasOrphanLiveEvidence(db: Db, now: number): boolean {
   );
 }
 
+/**
+ * Whether this instance still owes its orphan-evidence recovery scan: orphaned
+ * live evidence exists (`hasOrphanLiveEvidence`) and the drain's in-memory scan
+ * has not yet covered every row. Once that scan completes, evidence it already
+ * re-hinted and that stays retained afterwards (for example with a conflict
+ * after its proof) must not keep arming empty drains until it expires.
+ */
+export function orphanRecoveryPending(db: Db, now: number): boolean {
+  return states.get(db)?.orphanReconciled !== true && hasOrphanLiveEvidence(db, now);
+}
+
 export function scheduleDrainTimer(db: Db, now: number, orphanRecoveryPending = false): number | null {
   const hintDue = nextHintDue(db);
   const pendingDue = nextPendingRemovalDue(db, now);

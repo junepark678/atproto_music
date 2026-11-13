@@ -104,7 +104,7 @@ import { notify, recordStatus } from '../do/ingest/notify';
 import { clearExpiredHostPauses } from '../do/ingest/pds-budget';
 import { maybeClearGap, SNAPSHOT_MIN_INTERVAL_MS, scheduleGapRecovery, snapshotStep } from '../do/ingest/snapshot-job';
 import { identitySweep, statusSweep } from '../do/ingest/sweeps';
-import { DRAIN_MIN_INTERVAL_MS, drain, hasOrphanLiveEvidence } from '../do/ingest/verify-drain';
+import { DRAIN_MIN_INTERVAL_MS, drain, orphanRecoveryPending } from '../do/ingest/verify-drain';
 import type { MigrateResult } from '../do/migrate';
 import { exportUser } from '../do/read/export';
 import { feed } from '../do/read/feed';
@@ -463,7 +463,7 @@ export class IndexCore implements IndexRpc, AdminRpc {
     db.tx(() => {
       const hint = nextHintDue(db);
       const pending = nextPendingRemovalDue(db, now);
-      const orphanRecovery = hasOrphanLiveEvidence(db, now) ? now : null;
+      const orphanRecovery = orphanRecoveryPending(db, now) ? now : null;
       const nextWork = [hint, pending, orphanRecovery].reduce<number | null>(
         (earliest, due) => (due === null ? earliest : earliest === null ? due : Math.min(earliest, due)),
         null,
