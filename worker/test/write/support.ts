@@ -12,6 +12,7 @@
 import { fixtureKeys } from '@atmusic/atproto/test-support/keys';
 import { SignedRepo } from '@atmusic/atproto/test-support/signed-repo';
 import type { RecordProof } from '@atmusic/atproto/verify/types';
+import type { Random } from '@atmusic/core/deps';
 import { fixedClock } from '@atmusic/core/test-support/clock';
 import { fromMs, toStorage } from '@atmusic/core/timestamp';
 import fixture from '../../../tests/fixtures/read_models.json' with { type: 'json' };
@@ -32,6 +33,33 @@ export const NOW_MS = Date.parse('2026-01-15T12:00:00Z');
 export const NOW_NS = fromMs(NOW_MS);
 export const NOW_STORAGE = toStorage(NOW_NS);
 export const OPTS: ApplyOptions = { receiptNs: NOW_NS, prefix: PREFIX, nowNs: NOW_NS };
+
+export function liveApplyOptions(
+  proof: RecordProof,
+  random: Random,
+  action: 'create' | 'update' | 'delete' = proof.state === 'absent' ? 'delete' : 'create',
+) {
+  const evidence =
+    action === 'delete'
+      ? { up_rev: null, up_action: null, up_cid: null, del_rev: proof.commit.rev, conflict_rev: null }
+      : {
+          up_rev: proof.commit.rev,
+          up_action: action,
+          up_cid: proof.state === 'present' ? proof.cid : '',
+          del_rev: null,
+          conflict_rev: null,
+        };
+  return { ...OPTS, live: { random, evidence, legacyRev: null } };
+}
+
+export function authorizedLiveOptions(db: Db, proof: RecordProof, random: Random) {
+  const prior = db.one<{ state: string }>(
+    'SELECT state FROM record_state WHERE uri=?',
+    `at://${proof.commit.did}/${proof.collection}/${proof.rkey}`,
+  );
+  const action = proof.state === 'absent' ? 'delete' : prior?.state === 'present' ? 'update' : 'create';
+  return liveApplyOptions(proof, random, action);
+}
 
 type Name = 'alice' | 'bob' | 'carol';
 const DIDS: Record<Name, string> = { alice: ALICE, bob: BOB, carol: CAROL };

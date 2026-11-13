@@ -1388,6 +1388,373 @@ const MIGRATION_S4_DELETE_LOOKUP_PAGE_BOUNDARY: Migration = {
   name: 'listenbrainz_delete_lookup_page_boundary',
   statements: ['ALTER TABLE listenbrainz_deletes ADD COLUMN lookup_last_max INTEGER'],
 };
+const MIGRATION_S4_FORWARD_LOVE_HEADS: Migration = {
+  version: 43,
+  name: 'forward_love_key_heads',
+  statements: [
+    'CREATE INDEX forward_outbox_love_heads ON forward_outbox(link_id,generation,state,love_artist_key,love_track_key,created_at_ms)',
+  ],
+};
+const MIGRATION_S4_FORWARD_LOVE_LANES: Migration = {
+  version: 44,
+  name: 'forward_love_lanes',
+  statements: [
+    'ALTER TABLE forward_outbox ADD COLUMN love_lane INTEGER',
+    `CREATE TABLE forward_love_lanes (
+      link_id TEXT NOT NULL REFERENCES linked_accounts(id) ON DELETE CASCADE,
+      generation INTEGER NOT NULL,
+      love_artist_key TEXT NOT NULL,
+      love_track_key TEXT NOT NULL,
+      priority INTEGER NOT NULL CHECK (priority IN (0,1)),
+      due_at INTEGER NOT NULL,
+      head_created_at_ms INTEGER NOT NULL,
+      PRIMARY KEY (link_id,generation,love_artist_key,love_track_key)
+    )`,
+    'CREATE INDEX forward_love_lanes_due ON forward_love_lanes(link_id,generation,priority,due_at)',
+    `CREATE INDEX forward_outbox_love_unkeyed ON forward_outbox(link_id,generation,kind,created_at_ms)
+      WHERE state='queued' AND (love_artist_key IS NULL OR love_track_key IS NULL)`,
+    `CREATE INDEX forward_outbox_love_unframed ON forward_outbox(link_id,generation,kind,created_at_ms)
+      WHERE state='queued' AND love_lane IS NULL`,
+    'CREATE INDEX forward_outbox_kind_due ON forward_outbox(link_id,generation,kind,state,due_at)',
+    'CREATE INDEX forward_outbox_link_expiry ON forward_outbox(link_id,state,kind,created_at_ms)',
+    'CREATE INDEX forward_outbox_held_expiry ON forward_outbox(state,updated_at_ms)',
+  ],
+};
+
+const MIGRATION_FORWARD_LOVE_RECORDING_HISTORY: Migration = {
+  version: 45,
+  name: 'forward_love_recording_history',
+  statements: [
+    `CREATE TABLE forward_love_recording_history (
+      did TEXT NOT NULL, artist_key TEXT NOT NULL, track_key TEXT NOT NULL,
+      operation_rowid INTEGER NOT NULL, recording_mbid TEXT NOT NULL,
+      PRIMARY KEY(did,artist_key,track_key,operation_rowid)
+    )`,
+    'CREATE INDEX forward_love_recording_history_latest ON forward_love_recording_history(did,artist_key,track_key,operation_rowid DESC)',
+    'CREATE INDEX forward_outbox_love_recording_lookup ON forward_outbox(link_id,generation,love_artist_key,love_track_key,created_at_ms)',
+    'CREATE TABLE forward_love_recording_history_state (singleton INTEGER PRIMARY KEY NOT NULL, cursor_rowid INTEGER NOT NULL DEFAULT 0, complete INTEGER NOT NULL DEFAULT 0)',
+  ],
+};
+
+// Additive indexed targets preserve the established temporal ordering while
+// keeping repeated same-track lookups bounded by a composite-key seek.
+const MIGRATION_FORWARD_LOVE_RECORDING_TARGETS: Migration = {
+  version: 46,
+  name: 'forward_love_recording_targets',
+  statements: [
+    `CREATE TABLE forward_love_recording_targets (
+      target_id INTEGER PRIMARY KEY NOT NULL, forward_rowid INTEGER NOT NULL UNIQUE, link_id TEXT NOT NULL, generation INTEGER NOT NULL,
+      artist_key TEXT NOT NULL, track_key TEXT NOT NULL, created_at_ms INTEGER NOT NULL, recording_mbid TEXT NOT NULL
+    )`,
+    'CREATE INDEX forward_love_recording_targets_latest ON forward_love_recording_targets(link_id,generation,artist_key,track_key,created_at_ms DESC,forward_rowid DESC)',
+    'CREATE TABLE forward_love_recording_targets_state (singleton INTEGER PRIMARY KEY NOT NULL, cursor_rowid INTEGER NOT NULL DEFAULT 0, complete INTEGER NOT NULL DEFAULT 0)',
+    `CREATE TABLE forward_love_operation_targets (
+      target_id INTEGER PRIMARY KEY NOT NULL, operation_rowid INTEGER NOT NULL UNIQUE, did TEXT NOT NULL, artist_key TEXT NOT NULL,
+      track_key TEXT NOT NULL, created_at_ms INTEGER NOT NULL, recording_mbid TEXT NOT NULL
+    )`,
+    'CREATE INDEX forward_love_operation_targets_latest ON forward_love_operation_targets(did,artist_key,track_key,created_at_ms DESC,operation_rowid DESC)',
+    'CREATE TABLE forward_love_operation_targets_state (singleton INTEGER PRIMARY KEY NOT NULL, cursor_rowid INTEGER NOT NULL DEFAULT 0, complete INTEGER NOT NULL DEFAULT 0)',
+    `CREATE TABLE forward_unlove_lookup_progress (
+      unlove_rowid INTEGER PRIMARY KEY NOT NULL, cursor_created_at_ms INTEGER NOT NULL, cursor_operation_rowid INTEGER NOT NULL
+    )`,
+  ],
+};
+
+// Keep repository-operation provenance reads bounded to the exact record.
+const MIGRATION_OPERATIONS_RECORD_TARGET: Migration = {
+  version: 47,
+  name: 'operations_record_target',
+  statements: ['CREATE INDEX operations_record_target ON operations(did,collection,rkey,created_at_ms)'],
+};
+
+const MIGRATION_LIVE_ADMISSION_EVIDENCE: Migration = {
+  version: 48,
+  name: 'live_admission_evidence',
+  statements: [
+    `CREATE TABLE live_record_evidence (
+      uri TEXT PRIMARY KEY NOT NULL, did TEXT NOT NULL, collection TEXT NOT NULL, rkey TEXT NOT NULL,
+      up_rev TEXT, up_action TEXT CHECK(up_action IS NULL OR up_action IN ('create','update')), up_cid TEXT,
+      del_rev TEXT, conflict_rev TEXT, received_ms INTEGER NOT NULL, expires_at_ms INTEGER NOT NULL,
+      CHECK(up_rev IS NOT NULL OR del_rev IS NOT NULL),
+      CHECK((up_rev IS NULL) = (up_action IS NULL) AND (up_rev IS NULL) = (up_cid IS NULL))
+    )`,
+    'CREATE INDEX live_record_evidence_expiry ON live_record_evidence(expires_at_ms)',
+    `CREATE TABLE live_acceptance_candidates (
+      uri TEXT NOT NULL, identity_key TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('scrobble','love')),
+      member_uri TEXT NOT NULL, cid TEXT NOT NULL, created_at_ms INTEGER NOT NULL, expires_at_ms INTEGER NOT NULL,
+      PRIMARY KEY(uri,identity_key)
+    )`,
+    'CREATE INDEX live_acceptance_candidates_expiry ON live_acceptance_candidates(expires_at_ms)',
+    'ALTER TABLE hints ADD COLUMN evidence_rev TEXT',
+  ],
+};
+
+const MIGRATION_LIVE_PENDING_REMOVALS: Migration = {
+  version: 49,
+  name: 'live_pending_removals',
+  statements: [
+    `CREATE TABLE live_pending_removals (
+      uri TEXT NOT NULL, member_uri TEXT NOT NULL, removed_cid TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK(kind IN ('scrobble','love')),
+      window_lo TEXT NOT NULL, window_hi TEXT NOT NULL, replaced_by_cid TEXT NOT NULL,
+      identity_key TEXT NOT NULL, listened_at INTEGER,
+      artist_key TEXT NOT NULL, track_key TEXT NOT NULL, artist TEXT NOT NULL, track TEXT NOT NULL,
+      recording_mbid TEXT, love_source_service TEXT, love_import_sources TEXT,
+      authorized_rev TEXT, created_at_ms INTEGER NOT NULL, expires_at_ms INTEGER NOT NULL,
+      PRIMARY KEY(uri,member_uri,removed_cid,window_lo,window_hi,replaced_by_cid)
+    )`,
+    'CREATE INDEX live_pending_removals_ready ON live_pending_removals(authorized_rev,created_at_ms,uri,window_hi,expires_at_ms)',
+    'CREATE INDEX live_pending_removals_uri_ready ON live_pending_removals(uri,authorized_rev,created_at_ms,window_hi,expires_at_ms)',
+    'CREATE INDEX live_pending_removals_group ON live_pending_removals(uri,kind,window_lo,window_hi,replaced_by_cid,authorized_rev,expires_at_ms,member_uri)',
+    'CREATE INDEX live_pending_removals_authorize ON live_pending_removals(uri,window_hi,window_lo DESC,replaced_by_cid,authorized_rev,expires_at_ms)',
+    'CREATE INDEX live_pending_removals_expiry ON live_pending_removals(expires_at_ms,uri,window_hi)',
+  ],
+};
+
+// A2 repair: durable authorization cursors and conflict decisions. Migration 49
+// is already applied in deployed stores and remains byte-for-byte unchanged.
+const MIGRATION_LIVE_PENDING_REMOVAL_REPAIR: Migration = {
+  version: 50,
+  name: 'live_pending_removal_repair',
+  statements: [
+    'ALTER TABLE live_pending_removals ADD COLUMN conflict_invalidated INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE loves ADD COLUMN revision TEXT',
+    'CREATE INDEX loves_newer_by_track ON loves(did,artist_key,track_key,revision)',
+    'CREATE INDEX live_pending_removals_page ON live_pending_removals(uri,window_hi,window_lo,replaced_by_cid,kind,member_uri,removed_cid)',
+    `CREATE TABLE live_pending_removal_events (
+      uri TEXT NOT NULL, rev TEXT NOT NULL, action TEXT NOT NULL CHECK(action IN ('create','update','delete')),
+      cid TEXT NOT NULL DEFAULT '', conflicted INTEGER NOT NULL DEFAULT 0 CHECK(conflicted IN (0,1)),
+      cursor_window_hi TEXT NOT NULL DEFAULT '', cursor_window_lo TEXT NOT NULL DEFAULT '',
+      cursor_replaced_by_cid TEXT NOT NULL DEFAULT '', cursor_kind TEXT NOT NULL DEFAULT '',
+      cursor_member_uri TEXT NOT NULL DEFAULT '', cursor_removed_cid TEXT NOT NULL DEFAULT '',
+      scan_complete INTEGER NOT NULL DEFAULT 0 CHECK(scan_complete IN (0,1)),
+      created_at_ms INTEGER NOT NULL, expires_at_ms INTEGER NOT NULL,
+      PRIMARY KEY(uri,rev)
+    )`,
+    'CREATE INDEX live_pending_removal_events_expiry ON live_pending_removal_events(expires_at_ms,uri,rev)',
+    'CREATE INDEX live_pending_removal_events_by_uri ON live_pending_removal_events(uri,rev,expires_at_ms)',
+    'CREATE INDEX live_pending_removal_events_scan ON live_pending_removal_events(scan_complete,expires_at_ms,created_at_ms,uri,rev)',
+    'CREATE INDEX live_pending_removal_events_uri_scan ON live_pending_removal_events(uri,scan_complete,expires_at_ms,created_at_ms,rev)',
+  ],
+};
+
+// A2 follow-up repair: preserve conflicting authorization revisions, reconcile
+// newly recorded windows against retained events, and keep cleanup/index work
+// on durable bounded frontiers. Migrations 1–50 are already deployed.
+const MIGRATION_LIVE_PENDING_REMOVAL_BOUNDS: Migration = {
+  version: 51,
+  name: 'live_pending_removal_bounds',
+  statements: [
+    'ALTER TABLE live_pending_removals ADD COLUMN conflicted_auth_rev TEXT',
+    'ALTER TABLE live_pending_removal_events ADD COLUMN cleanup_due_ms INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE listenbrainz_deletes ADD COLUMN authorization_uri TEXT',
+    'ALTER TABLE listenbrainz_deletes ADD COLUMN authorization_rev TEXT',
+    `CREATE TABLE live_pending_removal_reconcile (
+      uri TEXT NOT NULL, window_lo TEXT NOT NULL, window_hi TEXT NOT NULL, replaced_by_cid TEXT NOT NULL,
+      cursor_rev TEXT NOT NULL, next_due_ms INTEGER NOT NULL, created_at_ms INTEGER NOT NULL,
+      PRIMARY KEY(uri,window_lo,window_hi,replaced_by_cid)
+    )`,
+    'CREATE INDEX live_pending_removal_reconcile_due ON live_pending_removal_reconcile(next_due_ms,created_at_ms,uri,window_lo,window_hi,replaced_by_cid)',
+    'CREATE INDEX live_pending_removal_events_ready_v2 ON live_pending_removal_events(scan_complete,created_at_ms,uri,rev)',
+    'CREATE INDEX live_pending_removal_events_cleanup ON live_pending_removal_events(cleanup_due_ms,uri,rev,expires_at_ms)',
+    'CREATE INDEX listenbrainz_deletes_authorization ON listenbrainz_deletes(authorization_uri,authorization_rev,state)',
+  ],
+};
+
+// A2 repair: bind queued live unlove effects to their immutable authorization.
+const MIGRATION_A2_AUTHORIZATION_BINDING: Migration = {
+  version: 52,
+  name: 'a2_authorization_binding',
+  statements: [
+    'ALTER TABLE forward_outbox ADD COLUMN authorization_uri TEXT',
+    'ALTER TABLE forward_outbox ADD COLUMN authorization_rev TEXT',
+    'CREATE INDEX forward_outbox_authorization ON forward_outbox(authorization_uri,authorization_rev,state)',
+    'CREATE INDEX live_pending_removal_events_uri_ready_order ON live_pending_removal_events(uri,scan_complete,created_at_ms,rev)',
+    `ALTER TABLE live_pending_removal_events ADD COLUMN cleanup_frontier TEXT NOT NULL DEFAULT ''`,
+  ],
+};
+
+// A2 repair: cleanup cursors are invalidated by new pending windows per URI.
+const MIGRATION_A2_RETENTION_EPOCH: Migration = {
+  version: 53,
+  name: 'a2_retention_epoch',
+  statements: [
+    `CREATE TABLE live_pending_removal_retention_epoch (
+      uri TEXT PRIMARY KEY, generation INTEGER NOT NULL CHECK(generation>=0)
+    )`,
+  ],
+};
+
+export const LOVE_IMPORT_SOURCE_CLASS_SQL =
+  "CASE WHEN source_service IN ('lastfm','lastfm_api','lastfm_json') THEN 1 " +
+  "WHEN source_service IN ('listenbrainz','listenbrainz_api','listenbrainz_zip') THEN 2 ELSE 0 END";
+
+const MIGRATION_LOVE_IMPORT_BRIDGE_SOURCE_CLASS: Migration = {
+  version: 54,
+  name: 'love_import_bridges_source_class',
+  statements: [
+    `CREATE INDEX love_import_bridges_source_class ON love_import_bridges(did,uri,incarnation_key,state,(${LOVE_IMPORT_SOURCE_CLASS_SQL}))`,
+  ],
+};
+
+const MIGRATION_LINK_COVERAGE_RECEIPTS: Migration = {
+  version: 55,
+  name: 'link_coverage_receipts',
+  statements: [
+    `CREATE TABLE forward_receipts (
+      link_id TEXT NOT NULL REFERENCES linked_accounts(id) ON DELETE CASCADE,
+      generation INTEGER NOT NULL,
+      kind TEXT NOT NULL CHECK(kind IN ('scrobble','love','unlove')),
+      dedupe_key TEXT NOT NULL,
+      created_at_ms INTEGER NOT NULL,
+      retired_at_ms INTEGER,
+      PRIMARY KEY(link_id,generation,kind,dedupe_key)
+    )`,
+    `CREATE TABLE forward_link_gaps (
+      link_id TEXT NOT NULL REFERENCES linked_accounts(id) ON DELETE CASCADE,
+      generation INTEGER NOT NULL,
+      from_seq INTEGER NOT NULL CHECK(from_seq>=0),
+      to_seq INTEGER CHECK(to_seq IS NULL OR to_seq>from_seq),
+      reason TEXT NOT NULL CHECK(reason IN ('disabled','revoked','legacy')),
+      opened_at_ms INTEGER NOT NULL,
+      closed_at_ms INTEGER,
+      PRIMARY KEY(link_id,generation,from_seq)
+    )`,
+  ],
+};
+
+const MIGRATION_LINK_LOVE_COVERAGE: Migration = {
+  version: 56,
+  name: 'link_love_coverage',
+  statements: [
+    `CREATE TABLE forward_love_delivery (
+      link_id TEXT NOT NULL REFERENCES linked_accounts(id) ON DELETE CASCADE,
+      generation INTEGER NOT NULL,
+      love_artist_key TEXT NOT NULL,
+      love_track_key TEXT NOT NULL,
+      last_sent_kind TEXT NOT NULL CHECK(last_sent_kind IN ('love','unlove')),
+      last_sent_dedupe_key TEXT NOT NULL,
+      row_created_at_ms INTEGER NOT NULL,
+      sent_at_ms INTEGER NOT NULL,
+      PRIMARY KEY(link_id,generation,love_artist_key,love_track_key)
+    )`,
+    `CREATE TABLE forward_deferred_love_heads (
+      link_id TEXT NOT NULL REFERENCES linked_accounts(id) ON DELETE CASCADE,
+      generation INTEGER NOT NULL,
+      love_artist_key TEXT NOT NULL,
+      love_track_key TEXT NOT NULL,
+      head_seq INTEGER NOT NULL UNIQUE CHECK(head_seq>=1),
+      next_seq INTEGER NOT NULL DEFAULT 1 CHECK(next_seq>=1),
+      live_from_seq INTEGER NOT NULL DEFAULT 1 CHECK(live_from_seq>=1 AND live_from_seq<=next_seq),
+      armed_seq INTEGER CHECK(armed_seq IS NULL OR armed_seq>=1),
+      maintenance_seq INTEGER CHECK(maintenance_seq IS NULL OR maintenance_seq>=1),
+      decided_seq INTEGER CHECK(decided_seq IS NULL OR decided_seq>=1),
+      scan_seq INTEGER CHECK(scan_seq IS NULL OR scan_seq>=1),
+      created_at_ms INTEGER NOT NULL,
+      PRIMARY KEY(link_id,generation,love_artist_key,love_track_key)
+    )`,
+    'CREATE INDEX forward_deferred_love_heads_armed ON forward_deferred_love_heads(link_id,generation,armed_seq) WHERE armed_seq IS NOT NULL',
+    'CREATE INDEX forward_deferred_love_heads_maintenance ON forward_deferred_love_heads(maintenance_seq) WHERE maintenance_seq IS NOT NULL',
+    `CREATE TABLE forward_deferred_love_intents (
+      link_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      love_artist_key TEXT NOT NULL,
+      love_track_key TEXT NOT NULL,
+      intent_seq INTEGER NOT NULL CHECK(intent_seq>=1),
+      kind TEXT NOT NULL CHECK(kind IN ('love','unlove')),
+      operation_id TEXT NOT NULL,
+      origin_class TEXT NOT NULL CHECK(origin_class IN ('operation','authorized','live_love','unclassified')),
+      payload_json TEXT NOT NULL,
+      authorization_uri TEXT,
+      authorization_rev TEXT,
+      intent_at_ms INTEGER NOT NULL,
+      CHECK((authorization_uri IS NULL) = (authorization_rev IS NULL)),
+      CHECK((origin_class='authorized') = (authorization_uri IS NOT NULL)),
+      PRIMARY KEY(link_id,generation,love_artist_key,love_track_key,intent_seq),
+      UNIQUE(link_id,generation,operation_id),
+      FOREIGN KEY(link_id,generation,love_artist_key,love_track_key)
+        REFERENCES forward_deferred_love_heads(link_id,generation,love_artist_key,love_track_key) ON DELETE CASCADE
+    )`,
+    'CREATE INDEX forward_deferred_love_intents_authorization ON forward_deferred_love_intents(authorization_uri,authorization_rev,link_id,generation,operation_id) WHERE authorization_uri IS NOT NULL',
+    `CREATE TABLE forward_deferred_love_witnesses (
+      link_id TEXT NOT NULL REFERENCES linked_accounts(id) ON DELETE CASCADE,
+      generation INTEGER NOT NULL,
+      operation_id TEXT NOT NULL,
+      group_seq INTEGER NOT NULL CHECK(group_seq>=1),
+      kind TEXT NOT NULL CHECK(kind IN ('love','unlove')),
+      love_artist_key TEXT NOT NULL,
+      love_track_key TEXT NOT NULL,
+      authorization_uri TEXT,
+      authorization_rev TEXT,
+      created_at_ms INTEGER NOT NULL,
+      CHECK((authorization_uri IS NULL) = (authorization_rev IS NULL)),
+      PRIMARY KEY(link_id,generation,operation_id)
+    )`,
+    'CREATE INDEX forward_deferred_love_witnesses_group ON forward_deferred_love_witnesses(group_seq,link_id,generation)',
+    `CREATE TABLE forward_deferred_love_authorities (
+      authorization_uri TEXT NOT NULL,
+      authorization_rev TEXT NOT NULL,
+      authority_seq INTEGER NOT NULL UNIQUE CHECK(authority_seq>=1),
+      action TEXT NOT NULL CHECK(action IN ('update','delete')),
+      cid TEXT NOT NULL,
+      state TEXT NOT NULL CHECK(state IN ('active','conflicted')),
+      due_seq INTEGER CHECK(due_seq IS NULL OR due_seq>=1),
+      cursor_link_id TEXT NOT NULL DEFAULT '',
+      cursor_generation INTEGER NOT NULL DEFAULT 0,
+      cursor_operation_id TEXT NOT NULL DEFAULT '',
+      created_at_ms INTEGER NOT NULL,
+      CHECK((state='conflicted') = (due_seq IS NOT NULL)),
+      CHECK((action='delete') = (cid='')),
+      PRIMARY KEY(authorization_uri,authorization_rev)
+    )`,
+    'CREATE INDEX forward_deferred_love_authorities_due ON forward_deferred_love_authorities(due_seq) WHERE due_seq IS NOT NULL',
+    "CREATE INDEX forward_outbox_unlove_authority_dependency ON forward_outbox(authorization_uri,authorization_rev) WHERE kind='unlove' AND authorization_uri IS NOT NULL AND (state IN ('queued','held','retrying') OR (state='ignored' AND last_error IN ('no_recording_mbid','mbid_unresolved')))",
+    `CREATE TABLE forward_deferred_love_maintenance (
+      singleton INTEGER PRIMARY KEY NOT NULL CHECK(singleton=1),
+      lane_turn INTEGER NOT NULL DEFAULT 0 CHECK(lane_turn BETWEEN 0 AND 4),
+      next_head_seq INTEGER NOT NULL DEFAULT 1 CHECK(next_head_seq>=1),
+      next_group_seq INTEGER NOT NULL DEFAULT 1 CHECK(next_group_seq>=1),
+      next_authority_seq INTEGER NOT NULL DEFAULT 1 CHECK(next_authority_seq>=1),
+      rr_cursor INTEGER NOT NULL DEFAULT 0,
+      rr_frontier INTEGER NOT NULL DEFAULT 0,
+      wit_cursor INTEGER NOT NULL DEFAULT 0,
+      wit_frontier INTEGER NOT NULL DEFAULT 0,
+      wit_state TEXT NOT NULL DEFAULT 'scan' CHECK(wit_state IN ('scan','pruning')),
+      wit_link_id TEXT NOT NULL DEFAULT '',
+      wit_generation INTEGER NOT NULL DEFAULT 0,
+      auth_cursor INTEGER NOT NULL DEFAULT 0,
+      auth_frontier INTEGER NOT NULL DEFAULT 0,
+      rr_passes INTEGER NOT NULL DEFAULT 0,
+      wit_passes INTEGER NOT NULL DEFAULT 0,
+      auth_passes INTEGER NOT NULL DEFAULT 0,
+      updated_at_ms INTEGER NOT NULL DEFAULT 0
+    )`,
+  ],
+};
+
+const MIGRATION_API_LOVE_RECIPIENT_PROOF: Migration = {
+  version: 57,
+  name: 'api_love_recipient_proof',
+  statements: [
+    "CREATE TABLE love_api_bindings (\n  did TEXT NOT NULL,\n  operation_id TEXT NOT NULL,\n  api_origin TEXT NOT NULL CHECK(api_origin IN ('web','lastfm','listenbrainz')),\n  uri TEXT NOT NULL,\n  incarnation_key TEXT NOT NULL,\n  binding_seq INTEGER NOT NULL UNIQUE CHECK(binding_seq>=1),\n  created_at_ms INTEGER NOT NULL,\n  PRIMARY KEY(did,operation_id)\n)",
+    'CREATE INDEX love_api_bindings_incarnation ON love_api_bindings(did,uri,incarnation_key)',
+    "CREATE TABLE love_api_recipients (\n  did TEXT NOT NULL,\n  uri TEXT NOT NULL,\n  incarnation_key TEXT NOT NULL,\n  link_id TEXT NOT NULL REFERENCES linked_accounts(id) ON DELETE CASCADE,\n  generation INTEGER NOT NULL CHECK(generation>=1),\n  aggregate_seq INTEGER NOT NULL UNIQUE CHECK(aggregate_seq>=1),\n  state TEXT NOT NULL CHECK(state IN ('present','sealed','released')),\n  sent_operation_id TEXT,\n  next_member_seq INTEGER NOT NULL DEFAULT 1 CHECK(next_member_seq>=1),\n  validate_after_seq INTEGER NOT NULL DEFAULT 0 CHECK(validate_after_seq>=0),\n  created_at_ms INTEGER NOT NULL,\n  updated_at_ms INTEGER NOT NULL,\n  PRIMARY KEY(did,uri,incarnation_key,link_id,generation)\n)",
+    'CREATE TABLE love_api_recipient_members (\n  link_id TEXT NOT NULL,\n  generation INTEGER NOT NULL,\n  operation_id TEXT NOT NULL,\n  did TEXT NOT NULL,\n  uri TEXT NOT NULL,\n  incarnation_key TEXT NOT NULL,\n  member_seq INTEGER NOT NULL CHECK(member_seq>=1),\n  created_at_ms INTEGER NOT NULL,\n  PRIMARY KEY(link_id,generation,operation_id),\n  FOREIGN KEY(did,uri,incarnation_key,link_id,generation)\n    REFERENCES love_api_recipients(did,uri,incarnation_key,link_id,generation) ON DELETE CASCADE\n)',
+    'CREATE INDEX love_api_recipient_members_aggregate ON love_api_recipient_members(did,uri,incarnation_key,link_id,generation,member_seq)',
+    "CREATE TABLE love_api_comparison_facts (\n  authorization_uri TEXT NOT NULL,\n  authorization_rev TEXT NOT NULL,\n  fact_seq INTEGER NOT NULL UNIQUE CHECK(fact_seq>=1),\n  action TEXT NOT NULL CHECK(action IN ('update','delete')),\n  cid TEXT NOT NULL,\n  horizon_ms INTEGER NOT NULL CHECK(horizon_ms>=1),\n  conflicted INTEGER NOT NULL DEFAULT 0 CHECK(conflicted IN (0,1)),\n  created_at_ms INTEGER NOT NULL,\n  CHECK((action='delete') = (cid='')),\n  PRIMARY KEY(authorization_uri,authorization_rev)\n)",
+    'CREATE TABLE love_api_window_owners (\n  uri TEXT NOT NULL,\n  member_uri TEXT NOT NULL,\n  removed_cid TEXT NOT NULL,\n  window_lo TEXT NOT NULL,\n  window_hi TEXT NOT NULL,\n  replaced_by_cid TEXT NOT NULL,\n  did TEXT NOT NULL,\n  incarnation_key TEXT NOT NULL,\n  link_id TEXT NOT NULL,\n  generation INTEGER NOT NULL,\n  created_at_ms INTEGER NOT NULL,\n  PRIMARY KEY(uri,member_uri,removed_cid,window_lo,window_hi,replaced_by_cid,link_id,generation),\n  FOREIGN KEY(uri,member_uri,removed_cid,window_lo,window_hi,replaced_by_cid)\n    REFERENCES live_pending_removals(uri,member_uri,removed_cid,window_lo,window_hi,replaced_by_cid) ON DELETE CASCADE,\n  FOREIGN KEY(did,uri,incarnation_key,link_id,generation)\n    REFERENCES love_api_recipients(did,uri,incarnation_key,link_id,generation) ON DELETE CASCADE\n)',
+    'CREATE INDEX love_api_window_owners_aggregate ON love_api_window_owners(did,uri,incarnation_key,link_id,generation)',
+    "CREATE TABLE love_api_unlove_decisions (\n  did TEXT NOT NULL,\n  uri TEXT NOT NULL,\n  incarnation_key TEXT NOT NULL,\n  link_id TEXT NOT NULL,\n  generation INTEGER NOT NULL,\n  artist TEXT NOT NULL,\n  track TEXT NOT NULL,\n  artist_key TEXT NOT NULL,\n  track_key TEXT NOT NULL,\n  recording_mbid TEXT,\n  payload_json TEXT NOT NULL,\n  love_source_service TEXT,\n  love_import_sources TEXT,\n  authorization_uri TEXT NOT NULL,\n  authorization_rev TEXT NOT NULL,\n  fact_action TEXT NOT NULL CHECK(fact_action IN ('update','delete')),\n  fact_cid TEXT NOT NULL,\n  expires_at_ms INTEGER NOT NULL CHECK(expires_at_ms>=1),\n  due_at_ms INTEGER NOT NULL,\n  scan_session TEXT,\n  alias_epoch INTEGER,\n  alias_cursor TEXT,\n  created_at_ms INTEGER NOT NULL,\n  PRIMARY KEY(did,uri,incarnation_key,link_id,generation),\n  FOREIGN KEY(did,uri,incarnation_key,link_id,generation)\n    REFERENCES love_api_recipients(did,uri,incarnation_key,link_id,generation) ON DELETE CASCADE,\n  FOREIGN KEY(authorization_uri,authorization_rev)\n    REFERENCES love_api_comparison_facts(authorization_uri,authorization_rev)\n)",
+    'CREATE INDEX love_api_unlove_decisions_due ON love_api_unlove_decisions(due_at_ms,did,uri,incarnation_key,link_id,generation)',
+    'CREATE INDEX love_api_unlove_decisions_fact ON love_api_unlove_decisions(authorization_uri,authorization_rev)',
+    'CREATE INDEX love_api_unlove_decisions_uri ON love_api_unlove_decisions(uri,did,incarnation_key,link_id,generation)',
+    'CREATE TABLE love_api_intent_epochs (\n  did TEXT PRIMARY KEY NOT NULL,\n  epoch INTEGER NOT NULL CHECK(epoch>=0)\n)',
+    "CREATE INDEX love_api_intent_alias_scan ON linked_love_intents(did,recording_mbid,love_key) WHERE intent='love'",
+    "CREATE INDEX love_api_active_love_put ON operations(did,\n  (CASE WHEN json_valid(record_json) THEN json_extract(record_json,'$.artist') END),\n  (CASE WHEN json_valid(record_json) THEN json_extract(record_json,'$.track') END))\n  WHERE kind='love.put' AND state IN ('queued','blocked','running')",
+    "CREATE INDEX love_api_active_love_put_malformed ON operations(did)\n  WHERE kind='love.put' AND state IN ('queued','blocked','running') AND (record_json IS NULL OR NOT json_valid(record_json))",
+    "CREATE TABLE love_api_proof_state (\n  singleton INTEGER PRIMARY KEY NOT NULL CHECK(singleton=1),\n  lane_turn INTEGER NOT NULL DEFAULT 0 CHECK(lane_turn BETWEEN 0 AND 2),\n  next_binding_seq INTEGER NOT NULL DEFAULT 1 CHECK(next_binding_seq>=1),\n  next_aggregate_seq INTEGER NOT NULL DEFAULT 1 CHECK(next_aggregate_seq>=1),\n  next_fact_seq INTEGER NOT NULL DEFAULT 1 CHECK(next_fact_seq>=1),\n  sweep_cursor INTEGER NOT NULL DEFAULT 0 CHECK(sweep_cursor>=0),\n  sweep_frontier INTEGER NOT NULL DEFAULT 0 CHECK(sweep_frontier>=0),\n  reclaim_kind TEXT NOT NULL DEFAULT 'binding' CHECK(reclaim_kind IN ('binding','fact')),\n  binding_cursor INTEGER NOT NULL DEFAULT 0 CHECK(binding_cursor>=0),\n  binding_frontier INTEGER NOT NULL DEFAULT 0 CHECK(binding_frontier>=0),\n  fact_cursor INTEGER NOT NULL DEFAULT 0 CHECK(fact_cursor>=0),\n  fact_frontier INTEGER NOT NULL DEFAULT 0 CHECK(fact_frontier>=0),\n  sweep_passes INTEGER NOT NULL DEFAULT 0,\n  reclaim_passes INTEGER NOT NULL DEFAULT 0,\n  updated_at_ms INTEGER NOT NULL DEFAULT 0\n)",
+  ],
+};
 
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
@@ -1432,6 +1799,21 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_S4_DELETE_LOOKUP_PROGRESS,
   MIGRATION_S4_DELETE_LOOKUP_TIE_FENCE,
   MIGRATION_S4_DELETE_LOOKUP_PAGE_BOUNDARY,
+  MIGRATION_S4_FORWARD_LOVE_HEADS,
+  MIGRATION_S4_FORWARD_LOVE_LANES,
+  MIGRATION_FORWARD_LOVE_RECORDING_HISTORY,
+  MIGRATION_FORWARD_LOVE_RECORDING_TARGETS,
+  MIGRATION_OPERATIONS_RECORD_TARGET,
+  MIGRATION_LIVE_ADMISSION_EVIDENCE,
+  MIGRATION_LIVE_PENDING_REMOVALS,
+  MIGRATION_LIVE_PENDING_REMOVAL_REPAIR,
+  MIGRATION_LIVE_PENDING_REMOVAL_BOUNDS,
+  MIGRATION_A2_AUTHORIZATION_BINDING,
+  MIGRATION_A2_RETENTION_EPOCH,
+  MIGRATION_LOVE_IMPORT_BRIDGE_SOURCE_CLASS,
+  MIGRATION_LINK_COVERAGE_RECEIPTS,
+  MIGRATION_LINK_LOVE_COVERAGE,
+  MIGRATION_API_LOVE_RECIPIENT_PROOF,
 ];
 
 /** The schema version this code expects. */
@@ -1463,6 +1845,12 @@ export const TABLES = [
   'counters',
   // The migration ledger (worker/src/do/migrate.ts).
   'schema_migrations',
+  'live_record_evidence',
+  'live_acceptance_candidates',
+  'live_pending_removals',
+  'live_pending_removal_events',
+  'live_pending_removal_reconcile',
+  'live_pending_removal_retention_epoch',
   // Migration 2.
   'accounts',
   'web_sessions',
@@ -1482,6 +1870,14 @@ export const TABLES = [
   'linked_accounts',
   'link_states',
   'forward_outbox',
+  'forward_love_lanes',
+  'forward_love_recording_history',
+  'forward_love_recording_history_state',
+  'forward_love_recording_targets',
+  'forward_love_recording_targets_state',
+  'forward_love_operation_targets',
+  'forward_love_operation_targets_state',
+  'forward_unlove_lookup_progress',
   'listenbrainz_deletes',
   'link_backfill_items',
   'forward_admissions',
@@ -1520,6 +1916,24 @@ export const TABLES = [
   'linked_pull_receipt_seed',
   'linked_pull_projection_scan',
   'linked_pull_love_admissions',
+  // Migration 55.
+  'forward_receipts',
+  'forward_link_gaps',
+  'forward_love_delivery',
+  'forward_deferred_love_heads',
+  'forward_deferred_love_intents',
+  'forward_deferred_love_witnesses',
+  'forward_deferred_love_authorities',
+  'forward_deferred_love_maintenance',
+  // Migration 57: API love recipient proof.
+  'love_api_bindings',
+  'love_api_recipients',
+  'love_api_recipient_members',
+  'love_api_comparison_facts',
+  'love_api_window_owners',
+  'love_api_unlove_decisions',
+  'love_api_intent_epochs',
+  'love_api_proof_state',
 ] as const;
 
 export type TableName = (typeof TABLES)[number];
@@ -1553,6 +1967,12 @@ export const TABLE_CLASS: Readonly<Record<TableName, TableClass>> = {
   stats_cache: 'derived',
   counters: 'non-derived',
   schema_migrations: 'non-derived',
+  live_record_evidence: 'non-derived',
+  live_acceptance_candidates: 'non-derived',
+  live_pending_removals: 'non-derived',
+  live_pending_removal_events: 'non-derived',
+  live_pending_removal_reconcile: 'non-derived',
+  live_pending_removal_retention_epoch: 'non-derived',
   accounts: 'non-derived',
   web_sessions: 'non-derived',
   oauth_states: 'non-derived',
@@ -1571,6 +1991,14 @@ export const TABLE_CLASS: Readonly<Record<TableName, TableClass>> = {
   linked_accounts: 'non-derived',
   link_states: 'non-derived',
   forward_outbox: 'non-derived',
+  forward_love_lanes: 'non-derived',
+  forward_love_recording_history: 'non-derived',
+  forward_love_recording_history_state: 'non-derived',
+  forward_love_recording_targets: 'non-derived',
+  forward_love_recording_targets_state: 'non-derived',
+  forward_love_operation_targets: 'non-derived',
+  forward_love_operation_targets_state: 'non-derived',
+  forward_unlove_lookup_progress: 'non-derived',
   listenbrainz_deletes: 'non-derived',
   link_backfill_items: 'non-derived',
   forward_admissions: 'non-derived',
@@ -1607,4 +2035,20 @@ export const TABLE_CLASS: Readonly<Record<TableName, TableClass>> = {
   linked_pull_receipt_seed: 'non-derived',
   linked_pull_projection_scan: 'non-derived',
   linked_pull_love_admissions: 'non-derived',
+  forward_receipts: 'non-derived',
+  forward_link_gaps: 'non-derived',
+  forward_love_delivery: 'non-derived',
+  forward_deferred_love_heads: 'non-derived',
+  forward_deferred_love_intents: 'non-derived',
+  forward_deferred_love_witnesses: 'non-derived',
+  forward_deferred_love_authorities: 'non-derived',
+  forward_deferred_love_maintenance: 'non-derived',
+  love_api_bindings: 'non-derived',
+  love_api_recipients: 'non-derived',
+  love_api_recipient_members: 'non-derived',
+  love_api_comparison_facts: 'non-derived',
+  love_api_window_owners: 'non-derived',
+  love_api_unlove_decisions: 'non-derived',
+  love_api_intent_epochs: 'non-derived',
+  love_api_proof_state: 'non-derived',
 };

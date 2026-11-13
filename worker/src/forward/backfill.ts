@@ -6,11 +6,24 @@ import { parseRfc3339 } from '@atmusic/core/timestamp';
 import type { CoreExtension } from '../app/host';
 import type { LinkedAccountRow } from '../app/rows';
 import type { Db } from '../do/db';
+import { LOVE_IMPORT_SOURCE_CLASS_SQL } from '../do/schema';
 import { matchedRecordingMbid } from '../musicbrainz/store';
 import { enqueueForwards } from '../outbox/forward-enqueue';
 import { forwardListenMetadata } from '../outbox/forward-payload';
+import { closeOpenLinkGap, ownsAdmissionInGap } from './coverage';
 import type { ForwardRuntime } from './forwarder';
+import { runLoveApiMaintenance } from './love-api-scheduler';
+import { runLoveCoverageChunk } from './love-coverage';
+import { LOVE_MAINTENANCE_QUIET_MS, runDeferredLoveMaintenance } from './love-deferral-maintenance';
+import { hasArmedLoveCoverage } from './love-deferral-storage';
+import { ensureLegacyLoveIncarnation } from './love-incarnation';
+import { latestExplicitLoveIntent } from './love-intent';
+import { resolveLoveRecording } from './love-recording';
 import { projectionListenKey } from './projection';
+
+export const LOVE_BRIDGE_EXCLUSION_SQL = `SELECT 1 AS x FROM love_import_bridges INDEXED BY love_import_bridges_source_class
+       WHERE did=? AND uri=? AND incarnation_key=? AND state='bound'
+         AND (${LOVE_IMPORT_SOURCE_CLASS_SQL}) IN (0,?) LIMIT 1`;
 
 export const BACKFILL_CHUNK_SIZE = 500;
 export const BACKFILL_IDLE_MS = 30_000;
@@ -76,7 +89,7 @@ export function recordBackfillFailure(
     return { failures, retryAt, exhausted };
   });
 }
-type HistoryRow = {
+export type HistoryRow = {
   kind: 'scrobble' | 'love';
   uri: string;
   cid: string;
@@ -98,6 +111,21 @@ type HistoryRow = {
   submission_client?: string | null;
   music_service?: string | null;
 };
+
+// Keep live promotion and history backfill on the same canonical scrobble
+// projection. The album fields are payload inputs: omitting them can select a
+// different album-specific MusicBrainz recording for the same listen.
+const SCROBBLE_HISTORY_PROJECTION = `s.uri,s.cid,s.listened_at AS event_at,s.artist,s.track,s.album,
+  s.recording_mbid,s.artist_key,s.track_key,s.album_key,s.listened_at,
+  s.album_artist,s.track_number,s.artist_mbids,s.release_mbid,s.release_group_mbid,s.isrc,s.submission_client,s.music_service`;
+
+export function scrobbleHistoryRow(db: Db, did: string, uri: string): HistoryRow | null {
+  return db.one<HistoryRow>(
+    `SELECT 'scrobble' AS kind,${SCROBBLE_HISTORY_PROJECTION} FROM scrobbles s WHERE s.did=? AND s.uri=?`,
+    did,
+    uri,
+  );
+}
 
 function cursorOf(raw: string | null): Cursor | null {
   if (raw === null) return null;
@@ -124,9 +152,7 @@ function candidates(
   const scrobbleKeyset = cursor === null ? '' : ' AND (s.listened_at,s.uri) < (?,?)';
   const loveKeyset = cursor === null ? '' : ' AND (l.created_at,l.uri) < (?,?)';
   const scrobbles = db.all<HistoryRow>(
-    `SELECT 'scrobble' AS kind,s.uri,s.cid,s.listened_at AS event_at,s.artist,s.track,s.album,
-            s.recording_mbid,s.artist_key,s.track_key,s.album_key,s.listened_at,
-            s.album_artist,s.track_number,s.artist_mbids,s.release_mbid,s.release_group_mbid,s.isrc,s.submission_client,s.music_service
+    `SELECT 'scrobble' AS kind,${SCROBBLE_HISTORY_PROJECTION}
      FROM scrobbles s WHERE s.did=?${cutoffFilter}${scrobbleKeyset}
      ORDER BY s.listened_at DESC,s.uri DESC LIMIT ?`,
     link.did,
@@ -172,11 +198,44 @@ function sourceService(source: string | null): 'lastfm' | 'listenbrainz' | null 
   return null;
 }
 
-function payloadForHistoryRow(
+function hasCurrentApiRecipientAdmission(
   db: Db,
-  link: LinkedAccountRow,
+  link: Pick<LinkedAccountRow, 'did' | 'id' | 'generation'>,
+  uri: string,
+  incarnationKey: string,
+): boolean {
+  return (
+    db.one(
+      `SELECT 1 FROM love_api_bindings b
+       JOIN love_api_recipients r ON r.did=b.did AND r.uri=b.uri AND r.incarnation_key=b.incarnation_key
+       WHERE b.did=? AND b.uri=? AND b.incarnation_key=? AND r.link_id=? AND r.generation=?
+         AND r.state IN ('present','sealed') AND (
+           r.sent_operation_id=b.operation_id OR EXISTS(
+             SELECT 1 FROM love_api_recipient_members m
+             WHERE m.link_id=r.link_id AND m.generation=r.generation AND m.operation_id=b.operation_id
+               AND m.did=r.did AND m.uri=r.uri AND m.incarnation_key=r.incarnation_key
+           )
+         ) LIMIT 1`,
+      link.did,
+      uri,
+      incarnationKey,
+      link.id,
+      link.generation,
+    ) !== null
+  );
+}
+
+export type HistoryEligibilityLink = Pick<
+  LinkedAccountRow,
+  'id' | 'did' | 'generation' | 'service' | 'generation_start_seq'
+>;
+
+export function payloadForHistoryRow(
+  db: Db,
+  link: HistoryEligibilityLink,
   row: HistoryRow,
   identityKey: string,
+  options: { allowLiveAdmission?: boolean } = {},
 ): { key: string; payload: unknown } | null {
   if (row.kind === 'love') {
     const incarnation = db.one<{ incarnation_key: string; path: string; source_service: string | null }>(
@@ -184,8 +243,20 @@ function payloadForHistoryRow(
       row.uri,
     );
     if (incarnation === null || incarnation.incarnation_key !== identityKey) return null;
+    if (incarnation.path === 'api' && hasCurrentApiRecipientAdmission(db, link, row.uri, incarnation.incarnation_key))
+      return null;
     if (incarnation.path === 'import' && sourceService(incarnation.source_service) === null) return null;
     if (incarnation.path === 'import' && sourceService(incarnation.source_service) === link.service) return null;
+    const destinationClass = link.service === 'lastfm' ? 1 : 2;
+    const excludedByBridge = db.one<{ x: number }>(
+      LOVE_BRIDGE_EXCLUSION_SQL,
+      link.did,
+      row.uri,
+      incarnation.incarnation_key,
+      destinationClass,
+    );
+    if (excludedByBridge !== null) return null;
+    if (latestExplicitLoveIntent(db, link.did, row.artist_key, row.track_key) === 'unlove') return null;
   }
   const marker = db.one<{ path: string; source_service: string | null; admission_seq: number }>(
     'SELECT path,source_service,admission_seq FROM forward_admissions WHERE did=? AND identity_key=?',
@@ -202,15 +273,33 @@ function payloadForHistoryRow(
     if (marker?.path === 'import' && sourceService(marker.source_service) === null) return null;
     if (marker?.path === 'import' && sourceService(marker.source_service) === link.service) return null;
   }
-  if (marker !== null && marker.admission_seq > link.generation_start_seq && marker.path !== 'snapshot') return null;
+  if (
+    marker !== null &&
+    marker.admission_seq > link.generation_start_seq &&
+    marker.path !== 'snapshot' &&
+    !(options.allowLiveAdmission && marker.path === 'live') &&
+    !ownsAdmissionInGap(db, link, marker.admission_seq)
+  )
+    return null;
+  const loveResolution =
+    row.kind === 'love' && row.recording_mbid === null
+      ? resolveLoveRecording(db, {
+          artist: row.artist,
+          track: row.track,
+          ...(row.album ? { album: row.album } : {}),
+        })
+      : null;
   const mbid =
-    row.recording_mbid ??
-    matchedRecordingMbid(db, {
-      artistKey: row.artist_key,
-      trackKey: row.track_key,
-      albumKey: row.album_key ?? (row.album ? albumKey(row.artist, row.album)?.[1] : undefined),
-    });
-  if (row.kind === 'love' && link.service === 'listenbrainz' && mbid === null) return null;
+    row.kind === 'love'
+      ? (row.recording_mbid ?? (loveResolution && 'mbid' in loveResolution ? loveResolution.mbid : null))
+      : (row.recording_mbid ??
+        matchedRecordingMbid(db, {
+          artistKey: row.artist_key,
+          trackKey: row.track_key,
+          albumKey: row.album_key ?? (row.album ? albumKey(row.artist, row.album)?.[1] : undefined),
+        }));
+  if (row.kind === 'love' && link.service === 'listenbrainz' && loveResolution && 'terminal' in loveResolution)
+    return null;
   if (row.kind === 'scrobble') {
     const listenedAt = row.listened_at as string;
     return {
@@ -244,6 +333,7 @@ async function admitHistoryRow(
   db: Db,
   link: LinkedAccountRow,
   row: HistoryRow,
+  now: number,
 ): Promise<{ key: string; payload: unknown } | null> {
   let identityKey: string;
   if (row.kind === 'scrobble') {
@@ -251,11 +341,25 @@ async function admitHistoryRow(
     if (ns === null) return null;
     identityKey = await listenKey({ did: link.did, listenedAtNs: ns, artist: row.artist, track: row.track });
   } else {
-    const incarnation = db.one<{ incarnation_key: string }>(
-      "SELECT incarnation_key FROM love_incarnations WHERE uri=? AND state='present'",
-      row.uri,
-    );
-    if (incarnation === null) return null;
+    const incarnation = db.tx(() => {
+      const existing = db.one<{ incarnation_key: string; state: string }>(
+        'SELECT incarnation_key,state FROM love_incarnations WHERE uri=?',
+        row.uri,
+      );
+      if (existing !== null) return existing;
+      const [, collection, rkey] = row.uri.slice('at://'.length).split('/');
+      if (!collection || !rkey) return null;
+      return ensureLegacyLoveIncarnation(db, {
+        did: link.did,
+        uri: row.uri,
+        collection,
+        rkey,
+        cid: row.cid,
+        nowMs: now,
+        admitMarker: false,
+      });
+    });
+    if (incarnation?.state !== 'present') return null;
     identityKey = incarnation.incarnation_key;
   }
   return payloadForHistoryRow(db, link, row, identityKey);
@@ -316,6 +420,9 @@ export async function runLinkBackfill(
       now,
     );
     if (selected === null) return null;
+    // A schema-54 writer could reset the marker without closing its gap.
+    // Reconcile only the eligible link selected for this bounded backfill turn.
+    closeOpenLinkGap(db, selected, selected.generation_start_seq, now);
     db.run("INSERT OR IGNORE INTO counters(name,label,value) VALUES('link_backfill','service_sequence',0)");
     const nextSeq = db.one<{ value: number }>(
       "UPDATE counters SET value=value+1 WHERE name='link_backfill' AND label='service_sequence' RETURNING value",
@@ -432,7 +539,7 @@ export async function runLinkBackfill(
           link.generation,
           link.backfill_run_revision,
         )?.n;
-        if (remaining === 0 && row.backfill_discovery_done === 1) {
+        if (remaining === 0 && row.backfill_discovery_done === 1 && !hasArmedLoveCoverage(db, link)) {
           db.run(
             "UPDATE linked_accounts SET backfill_state='done',backfill_failures=0,backfill_next_attempt_ms=NULL WHERE id=? AND generation=? AND backfill_run_revision=? AND status='active' AND forward_scrobbles=1 AND backfill_state='running'",
             link.id,
@@ -445,6 +552,15 @@ export async function runLinkBackfill(
       return committed ? page.length : 0;
     }
     if (current.backfill_discovery_done === 1) {
+      const queuedHistory = db.one<{ n: number }>(
+        "SELECT count(*) AS n FROM forward_outbox WHERE priority=1 AND state='queued'",
+      )?.n;
+      if (queuedHistory === undefined) throw new Error('missing history queue count');
+      const queueSpace = BACKFILL_HISTORY_QUEUE_HIGH_WATER - queuedHistory;
+      if (queueSpace <= 0) return 0;
+      const covered = runLoveCoverageChunk(db, link, now, random, Math.min(128, queueSpace));
+      if (covered > 0) return covered;
+      if (hasArmedLoveCoverage(db, link)) return 0;
       db.run(
         "UPDATE linked_accounts SET backfill_state='done',backfill_failures=0,backfill_next_attempt_ms=NULL WHERE id=? AND generation=? AND backfill_run_revision=? AND status='active' AND forward_scrobbles=1 AND backfill_state='running'",
         link.id,
@@ -457,7 +573,7 @@ export async function runLinkBackfill(
       const discovery = candidates(db, link, now, maxPageSize, cursorOf(link.backfill_discovery_cursor));
       const eligible: Array<{ row: HistoryRow; key: string }> = [];
       for (const row of discovery) {
-        const result = await admitHistoryRow(db, link, row);
+        const result = await admitHistoryRow(db, link, row, now);
         if (result !== null) eligible.push({ row, key: result.key });
       }
       const lastDiscovered = discovery.at(-1);
@@ -539,40 +655,84 @@ export async function runLinkBackfill(
 }
 
 export function linkBackfillExtension(runtime: () => ForwardRuntime | null): CoreExtension {
+  let sessionToken: string | null = null;
+  const createSessionToken = (rt: ForwardRuntime): string => {
+    const bytes = rt.random.bytes(16);
+    if (bytes.length !== 16) throw new RangeError('Random.bytes(16) returned the wrong length');
+    return Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('');
+  };
   return {
     name: 'link-backfill',
     timers: {
       'link-backfill': async (now, ctx) => {
         const rt = runtime();
-        if (rt === null) return;
+        let planned: number | null = null;
         try {
+          if (rt === null) return;
           const scanned = await runLinkBackfill(rt.db, rt.random, now);
-          if (scanned > 0) ctx.schedule('link-backfill', now, { force: true });
+          if (scanned > 0) planned = now;
           else {
             const next = rt.db.one<{ next: number | null }>(
               "SELECT min(backfill_next_attempt_ms) AS next FROM linked_accounts WHERE status='active' AND forward_scrobbles=1 AND backfill_state IN ('pending','running') AND backfill_next_attempt_ms>?",
               now,
             )?.next;
-            ctx.schedule(
-              'link-backfill',
-              next === null || next === undefined ? now + BACKFILL_IDLE_MS : Math.min(now + BACKFILL_IDLE_MS, next),
-              { force: true },
-            );
+            planned =
+              next === null || next === undefined ? now + BACKFILL_IDLE_MS : Math.min(now + BACKFILL_IDLE_MS, next);
           }
         } catch (error) {
           if (!(error instanceof BackfillAttemptFailure)) throw error;
+          if (rt === null) throw error;
           const result = recordBackfillFailure(rt.db, error.attempt, now);
-          if (result === null) return;
-          ctx.schedule('link-backfill', result.retryAt ?? now + BACKFILL_IDLE_MS, { force: true });
-          rt.log.log('warn', 'forward.backfill_retry', {
-            generation: error.attempt.generation,
-            delayMs: result.retryAt === null ? null : result.retryAt - now,
-            error: error.originalError instanceof Error ? error.originalError.name : 'UnknownError',
-          });
+          if (result !== null) {
+            planned = result.retryAt ?? now + BACKFILL_IDLE_MS;
+            rt.log.log('warn', 'forward.backfill_retry', {
+              generation: error.attempt.generation,
+              delayMs: result.retryAt === null ? null : result.retryAt - now,
+              error: error.originalError instanceof Error ? error.originalError.name : 'UnknownError',
+            });
+          }
+        } finally {
+          if (rt !== null) {
+            let wake = LOVE_MAINTENANCE_QUIET_MS;
+            try {
+              wake = runDeferredLoveMaintenance(rt.db, now).wakeMs;
+            } catch (error) {
+              try {
+                rt.log.log('warn', 'forward.deferred_love_maintenance_failed', {
+                  error: error instanceof Error ? error.name : 'UnknownError',
+                });
+              } catch {
+                // The maintenance failure remains bounded by the quiet retry.
+              }
+            }
+            let l2Wake = LOVE_MAINTENANCE_QUIET_MS;
+            let l2Failed = false;
+            try {
+              sessionToken ??= createSessionToken(rt);
+              const maintenance = runLoveApiMaintenance(rt.db, now, rt.random, sessionToken);
+              l2Wake = maintenance.wakeMs;
+            } catch (error) {
+              l2Failed = true;
+              try {
+                rt.log.log('warn', 'forward.api_love_maintenance_failed', {
+                  error: error instanceof Error ? error.name : 'UnknownError',
+                });
+              } catch {
+                // The materializer failure remains bounded by the quiet retry.
+              }
+            }
+            if (l2Failed) l2Wake = LOVE_MAINTENANCE_QUIET_MS;
+            wake = Math.min(wake, l2Wake);
+            ctx.schedule('link-backfill', planned === null ? now + wake : Math.min(planned, now + wake), {
+              force: true,
+            });
+          }
         }
       },
     },
     start(ctx, now) {
+      const rt = runtime();
+      if (rt !== null) sessionToken = createSessionToken(rt);
       ctx.schedule('link-backfill', now);
     },
   };

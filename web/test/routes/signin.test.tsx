@@ -1,5 +1,6 @@
 import { render } from 'preact';
-import { describe, expect, it, vi } from 'vitest';
+import { act } from 'preact/test-utils';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../../src/app';
 import { createDefaultServices, type ScreenServices, ServicesProvider } from '../../src/components/services';
 import type { Session } from '../../src/session/client';
@@ -22,39 +23,74 @@ function services(
   };
 }
 
+const roots = new Map<HTMLElement, () => void>();
+function appRoot(signal: AbortSignal): HTMLDivElement {
+  const root = document.createElement('div');
+  const onAbort = () => cleanupRoot(root);
+  roots.set(root, () => signal.removeEventListener('abort', onAbort));
+  signal.addEventListener('abort', onAbort, { once: true });
+  document.body.append(root);
+  return root;
+}
+function cleanupRoot(root: HTMLElement): void {
+  const detachAbort = roots.get(root);
+  if (detachAbort === undefined) return;
+  roots.delete(root);
+  detachAbort();
+  try {
+    render(null, root);
+  } finally {
+    root.remove();
+  }
+}
+afterEach(() => {
+  for (const root of roots.keys()) cleanupRoot(root);
+});
+
+async function settleRouteImport(): Promise<void> {
+  // AppRouter loads the screen through import.meta.glob and preact-iso's lazy().
+  // Wait for Vite's tracked dynamic import, then let Preact commit its render.
+  await vi.dynamicImportSettled();
+  await act(async () => undefined);
+}
+
 describe('web/test/routes/signin.test.tsx', () => {
-  it('reauthenticates in a separate window so the signed-out tab can keep its in-memory draft', async () => {
+  it('reauthenticates in a separate window so the signed-out tab can keep its in-memory draft', async ({ signal }) => {
     (window as unknown as { happyDOM: { setURL(url: string): void } }).happyDOM.setURL('https://music.test/signin');
     const signIn = vi.fn(async () => undefined);
     const reauthenticate = vi.fn(async () => undefined);
     const state = createAppState();
     state.reauthRequired.value = true;
-    const root = document.createElement('div');
-    document.body.append(root);
+    const root = appRoot(signal);
     render(
       <ServicesProvider value={services(signIn, reauthenticate)}>
         <App state={state} loadMetaOnMount={false} />
       </ServicesProvider>,
       root,
     );
-    await vi.waitFor(() => expect(root.querySelector('form')).not.toBeNull());
-    expect(root.textContent).toContain('Your previous session has ended');
-    const input = root.querySelector<HTMLInputElement>('[name="handle"]')!;
-    input.value = 'alice.test';
-    input.dispatchEvent(new Event('input', { bubbles: true }));
-    root.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-    await vi.waitFor(() => expect(reauthenticate).toHaveBeenCalledWith('alice.test'));
-    expect(signIn).not.toHaveBeenCalled();
-    expect(root.querySelector<HTMLButtonElement>('button[type="submit"]')?.disabled).toBe(true);
-    window.dispatchEvent(new Event('focus'));
-    await vi.waitFor(() =>
-      expect(root.querySelector<HTMLButtonElement>('button[type="submit"]')?.disabled).toBe(false),
-    );
-    render(null, root);
-    root.remove();
+    try {
+      // The behavioral cases also work when a previous case has warmed this route.
+      await settleRouteImport();
+      expect(root.querySelector('form')).not.toBeNull();
+      expect(root.textContent).toContain('Your previous session has ended');
+      const input = root.querySelector<HTMLInputElement>('[name="handle"]')!;
+      input.value = 'alice.test';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      root.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      await vi.waitFor(() => expect(reauthenticate).toHaveBeenCalledWith('alice.test'));
+      expect(signIn).not.toHaveBeenCalled();
+      expect(root.querySelector<HTMLButtonElement>('button[type="submit"]')?.disabled).toBe(true);
+      window.dispatchEvent(new Event('focus'));
+      await vi.waitFor(() =>
+        expect(root.querySelector<HTMLButtonElement>('button[type="submit"]')?.disabled).toBe(false),
+      );
+    } finally {
+      cleanupRoot(root);
+    }
   });
 
-  it('keeps the sign-in retry form visible for a reauth_required server session', async () => {
+  it('keeps the sign-in retry form visible for a reauth_required server session', async ({ signal }) => {
+    (window as unknown as { happyDOM: { setURL(url: string): void } }).happyDOM.setURL('https://music.test/signin');
     const reauthenticate = vi.fn(async () => undefined);
     const state = createAppState();
     setSession(
@@ -70,8 +106,7 @@ describe('web/test/routes/signin.test.tsx', () => {
       null,
       { reauthRequired: true },
     );
-    const root = document.createElement('div');
-    document.body.append(root);
+    const root = appRoot(signal);
     render(
       <ServicesProvider
         value={services(
@@ -83,13 +118,16 @@ describe('web/test/routes/signin.test.tsx', () => {
       </ServicesProvider>,
       root,
     );
-    await vi.waitFor(() => expect(root.querySelector('form')).not.toBeNull());
-    expect(root.textContent).toContain('Your previous session has ended');
-    expect(root.textContent).not.toContain('You are signed in as');
-    root.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-    await vi.waitFor(() => expect(reauthenticate).toHaveBeenCalled());
-    render(null, root);
-    root.remove();
+    try {
+      await settleRouteImport();
+      expect(root.querySelector('form')).not.toBeNull();
+      expect(root.textContent).toContain('Your previous session has ended');
+      expect(root.textContent).not.toContain('You are signed in as');
+      root.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      await vi.waitFor(() => expect(reauthenticate).toHaveBeenCalled());
+    } finally {
+      cleanupRoot(root);
+    }
   });
 
   it('opens the reauthentication popup synchronously before requesting the authorize URL', async () => {
@@ -120,24 +158,26 @@ describe('web/test/routes/signin.test.tsx', () => {
     expect(popup.sessionStorage.setItem).toHaveBeenCalledWith('atmusic:reauth-popup', '1');
   });
 
-  it('shows fixed recovery text for callback errors and never renders a code or token', async () => {
+  it('shows fixed recovery text for callback errors and never renders a code or token', async ({ signal }) => {
     (window as unknown as { happyDOM: { setURL(url: string): void } }).happyDOM.setURL(
       'https://music.test/signin?error=denied&code=secret-code&token=secret-token',
     );
     const state = createAppState();
-    const root = document.createElement('div');
-    document.body.append(root);
+    const root = appRoot(signal);
     render(
       <ServicesProvider value={services(async () => undefined)}>
         <App state={state} loadMetaOnMount={false} />
       </ServicesProvider>,
       root,
     );
-    await vi.waitFor(() => expect(root.textContent).toContain('Authorization was cancelled'));
-    expect(root.textContent).not.toContain('secret-code');
-    expect(root.textContent).not.toContain('secret-token');
-    expect(root.querySelector('button')?.textContent).toBe('Try again');
-    render(null, root);
-    root.remove();
+    try {
+      await settleRouteImport();
+      expect(root.textContent).toContain('Authorization was cancelled');
+      expect(root.textContent).not.toContain('secret-code');
+      expect(root.textContent).not.toContain('secret-token');
+      expect(root.querySelector('button')?.textContent).toBe('Try again');
+    } finally {
+      cleanupRoot(root);
+    }
   });
 });

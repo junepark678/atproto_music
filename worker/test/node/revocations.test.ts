@@ -112,6 +112,8 @@ CREATE TABLE linked_accounts (id TEXT PRIMARY KEY, did TEXT NOT NULL, service TE
 CREATE TABLE forward_outbox (id TEXT PRIMARY KEY,
   link_id TEXT NOT NULL REFERENCES linked_accounts (id) ON DELETE CASCADE, did TEXT NOT NULL, kind TEXT NOT NULL,
   dedupe_key TEXT NOT NULL, state TEXT NOT NULL);
+CREATE TABLE forward_love_recording_targets (forward_rowid INTEGER PRIMARY KEY, link_id TEXT NOT NULL);
+CREATE TABLE forward_unlove_lookup_progress (unlove_rowid INTEGER PRIMARY KEY, generation INTEGER NOT NULL, cursor_operation_rowid INTEGER NOT NULL);
 CREATE TABLE scrobbles (uri TEXT PRIMARY KEY, did TEXT NOT NULL);
 `;
 
@@ -490,7 +492,14 @@ describe('revocation journal', () => {
       expect(after[table], table).toEqual(before[table]);
     }
     for (const table of Object.keys(before)) {
-      const expected = table === 'scrobbles' || table === 'accounts' || table === 'lastfm_tokens' ? 0 : 1;
+      const expected =
+        table === 'scrobbles' ||
+        table === 'accounts' ||
+        table === 'lastfm_tokens' ||
+        table === 'forward_love_recording_targets' ||
+        table === 'forward_unlove_lookup_progress'
+          ? 0
+          : 1;
       expect(removed(table), table).toHaveLength(expected);
     }
 

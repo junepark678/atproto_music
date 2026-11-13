@@ -44,8 +44,13 @@ import { MAX_ATTEMPTS } from '@atmusic/core/write-policy';
 import type { OperationKind, OperationRow, OperationState, Origin } from '../app/rows';
 import type { Db } from '../do/db';
 import { bumpStatsVersion } from '../do/write/account-state';
+import { bumpLoveApiIntentEpoch } from '../forward/love-api-recipients';
+import { indexLoveOperationTarget } from '../forward/love-recording-targets';
 import { releaseForwardAdmission } from '../forward/projection';
 import { deleteQueuedForwardIdentity } from './forward-key';
+import { explicitlyUnsent, explicitlyUnsentSql, isUnsent } from './operation-certainty';
+
+export { explicitlyUnsent, explicitlyUnsentSql, isUnsent } from './operation-certainty';
 
 export { MAX_ATTEMPTS };
 
@@ -209,6 +214,19 @@ export function insertOperation(db: Db, op: NewOperation, now: number): Operatio
       op.collection,
       op.rkey,
     );
+    if (op.kind === 'love.put' && prepared !== null) {
+      const row = db.one<{ rowid: number; created_at_ms: number }>(
+        'SELECT rowid,created_at_ms FROM operations WHERE id=?',
+        op.id,
+      );
+      if (row !== null)
+        indexLoveOperationTarget(db, {
+          rowid: row.rowid,
+          did: op.did,
+          createdAtMs: row.created_at_ms,
+          recordJson: JSON.stringify(prepared.record),
+        });
+    }
     for (const pred of new Set(op.predecessors ?? [])) {
       if (pred === op.id) continue;
       db.run('INSERT OR IGNORE INTO operation_deps(op_id, pred_id) VALUES (?, ?)', op.id, pred);
@@ -355,33 +373,6 @@ export function unblockOperations(db: Db, did: string, now: number): number {
 }
 
 /**
- * Explicit certainty that no request for this row was ever started: its
- * insertion receipt (`unsent`), no attempt, no send timestamp, and no mark
- * of the unreleased two-read absence rule. Attempt counts alone prove
- * nothing: a migrated or refunded row can show 0 after a committed send.
- */
-export function explicitlyUnsent(
-  op: Pick<OperationRow, 'send_state' | 'attempts' | 'send_started_at_ms' | 'legacy_absent_at_ms'>,
-): boolean {
-  return (
-    op.send_state === 'unsent' && op.attempts === 0 && op.send_started_at_ms === null && op.legacy_absent_at_ms === null
-  );
-}
-
-/** `explicitlyUnsent` as SQL over the operations alias `o`. */
-export function explicitlyUnsentSql(o = 'o'): string {
-  if (!/^[a-z_]+$/.test(o)) throw new RangeError('invalid alias');
-  return `(${o}.send_state = 'unsent' AND ${o}.attempts = 0 AND ${o}.send_started_at_ms IS NULL AND ${o}.legacy_absent_at_ms IS NULL)`;
-}
-
-/** An unsent operation: queued or blocked and explicitly never sent. */
-export function isUnsent(
-  op: Pick<OperationRow, 'state' | 'attempts' | 'send_state' | 'send_started_at_ms' | 'legacy_absent_at_ms'>,
-): boolean {
-  return (op.state === 'queued' || op.state === 'blocked') && explicitlyUnsent(op);
-}
-
-/**
  * An import single whose send may have reached the PDS (a migrated row, or
  * one attempted before): it is read at its original rkey before any write and
  * is never rebatched or sent in an applyWrites batch; an absent key is then
@@ -407,6 +398,7 @@ export function cancelUnsent(db: Db, id: string, now: number): boolean {
     const op = loadOperation(db, id);
     if (op === null || !isUnsent(op)) return false;
     db.run(`UPDATE operations SET state = 'cancelled', updated_at_ms = ? WHERE id = ?`, now, id);
+    if (op.kind === 'love.put' && op.origin !== 'import') bumpLoveApiIntentEpoch(db, op.did);
     if (op.kind === 'scrobble.delete') bumpStatsVersion(db, op.did);
     const keys = db.all<{ dedupe_key: string }>(
       'SELECT dedupe_key FROM listen_keys WHERE did = ? AND operation_id = ?',

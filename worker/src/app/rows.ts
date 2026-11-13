@@ -351,6 +351,8 @@ export interface LoveRow {
   /** 30-character storage timestamp. */
   created_at: string;
   indexed_at: string;
+  /** Repository revision that verified this projected love (nullable for pre-50 rows). */
+  revision: string | null;
 }
 
 export interface LinkedAccountRow {
@@ -415,10 +417,15 @@ export interface ForwardOutboxRow {
   updated_at_ms: number;
   love_artist_key: string | null;
   love_track_key: string | null;
+  /** 1 after the durable love lane has indexed this queued row. */
+  love_lane: number | null;
   /** Destination generation captured when this forward was admitted. */
   generation: number;
   /** 0 live; 1 historical backfill. */
   priority: number;
+  /** Immutable authorization for a live removal unlove, when present. */
+  authorization_uri?: string | null;
+  authorization_rev?: string | null;
 }
 
 export interface ImportJobRow {

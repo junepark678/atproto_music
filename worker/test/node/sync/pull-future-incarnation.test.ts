@@ -23,7 +23,6 @@ it.each([false, true])('a newer signed incarnation releases the delete fence (GC
           prefix: h.m.config.prefix!,
           nowNs: ns,
           receiptNs: ns,
-          forwarding: { random: h.m.random },
         }),
       );
     };

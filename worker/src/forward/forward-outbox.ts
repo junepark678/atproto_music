@@ -20,10 +20,11 @@
 //
 // Order. Rows are read oldest first: `created_at_ms`, then `rowid` (the
 // insertion order, which breaks ties between rows accepted in the same
-// millisecond). For love/unlove, the oldest queued row for each normalized
-// love key is eligible; a backoff blocks later toggles of that same key, but
-// does not block another track. Thus each track's toggles reach upstream in
-// order even across retries.
+// millisecond). For love/unlove, the durable lane table schedules keys fairly,
+// while an indexed canonical head probe chooses the oldest queued row for the
+// key. A backoff blocks later toggles of that same key, but does not block a
+// different track. Thus each track's toggles reach upstream in order even
+// across retries.
 //
 // Retry (ADR §12.3): `forwardBackoffMs(n)` = 30 s·2^n + U[0, 25%] of it,
 // capped at 6 h, with n the row's attempts before this one. At most eight
@@ -52,6 +53,9 @@
 import type { Random } from '@atmusic/core/deps';
 import type { ForwardKind, ForwardOutboxRow, LinkService } from '../app/rows';
 import type { Db } from '../do/db';
+import { settleApiLoveRecipientRows } from './love-api-recipients';
+import { recordLoveDelivery, type SentLoveRow } from './love-delivery';
+import { touchLoveLane } from './love-lanes';
 
 const SECOND = 1_000;
 const MINUTE = 60 * SECOND;
@@ -193,6 +197,12 @@ export function lovePayload(row: Pick<ForwardOutboxRow, 'payload_json'>): Forwar
   return isObject(doc) ? trackOf(doc) : null;
 }
 
+/** Whether a queued love came from historical backfill (scoped consumer policy). */
+export function loveRowOrigin(row: Pick<ForwardOutboxRow, 'payload_json'>): string | null {
+  const doc = parseJson(row.payload_json);
+  return isObject(doc) && typeof doc.origin === 'string' ? doc.origin : null;
+}
+
 // ---------------------------------------------------------------------------
 // Reading rows
 
@@ -270,6 +280,44 @@ function inList(ids: readonly string[]): string {
 /** Ids per statement, under the Db facade's 100 bound parameters (do/db.ts MAX_SQL_PARAMS). */
 const IDS_PER_STATEMENT = 90;
 
+/** Exact durable rows changed by a terminal transition, for same-transaction consumers. */
+export interface SettledForwardRow {
+  id: string;
+  link_id: string;
+  generation: number;
+  did: string;
+  kind: ForwardKind;
+  dedupe_key: string;
+  state: 'sent' | 'ignored' | 'failed' | 'expired';
+  love_artist_key: string | null;
+  love_track_key: string | null;
+  created_at_ms: number;
+}
+
+/** Synchronous same-transaction consumer for exact terminal transition rows. */
+export type SettledForwardRowsHook = (rows: readonly SettledForwardRow[], now: number) => void;
+
+const SETTLED_COLUMNS = 'id,link_id,generation,did,kind,dedupe_key,state,love_artist_key,love_track_key,created_at_ms';
+
+function notifySettled(
+  db: Db,
+  onSettled: SettledForwardRowsHook | undefined,
+  rows: readonly SettledForwardRow[],
+  now: number,
+): void {
+  if (rows.length === 0) return;
+  if (onSettled !== undefined) {
+    const result: unknown = onSettled(rows, now);
+    if (
+      result !== null &&
+      (typeof result === 'object' || typeof result === 'function') &&
+      typeof (result as { then?: unknown }).then === 'function'
+    )
+      throw new TypeError('terminal settlement hook must be synchronous');
+  }
+  settleApiLoveRecipientRows(db, rows, now);
+}
+
 /** Runs `update` over `ids` in slices that fit one statement, in one transaction. */
 function inSlices(db: Db, ids: readonly string[], update: (slice: readonly string[]) => void): void {
   if (ids.length === 0) return;
@@ -287,22 +335,43 @@ export function settleRows(
   error: string | null = null,
   countAttempt = true,
   generation?: number,
+  onSettled?: SettledForwardRowsHook,
 ): void {
-  inSlices(db, ids, (slice) =>
-    db.run(
-      `UPDATE forward_outbox SET state = ?, last_error = ?, attempts = attempts + ?, updated_at_ms = ?
+  settleRowsReturning(db, ids, state, now, error, countAttempt, generation, onSettled);
+}
+
+/** Same transition as settleRows, returning exactly the generation-fenced rows changed. */
+export function settleRowsReturning(
+  db: Db,
+  ids: readonly string[],
+  state: 'sent' | 'ignored' | 'failed' | 'expired',
+  now: number,
+  error: string | null = null,
+  countAttempt = true,
+  generation?: number,
+  onSettled?: SettledForwardRowsHook,
+): SettledForwardRow[] {
+  const changed: SettledForwardRow[] = [];
+  inSlices(db, ids, (slice) => {
+    const sql = `UPDATE forward_outbox SET state = ?, last_error = ?, attempts = attempts + ?, updated_at_ms = ?
        WHERE id IN (${inList(slice)}) AND state='queued'
          AND generation=coalesce(?,generation)
          AND EXISTS (SELECT 1 FROM linked_accounts AS link
-                     WHERE link.id=forward_outbox.link_id AND link.generation=forward_outbox.generation)`,
+                     WHERE link.id=forward_outbox.link_id AND link.generation=forward_outbox.generation)`;
+    const params = [
       state,
       error === null ? null : clip(error),
       countAttempt ? 1 : 0,
       now,
       ...slice,
       generation ?? null,
-    ),
-  );
+    ];
+    const rows = db.all<SettledForwardRow>(`${sql} RETURNING ${SETTLED_COLUMNS}`, ...params);
+    changed.push(...rows);
+    if (state === 'sent') recordLoveDelivery(db, rows satisfies SentLoveRow[], now);
+    notifySettled(db, onSettled, rows, now);
+  });
+  return changed;
 }
 
 /** Queues `ids` again at `dueAt`; `countAttempt` adds one to their attempts. */
@@ -378,7 +447,8 @@ export function resumeHeldRows(db: Db, linkId: string, now: number, generation?:
     db.one<{ generation: number }>('SELECT generation FROM linked_accounts WHERE id=?', linkId)?.generation;
   if (expected === undefined) return 0;
   return db.run(
-    `UPDATE forward_outbox SET state='queued',due_at=max(due_at,?),updated_at_ms=?
+    `UPDATE forward_outbox SET state='queued',due_at=max(due_at,?),updated_at_ms=?,
+       love_lane=CASE WHEN kind IN ('love','unlove') THEN NULL ELSE love_lane END
      WHERE link_id=? AND generation=? AND state='held'
        AND EXISTS (SELECT 1 FROM linked_accounts AS link WHERE link.id=? AND link.generation=?)`,
     now,
@@ -397,35 +467,103 @@ export interface ExpiryReport {
   staleNowPlaying: number;
   /** Held rows past their retention. */
   held: number;
+  /** More expired work remains; forwarding is paused until a later bounded sweep drains it. */
+  pending?: boolean;
 }
 
-/** Expires what is too old to send (see the header). One transaction. */
-export function expireRows(db: Db, now: number): ExpiryReport {
+export const MAX_EXPIRY_TRANSITIONS_PER_RUN = 128;
+export const EXPIRY_SELECT_SQL = `SELECT rowid AS seq,generation,love_artist_key,love_track_key FROM forward_outbox INDEXED BY forward_outbox_link_expiry
+  WHERE link_id=? AND state='queued' AND kind=? AND created_at_ms<? ORDER BY created_at_ms,rowid LIMIT ?`;
+export const HELD_EXPIRY_SELECT_SQL = `SELECT rowid AS seq FROM forward_outbox INDEXED BY forward_outbox_held_expiry
+  WHERE state='held' AND updated_at_ms<? ORDER BY updated_at_ms,rowid LIMIT ?`;
+export const EXPIRY_PROBE_SQL = `SELECT rowid FROM forward_outbox INDEXED BY forward_outbox_link_expiry
+  WHERE link_id=? AND state='queued' AND kind=? AND created_at_ms<? LIMIT 1`;
+export const STALE_NOWPLAYING_PROBE_SQL = `SELECT rowid FROM forward_outbox INDEXED BY forward_outbox_link_expiry
+  WHERE link_id=? AND state='queued' AND kind='nowplaying' AND created_at_ms<? LIMIT 1`;
+export const HELD_EXPIRY_PROBE_SQL = `SELECT rowid FROM forward_outbox INDEXED BY forward_outbox_held_expiry
+  WHERE state='held' AND updated_at_ms<? LIMIT 1`;
+
+/** Expires what is too old to send with a fixed transition and probe budget. */
+export function expireRows(db: Db, now: number, onSettled?: SettledForwardRowsHook): ExpiryReport {
   return db.tx(() => {
     let aged = 0;
-    for (const service of ['lastfm', 'listenbrainz'] as const) {
-      aged += db.run(
-        `UPDATE forward_outbox SET state = 'expired', last_error = 'expired', updated_at_ms = ?
-         WHERE state = 'queued' AND created_at_ms < ?
-           AND link_id IN (SELECT id FROM linked_accounts WHERE service = ?)`,
-        now,
-        now - EXPIRY_MS[service],
-        service,
-      ).rowsWritten;
+    let staleNowPlaying = 0;
+    let held = 0;
+    let remaining = MAX_EXPIRY_TRANSITIONS_PER_RUN;
+    const links = db.all<{ id: string; service: LinkService }>('SELECT id,service FROM linked_accounts ORDER BY id');
+    const expireSelected = (
+      linkId: string,
+      kind: ForwardKind,
+      cutoff: number,
+      error: string,
+      bucket: 'aged' | 'stale',
+    ): number => {
+      if (remaining === 0) return 0;
+      const selected = db.all<{ seq: number }>(EXPIRY_SELECT_SQL, linkId, kind, cutoff, remaining);
+      const rows: SettledForwardRow[] = [];
+      for (const row of selected) {
+        rows.push(
+          ...db.all<SettledForwardRow>(
+            `UPDATE forward_outbox SET state='expired',last_error=?,updated_at_ms=? WHERE rowid=? AND state='queued'
+             RETURNING ${SETTLED_COLUMNS}`,
+            error,
+            now,
+            row.seq,
+          ),
+        );
+      }
+      for (const row of rows) {
+        if ((kind === 'love' || kind === 'unlove') && row.love_artist_key !== null && row.love_track_key !== null) {
+          touchLoveLane(db, {
+            linkId,
+            generation: row.generation,
+            artistKey: row.love_artist_key,
+            trackKey: row.love_track_key,
+            priority: 0,
+            dueAt: now,
+            createdAtMs: now,
+          });
+        }
+      }
+      notifySettled(db, onSettled, rows, now);
+      remaining -= selected.length;
+      if (bucket === 'aged') aged += rows.length;
+      else staleNowPlaying += rows.length;
+      return selected.length;
+    };
+    for (const link of links) {
+      if (remaining === 0) break;
+      expireSelected(link.id, 'nowplaying', now - NOW_PLAYING_MAX_AGE_MS, 'stale', 'stale');
     }
-    const staleNowPlaying = db.run(
-      `UPDATE forward_outbox SET state = 'expired', last_error = 'stale', updated_at_ms = ?
-       WHERE state = 'queued' AND kind = 'nowplaying' AND created_at_ms < ?`,
-      now,
-      now - NOW_PLAYING_MAX_AGE_MS,
-    ).rowsWritten;
-    const held = db.run(
-      `UPDATE forward_outbox SET state = 'expired', last_error = 'held_expired', updated_at_ms = ?
-       WHERE state = 'held' AND updated_at_ms < ?`,
-      now,
-      now - HELD_RETENTION_MS,
-    ).rowsWritten;
-    return { aged, staleNowPlaying, held };
+    for (const link of links) {
+      if (remaining === 0) break;
+      for (const kind of ['scrobble', 'nowplaying', 'love', 'unlove'] as const) {
+        expireSelected(link.id, kind, now - EXPIRY_MS[link.service], 'expired', 'aged');
+        if (remaining === 0) break;
+      }
+    }
+    if (remaining > 0) {
+      const selected = db.all<{ seq: number }>(HELD_EXPIRY_SELECT_SQL, now - HELD_RETENTION_MS, remaining);
+      const rows = selected.flatMap((row) =>
+        db.all<SettledForwardRow>(
+          `UPDATE forward_outbox SET state='expired',last_error='held_expired',updated_at_ms=?
+           WHERE rowid=? AND state='held' RETURNING ${SETTLED_COLUMNS}`,
+          now,
+          row.seq,
+        ),
+      );
+      notifySettled(db, onSettled, rows, now);
+      held = rows.length;
+      remaining -= selected.length;
+    }
+    const pending =
+      links.some((link) => {
+        if (db.one(STALE_NOWPLAYING_PROBE_SQL, link.id, now - NOW_PLAYING_MAX_AGE_MS)) return true;
+        return (['scrobble', 'nowplaying', 'love', 'unlove'] as const).some(
+          (kind) => db.one(EXPIRY_PROBE_SQL, link.id, kind, now - EXPIRY_MS[link.service]) !== null,
+        );
+      }) || db.one(HELD_EXPIRY_PROBE_SQL, now - HELD_RETENTION_MS) !== null;
+    return { aged, staleNowPlaying, held, pending };
   });
 }
 

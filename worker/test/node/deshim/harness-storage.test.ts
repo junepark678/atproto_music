@@ -13,15 +13,15 @@
 //   title in its file;
 // - worker/test/write/support.ts and worker/test/fixtures/jetstream-server.ts
 //   export the same names, with the same kinds and function arities, as at the
-//   start of wave 4 (commit e309f52, recorded below; when that commit is in the
-//   repository the record is checked against its sources too).
+//   start of wave 4 (commit e309f52); the exact historical source is checked
+//   in as an offline fixture.
 //
 // "Declared" means the first argument of a describe/it/test call is a string
 // literal with that value, found by a scanner that skips comments, strings and
 // regular expression literals. Each detector also runs against a source that
 // must fail it, so none of the checks is vacuous.
 
-import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -33,7 +33,6 @@ import * as writeSupportModule from '../../write/support';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../../..');
 const SEP = ' › ';
-/** The integration commit at which wave 4 started (feat/mvp-complete "wave 3: integrate"). */
 const WAVE_START = 'e309f52c0c8fba3cb0949edf7284d932b09edb4f';
 
 const read = (file: string) => readFileSync(join(ROOT, file), 'utf8');
@@ -475,17 +474,22 @@ function exportedNames(src: string): { values: string[]; types: string[] } {
   return { values: values.sort(), types: types.sort() };
 }
 
-function git(...args: string[]): { ok: boolean; out: string } {
-  const r = spawnSync('git', args, { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
-  return { ok: r.status === 0, out: r.stdout ?? '' };
+function historySources(): { baselineSources: Record<string, string>; waveStartSources: Record<string, string> } {
+  const text = read('scripts/test/fixtures/node-history-sources.json');
+  const manifest = JSON.parse(read('scripts/test/fixtures/node-history-sources.manifest.json')) as {
+    fixtureSha256: string;
+    waveStartCommit: string;
+  };
+  expect(createHash('sha256').update(text).digest('hex')).toBe(manifest.fixtureSha256);
+  expect(manifest.waveStartCommit).toBe(WAVE_START);
+  return JSON.parse(text) as { baselineSources: Record<string, string>; waveStartSources: Record<string, string> };
 }
 
-/** The file at the wave-start commit, or null when that commit is not in this repository (a disposable copy). */
-function atWaveStart(file: string): string | null {
-  if (!git('cat-file', '-e', `${WAVE_START}^{commit}`).ok) return null;
-  const r = git('show', `${WAVE_START}:${file}`);
-  if (!r.ok) throw new Error(`git show ${WAVE_START}:${file} failed`);
-  return r.out;
+/** Exact pinned wave-start source from the checked-in offline historical fixture. */
+function atWaveStart(file: string): string {
+  const source = historySources().waveStartSources[file];
+  if (source === undefined) throw new Error(`historical fixture is missing ${file} from ${WAVE_START}`);
+  return source;
 }
 
 // ---------------------------------------------------------------------------
@@ -656,15 +660,13 @@ describe('N4-04 de-shim: harness, storage and shared helpers', () => {
 
     // Before this package the same files did import the shim modules and use WebSocketPair.
     const before = atWaveStart('worker/test/storage/migrate.test.ts');
-    if (before !== null) {
-      expect(shimViolations('migrate.test.ts', before)).toEqual([
-        'migrate.test.ts:1 imports cloudflare:test',
-        'migrate.test.ts:2 imports cloudflare:workers',
-      ]);
-      expect(shimViolations('support.ts', atWaveStart('worker/test/write/support.ts') ?? '')).toEqual([
-        'support.ts:9 imports cloudflare:workers',
-      ]);
-    }
+    expect(shimViolations('migrate.test.ts', before)).toEqual([
+      'migrate.test.ts:1 imports cloudflare:test',
+      'migrate.test.ts:2 imports cloudflare:workers',
+    ]);
+    expect(shimViolations('support.ts', atWaveStart('worker/test/write/support.ts'))).toEqual([
+      'support.ts:9 imports cloudflare:workers',
+    ]);
   });
 
   it('every title node-port-inventory.json marks kept for worker/test/storage and worker/test/harness is still declared byte-identical in its file', () => {
@@ -723,22 +725,34 @@ describe('N4-04 de-shim: harness, storage and shared helpers', () => {
     for (const [file, module] of Object.entries(modules)) {
       const recorded = WAVE_START_EXPORTS[file];
       expect(recorded, file).toBeDefined();
-      const expectedRuntime = recorded?.runtime.filter(
-        ([name]) => !(file === 'worker/test/write/support.ts' && name === 'stubFor'),
-      );
+      const addedLiveHelpers =
+        file === 'worker/test/write/support.ts'
+          ? ([
+              ['authorizedLiveOptions', 'function', 3],
+              ['liveApplyOptions', 'function', 2],
+            ] as const)
+          : [];
+      const expectedRuntime = [
+        ...(recorded?.runtime.filter(([name]) => !(file === 'worker/test/write/support.ts' && name === 'stubFor')) ??
+          []),
+        ...addedLiveHelpers,
+      ].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
       // Runtime: the same names, kinds and Function.length as at the wave start.
       expect([file, runtimeExports(module)]).toEqual([file, expectedRuntime]);
       // Source: the same value and type declarations.
       const now = exportedNames(read(file));
-      expect([file, now.values]).toEqual([file, expectedRuntime?.map(([name]) => name).sort()]);
+      expect([file, now.values]).toEqual([file, expectedRuntime.map(([name]) => name).sort()]);
       expect([file, now.types]).toEqual([file, recorded?.types]);
-      // The record is the wave start's own source, when that commit is available.
       const before = atWaveStart(file);
-      if (before !== null) {
-        const retiredHelperRemoved =
-          file === 'worker/test/write/support.ts' ? before.replace(/^export const stubFor = .*\n/m, '') : before;
-        expect([file, exportedNames(retiredHelperRemoved)]).toEqual([file, now]);
-      }
+      const retiredHelperRemoved =
+        file === 'worker/test/write/support.ts' ? before.replace(/^export const stubFor = .*\n/m, '') : before;
+      expect([file, exportedNames(retiredHelperRemoved)]).toEqual([
+        file,
+        {
+          values: now.values.filter((name) => !addedLiveHelpers.some(([added]) => added === name)),
+          types: now.types,
+        },
+      ]);
     }
 
     // The helpers still work: the fixture serves a fake and its connector is a function of one URL.

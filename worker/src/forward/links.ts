@@ -32,6 +32,7 @@ import { type Box, linkedAad, linkedPurpose } from '../crypto/box';
 import { constantTimeEqual } from '../crypto/constant-time';
 import { bytesToHex, hashToken } from '../crypto/tokens';
 import type { Db } from '../do/db';
+import { admissionHighWater, closeOrReconstructLinkGap, openGapAfterEligibleTransition } from './coverage';
 import { resumeHeldRows } from './forward-outbox';
 
 /** How long a Last.fm link state is valid (ADR §12.1). */
@@ -238,12 +239,14 @@ export function saveLink(deps: LinkDeps, input: SaveLinkInput): SaveLinkResult {
     );
     if (existing !== null) {
       const changedRemote = existing.remote_user !== remoteUser;
+      const reactivated = existing.status !== 'active';
       const generation = existing.generation + (changedRemote ? 1 : 0);
-      const generationStartSeq = changedRemote
-        ? (db.one<{ boundary: number }>('SELECT coalesce(max(admission_seq),0) AS boundary FROM forward_admissions')
-            ?.boundary ?? 0)
-        : existing.generation_start_seq;
-      if (changedRemote) db.run('DELETE FROM link_backfill_items WHERE link_id=?', existing.id);
+      const generationStartSeq = changedRemote ? admissionHighWater(db) : existing.generation_start_seq;
+      const wasForwardEligible = existing.status === 'active' && existing.forward_scrobbles === 1;
+      const willForwardEligible = !changedRemote && existing.forward_scrobbles === 1;
+      if (changedRemote || reactivated) db.run('DELETE FROM link_backfill_items WHERE link_id=?', existing.id);
+      if (reactivated && !changedRemote && !wasForwardEligible && willForwardEligible)
+        closeOrReconstructLinkGap(db, existing, admissionHighWater(db), now);
       if (changedRemote)
         db.run(
           `UPDATE forward_outbox SET state='expired',last_error='account_changed',updated_at_ms=?
@@ -302,6 +305,13 @@ export function saveLink(deps: LinkDeps, input: SaveLinkInput): SaveLinkResult {
         now,
         existing.id,
       );
+      if (reactivated && !changedRemote)
+        db.run(
+          `UPDATE linked_accounts SET backfill_state='pending',backfill_cursor=NULL,backfill_total=0,backfill_done=0,
+             backfill_failures=0,backfill_next_attempt_ms=NULL,backfill_run_revision=backfill_run_revision+1,
+             backfill_discovery_cursor=NULL,backfill_discovery_done=0,backfill_last_error=NULL WHERE id=?`,
+          existing.id,
+        );
       if (changedRemote)
         db.run('DELETE FROM linked_pull_items WHERE link_id=? AND generation=?', existing.id, existing.generation);
       db.run(
@@ -319,6 +329,8 @@ export function saveLink(deps: LinkDeps, input: SaveLinkInput): SaveLinkResult {
         now,
         now,
       );
+      if (changedRemote)
+        db.run('DELETE FROM forward_love_lanes WHERE link_id=? AND generation=?', existing.id, existing.generation);
       db.run(
         `UPDATE linked_pull_state SET hold_reason=NULL,retry_at_ms=NULL,failures=0,listen_round_saturated=0,
           listen_round_upper_ms=NULL,listen_round_floor_ms=NULL,listen_round_page=NULL,page_cursor=NULL,
@@ -333,9 +345,7 @@ export function saveLink(deps: LinkDeps, input: SaveLinkInput): SaveLinkResult {
       return { link: getLinkById(db, existing.id) as LinkedAccountRow, created: false, resumed };
     }
     const id = newCredentialId(deps.random);
-    const generationStartSeq =
-      db.one<{ boundary: number }>('SELECT coalesce(max(admission_seq),0) AS boundary FROM forward_admissions')
-        ?.boundary ?? 0;
+    const generationStartSeq = admissionHighWater(db);
     db.run(
       `INSERT INTO linked_accounts(id, did, service, remote_user, credential_ciphertext, key_id, forward_scrobbles,
          forward_now_playing, status, last_error, generation, generation_start_seq, created_at_ms, updated_at_ms,
@@ -402,8 +412,16 @@ export function patchLink(
     const nowPlaying = patch.forwardNowPlaying ?? row.forward_now_playing === 1;
     const pullEnabled = patch.pullEnabled ?? row.pull_enabled === 1;
     const resumePull = row.pull_enabled === 0 && pullEnabled;
-    const enableScrobbles = row.forward_scrobbles === 0 && scrobbles;
+    const wasForwardEligible = row.status === 'active' && row.forward_scrobbles === 1;
+    const willForwardEligible = row.status === 'active' && scrobbles;
+    const enableScrobbles = !wasForwardEligible && willForwardEligible;
+    const disableScrobbles = wasForwardEligible && !willForwardEligible;
+    const now = deps.clock.nowMs();
     if (enableScrobbles) db.run('DELETE FROM link_backfill_items WHERE link_id=?', row.id);
+    if (disableScrobbles) {
+      openGapAfterEligibleTransition(db, row, 'disabled', now);
+    }
+    if (enableScrobbles) closeOrReconstructLinkGap(db, row, admissionHighWater(db), now);
     db.run(
       `UPDATE linked_accounts SET forward_scrobbles = ?, forward_now_playing = ?, pull_enabled = ?,
        backfill_state=CASE WHEN ? THEN 'pending' ELSE backfill_state END,
@@ -416,8 +434,6 @@ export function patchLink(
        backfill_discovery_cursor=CASE WHEN ? THEN NULL ELSE backfill_discovery_cursor END,
        backfill_discovery_done=CASE WHEN ? THEN 0 ELSE backfill_discovery_done END,
        backfill_last_error=CASE WHEN ? THEN NULL ELSE backfill_last_error END,
-       generation_start_seq=CASE WHEN ? THEN (SELECT coalesce(max(admission_seq),0) FROM forward_admissions)
-                                 ELSE generation_start_seq END,
        updated_at_ms = ? WHERE id = ?`,
       scrobbles ? 1 : 0,
       nowPlaying ? 1 : 0,
@@ -432,8 +448,7 @@ export function patchLink(
       enableScrobbles ? 1 : 0,
       enableScrobbles ? 1 : 0,
       enableScrobbles ? 1 : 0,
-      enableScrobbles ? 1 : 0,
-      deps.clock.nowMs(),
+      now,
       id,
     );
     if (resumePull)
@@ -462,6 +477,13 @@ export function deleteLink(deps: { db: Db; revocations: Revocations }, did: stri
     if (row === null) return false;
     // A journal failure throws here and rolls the transaction back: nothing is deleted.
     deps.revocations.record({ kind: 'linked_account', id: row.id, did: row.did });
+    db.run('DELETE FROM forward_love_recording_targets WHERE link_id=?', row.id);
+    db.run(
+      `DELETE FROM forward_unlove_lookup_progress WHERE unlove_rowid IN (
+        SELECT rowid FROM forward_outbox WHERE link_id=? AND kind='unlove'
+      )`,
+      row.id,
+    );
     db.run('DELETE FROM forward_outbox WHERE link_id = ?', row.id);
     db.run('DELETE FROM linked_accounts WHERE id = ?', row.id);
     return true;
@@ -483,19 +505,34 @@ export function revokeLink(
   now: number,
 ): boolean {
   const safeError = /^[a-z0-9_]{1,64}$/.test(error) ? error : 'credential_revoked';
-  return (
-    db.run(
-      `UPDATE linked_accounts SET status='revoked',last_error=?,last_failure_ms=?,
-         consecutive_failures=consecutive_failures+1,updated_at_ms=?
-       WHERE id = ? AND generation = ? AND status = 'active' AND credential_ciphertext = ?`,
-      safeError,
-      now,
-      now,
+  return db.tx(() => {
+    const current = db.one<{ status: string; forward_scrobbles: number; generation_start_seq: number }>(
+      'SELECT status,forward_scrobbles,generation_start_seq FROM linked_accounts WHERE id=? AND generation=?',
       link.id,
       link.generation,
-      toBlob(blobBytes(link.credential_ciphertext)),
-    ).rowsWritten === 1
-  );
+    );
+    const wasForwardEligible = current?.status === 'active' && current.forward_scrobbles === 1;
+    const revoked =
+      db.run(
+        `UPDATE linked_accounts SET status='revoked',last_error=?,last_failure_ms=?,
+         consecutive_failures=consecutive_failures+1,updated_at_ms=?
+       WHERE id = ? AND generation = ? AND status = 'active' AND credential_ciphertext = ?`,
+        safeError,
+        now,
+        now,
+        link.id,
+        link.generation,
+        toBlob(blobBytes(link.credential_ciphertext)),
+      ).rowsWritten === 1;
+    if (revoked && wasForwardEligible && current !== null)
+      openGapAfterEligibleTransition(
+        db,
+        { ...link, generation_start_seq: current.generation_start_seq },
+        'revoked',
+        now,
+      );
+    return revoked;
+  });
 }
 
 /** Records a generation-scoped failure; transient errors surface after three consecutive failures. */

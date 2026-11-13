@@ -99,11 +99,12 @@ import { deleteHint, nextHintDue } from '../do/ingest/hints';
 import { cachedIdentityResolver, pruneIdentityCache } from '../do/ingest/identity-cache';
 import { type IngestDeps, jetstreamWatchdog } from '../do/ingest/ingest-mode';
 import type { ConnectJetstream } from '../do/ingest/jetstream-socket';
+import { nextPendingRemovalDue } from '../do/ingest/live-pending-removals';
 import { notify, recordStatus } from '../do/ingest/notify';
 import { clearExpiredHostPauses } from '../do/ingest/pds-budget';
 import { maybeClearGap, SNAPSHOT_MIN_INTERVAL_MS, scheduleGapRecovery, snapshotStep } from '../do/ingest/snapshot-job';
 import { identitySweep, statusSweep } from '../do/ingest/sweeps';
-import { DRAIN_MIN_INTERVAL_MS, drain } from '../do/ingest/verify-drain';
+import { DRAIN_MIN_INTERVAL_MS, discoverOrphanRecovery, drain, orphanRecoveryPending } from '../do/ingest/verify-drain';
 import type { MigrateResult } from '../do/migrate';
 import { exportUser } from '../do/read/export';
 import { feed } from '../do/read/feed';
@@ -412,6 +413,7 @@ export class IndexCore implements IndexRpc, AdminRpc {
     noteRestart(db, now);
     reclaimSnapshotLeases(db, now, { all: true });
     reclaimStatusLeases(db, now, { all: true });
+    discoverOrphanRecovery(db, now);
     this.ensureTimers(now, { startup: true });
     armAlarm(this.host.alarm, db, CORE_LANE);
     for (const extension of this.extensions) extension.start?.(this.extensionTimers, now);
@@ -461,8 +463,15 @@ export class IndexCore implements IndexRpc, AdminRpc {
     const { db } = this.deps;
     db.tx(() => {
       const hint = nextHintDue(db);
-      if (hint !== null) {
-        const target = this.lastDrainMs === null ? hint : Math.max(hint, this.lastDrainMs + DRAIN_MIN_INTERVAL_MS);
+      const pending = nextPendingRemovalDue(db, now);
+      const orphanRecovery = orphanRecoveryPending(db) ? now : null;
+      const nextWork = [hint, pending, orphanRecovery].reduce<number | null>(
+        (earliest, due) => (due === null ? earliest : earliest === null ? due : Math.min(earliest, due)),
+        null,
+      );
+      if (nextWork !== null) {
+        const target =
+          this.lastDrainMs === null ? nextWork : Math.max(nextWork, this.lastDrainMs + DRAIN_MIN_INTERVAL_MS);
         if (dueAt(db, 'drain') !== target) schedule(db, 'drain', target, { force: true });
       }
       const job =

@@ -1,17 +1,25 @@
 import { verifyRecordProof } from '@atmusic/atproto/verify/record-proof';
 import { listenKey } from '@atmusic/core/listen-key';
 import { trackKey } from '@atmusic/core/music-key';
-import { seededRandom } from '@atmusic/core/test-support/random';
 import { fromMs, NS_PER_SECOND } from '@atmusic/core/timestamp';
 import { describe, expect, it } from 'vitest';
 import type { LinkedAccountRow } from '../../../src/app/rows';
+import type { SqlParam } from '../../../src/do/db';
 import { applyRecordProof } from '../../../src/do/write/apply-record';
 import { linkDto } from '../../../src/forward/links';
 import { cleanupForwardAdmissionsForSuppression, retainedForwardProvenance } from '../../../src/forward/projection';
+import { removeScrobble } from '../../../src/lastfm/write-methods';
 import { removeScrobbleCreate } from '../../../src/outbox/delete-ops';
+import { FORWARD_RECEIPT_LOOKUP_SQL } from '../../../src/outbox/forward-receipts';
 import { seedLegacyListenSecondSlice } from '../../../src/outbox/listen-second-receipts';
 import { enqueueLove, enqueueUnlove } from '../../../src/outbox/love-ops';
-import { insertOperation, newOperationId, outboxCollections, prepare } from '../../../src/outbox/operations';
+import {
+  beginAttempts,
+  insertOperation,
+  newOperationId,
+  outboxCollections,
+  prepare,
+} from '../../../src/outbox/operations';
 import { insertPullLoveAdmission } from '../../../src/sync/pull-love-admissions';
 import { stageLovePage, stagePullPage } from '../../../src/sync/pull-staging';
 import { writePullSlice } from '../../../src/sync/pull-writer';
@@ -168,9 +176,21 @@ describe('linked pull staged writer', () => {
           ],
         });
         expect(echo).toEqual(['duplicate', 'duplicate']);
-        expect(
-          await writePullSlice(h.m, { linkId, generation: 1, available: async () => ({ available: true }) }),
-        ).toMatchObject({ accepted: 0 });
+        const originalOne = h.db.one.bind(h.db);
+        let receiptLookups = 0;
+        h.db.one = <T>(sql: string, ...params: SqlParam[]): T | null => {
+          if (sql === FORWARD_RECEIPT_LOOKUP_SQL) receiptLookups++;
+          return originalOne<T>(sql, ...params);
+        };
+        try {
+          expect(
+            await writePullSlice(h.m, { linkId, generation: 1, available: async () => ({ available: true }) }),
+          ).toMatchObject({ accepted: 0 });
+          // Source staging rejects the duplicate page before the writer consults receipts.
+          expect(receiptLookups).toBe(0);
+        } finally {
+          h.db.one = originalOne;
+        }
 
         const remoteLove = (await remoteRecords(h.kit, 'Alice', LOVE))[0]!;
         const proof = await verifyRecordProof(await h.kit.repos.Alice.getRecordCar(LOVE, remoteLove.rkey), {
@@ -185,7 +205,6 @@ describe('linked pull staged writer', () => {
             prefix: h.m.config.prefix!,
             nowNs,
             receiptNs: nowNs,
-            forwarding: { random: seededRandom(0x61) },
           }),
         );
         expect(
@@ -202,6 +221,62 @@ describe('linked pull staged writer', () => {
         expect(h.db.all("SELECT link_id FROM forward_outbox WHERE did=? AND kind='love'", did)).toEqual([
           { link_id: targetLink },
         ]);
+
+        const retiredReplay = h.db.one<{ link_id: string; dedupe_key: string }>(
+          "SELECT link_id,dedupe_key FROM forward_outbox WHERE did=? AND kind='love' AND link_id=?",
+          did,
+          targetLink,
+        );
+        expect(retiredReplay).not.toBeNull();
+        h.db.run(
+          'UPDATE forward_receipts SET retired_at_ms=? WHERE link_id=? AND dedupe_key=?',
+          h.kit.clock.nowMs(),
+          retiredReplay!.link_id,
+          retiredReplay!.dedupe_key,
+        );
+        h.db.run(
+          'DELETE FROM forward_outbox WHERE link_id=? AND dedupe_key=?',
+          retiredReplay!.link_id,
+          retiredReplay!.dedupe_key,
+        );
+        expect(
+          stageLovePage(h.db, {
+            linkId,
+            generation: 1,
+            sourceService: 'listenbrainz',
+            sourceAccount: 'remote',
+            did,
+            proposedCursor: null,
+            proposedBoundaryMs: 100,
+            proposedBoundaryKey: null,
+            nowMs: 7,
+            items: [
+              {
+                itemKey: 'normalized-key-echo',
+                artist: ' artist ',
+                track: 'ORIGINAL TITLE ',
+                payload: { artist: ' artist ', track: 'ORIGINAL TITLE ' },
+              },
+            ],
+          }),
+        ).toEqual(['duplicate']);
+        expect(
+          await writePullSlice(h.m, { linkId, generation: 1, available: async () => ({ available: true }) }),
+        ).toMatchObject({ accepted: 0 });
+        expect(
+          h.db.one(
+            'SELECT 1 FROM forward_outbox WHERE link_id=? AND dedupe_key=?',
+            retiredReplay!.link_id,
+            retiredReplay!.dedupe_key,
+          ),
+        ).toBeNull();
+        expect(
+          h.db.one(
+            'SELECT retired_at_ms FROM forward_receipts WHERE link_id=? AND dedupe_key=?',
+            retiredReplay!.link_id,
+            retiredReplay!.dedupe_key,
+          ),
+        ).toEqual({ retired_at_ms: h.kit.clock.nowMs() });
       });
     },
   );
@@ -240,7 +315,6 @@ describe('linked pull staged writer', () => {
               prefix: h.m.config.prefix!,
               nowNs,
               receiptNs: nowNs,
-              forwarding: { random: seededRandom(0x71) },
             }),
           );
         };
@@ -349,7 +423,6 @@ describe('linked pull staged writer', () => {
               prefix: h.m.config.prefix!,
               nowNs: oldNow,
               receiptNs: oldNow,
-              forwarding: { random: seededRandom(0x72) },
             }),
           ).outcome,
         ).toBe('noop_older');
@@ -376,7 +449,6 @@ describe('linked pull staged writer', () => {
               prefix: h.m.config.prefix!,
               nowNs: freshNow,
               receiptNs: freshNow,
-              forwarding: { random: seededRandom(0x73) },
             }),
           ).outcome,
         ).toBe('applied');
@@ -391,13 +463,13 @@ describe('linked pull staged writer', () => {
             'SELECT path,incarnation_key FROM love_incarnations WHERE uri=?',
             oldUri,
           ),
-        ).toEqual({ path: 'live', incarnation_key: `love:${oldUri}:${newProof.commit.rev}` });
+        ).toEqual({ path: 'snapshot', incarnation_key: `love:${oldUri}:${newProof.commit.rev}` });
         const forwardedAfterReplacement = h.db.one<{ n: number }>(
           "SELECT count(*) AS n FROM forward_outbox WHERE did=? AND link_id=? AND kind='love'",
           did,
           targetLink,
         )?.n;
-        expect(forwardedAfterReplacement).toBe(2);
+        expect(forwardedAfterReplacement).toBe(1);
 
         h.restart();
         const relove = await enqueueLove(h.m, { did, input: { artist: 'artist', track: 'TRACK' }, origin: 'web' });
@@ -412,7 +484,7 @@ describe('linked pull staged writer', () => {
             did,
             targetLink,
           )?.n,
-        ).toBe(3);
+        ).toBe(2);
       });
     },
   );
@@ -970,6 +1042,170 @@ describe('linked pull staged writer', () => {
       )!;
       expect(operation.collection).toBe(`${h.m.config.prefix}.scrobbleBatch`);
       expect(JSON.parse(operation.record_json)).toMatchObject({ listens: [{ artist: 'Artist', track: 'Track' }] });
+    });
+  });
+
+  it('removes a pulled batch member by its validated payload identity before projection', async () => {
+    await withHarness(async (h) => {
+      const { did, linkId } = await setup(h);
+      h.m.config.batchPublication = true;
+      stagePullPage(h.db, {
+        linkId,
+        generation: 1,
+        sourceService: 'listenbrainz',
+        sourceAccount: 'remote',
+        did,
+        proposedCursor: null,
+        proposedWatermarkMs: 102000,
+        nowMs: 2,
+        items: [
+          {
+            itemKey: 'target',
+            listenedAtMs: 100000,
+            payload: { artist: 'Artist', track: 'Target', listenedAt: '1970-01-01T00:01:40Z' },
+          },
+          {
+            itemKey: 'sibling',
+            listenedAtMs: 102000,
+            payload: { artist: 'Artist', track: 'Sibling', listenedAt: '1970-01-01T00:01:42Z' },
+          },
+        ],
+      });
+      expect(
+        await writePullSlice(h.m, { linkId, generation: 1, available: async () => ({ available: true }) }),
+      ).toMatchObject({ accepted: 2 });
+      const operation = h.db.one<{ id: string; record_json: string; collection: string }>(
+        "SELECT id,record_json,collection FROM operations WHERE did=? AND kind='scrobble.create'",
+        did,
+      )!;
+      expect(operation.collection).toBe(`${h.m.config.prefix}.scrobbleBatch`);
+      expect(h.db.one('SELECT count(*) AS n FROM batch_entry_items WHERE operation_id=?', operation.id)).toEqual({
+        n: 0,
+      });
+      expect(h.db.one('SELECT count(*) AS n FROM import_items WHERE operation_id=?', operation.id)).toEqual({ n: 0 });
+      expect(
+        await removeScrobble(h.m, { did: 'did:plc:someoneelse', artist: 'Artist', track: 'Target', timestamp: 100 }),
+      ).toEqual([]);
+      expect(h.db.one('SELECT state FROM operations WHERE id=?', operation.id)).toEqual({ state: 'queued' });
+
+      const result = await removeScrobble(h.m, { did, artist: 'Artist', track: 'Target', timestamp: 100 });
+      expect(result).toEqual([{ kind: 'rewritten', operationId: operation.id }]);
+      const rewritten = JSON.parse(
+        h.db.one<{ record_json: string }>('SELECT record_json FROM operations WHERE id=?', operation.id)!.record_json,
+      );
+      expect(rewritten.listens.map((member: { track: string }) => member.track)).toEqual(['Sibling']);
+      expect(h.db.one('SELECT count(*) AS n FROM listen_keys WHERE did=?', did)).toEqual({ n: 1 });
+      expect(await removeScrobble(h.m, { did, artist: 'Artist', track: 'Target', timestamp: 100 })).toEqual([]);
+    });
+  });
+
+  it('chains a pulled batch removal after an unknown send without rewriting its payload and dedupes repeats', async () => {
+    await withHarness(async (h) => {
+      const { did, linkId } = await setup(h);
+      h.m.config.batchPublication = true;
+      stagePullPage(h.db, {
+        linkId,
+        generation: 1,
+        sourceService: 'listenbrainz',
+        sourceAccount: 'remote',
+        did,
+        proposedCursor: null,
+        proposedWatermarkMs: 100000,
+        nowMs: 2,
+        items: [
+          {
+            itemKey: 'only',
+            listenedAtMs: 100000,
+            payload: { artist: 'Artist', track: 'Only', listenedAt: '1970-01-01T00:01:40Z' },
+          },
+        ],
+      });
+      await writePullSlice(h.m, { linkId, generation: 1, available: async () => ({ available: true }) });
+      const operation = h.db.one<{ id: string; record_json: string }>(
+        "SELECT id,record_json FROM operations WHERE did=? AND kind='scrobble.create'",
+        did,
+      )!;
+      beginAttempts(h.db, [operation.id], h.kit.clock.nowMs());
+      expect(await removeScrobble(h.m, { did, artist: 'Artist', track: 'Only', timestamp: 100 })).toMatchObject([
+        { kind: 'delete_chained', operationId: operation.id },
+      ]);
+      expect(h.db.one('SELECT record_json FROM operations WHERE id=?', operation.id)).toEqual({
+        record_json: operation.record_json,
+      });
+      const deletes = h.db.all<{ id: string }>("SELECT id FROM operations WHERE did=? AND kind='scrobble.delete'", did);
+      expect(deletes).toHaveLength(1);
+      expect(await removeScrobble(h.m, { did, artist: 'Artist', track: 'Only', timestamp: 100 })).toMatchObject([
+        { kind: 'delete_pending', deleteId: deletes[0]!.id },
+      ]);
+      expect(h.db.all("SELECT id FROM operations WHERE did=? AND kind='scrobble.delete'", did)).toHaveLength(1);
+    });
+  });
+
+  it('cancels the queued pulled batch operation when its only member is removed', async () => {
+    await withHarness(async (h) => {
+      const { did, linkId } = await setup(h);
+      h.m.config.batchPublication = true;
+      stagePullPage(h.db, {
+        linkId,
+        generation: 1,
+        sourceService: 'listenbrainz',
+        sourceAccount: 'remote',
+        did,
+        proposedCursor: null,
+        proposedWatermarkMs: 100000,
+        nowMs: 2,
+        items: [
+          {
+            itemKey: 'only',
+            listenedAtMs: 100000,
+            payload: { artist: 'Artist', track: 'Only', listenedAt: '1970-01-01T00:01:40Z' },
+          },
+        ],
+      });
+      await writePullSlice(h.m, { linkId, generation: 1, available: async () => ({ available: true }) });
+      const operation = h.db.one<{ id: string }>(
+        "SELECT id FROM operations WHERE did=? AND kind='scrobble.create'",
+        did,
+      )!;
+      expect(await removeScrobble(h.m, { did, artist: 'Artist', track: 'Only', timestamp: 100 })).toEqual([
+        { kind: 'cancelled', operationId: operation.id },
+      ]);
+      expect(h.db.one('SELECT state FROM operations WHERE id=?', operation.id)).toEqual({ state: 'cancelled' });
+      expect(h.db.one('SELECT count(*) AS n FROM listen_keys WHERE operation_id=?', operation.id)).toEqual({ n: 0 });
+      expect(h.db.one('SELECT count(*) AS n FROM forward_outbox WHERE did=?', did)).toEqual({ n: 0 });
+    });
+  });
+
+  it('does not remove a pulled member when the persisted batch payload is malformed', async () => {
+    await withHarness(async (h) => {
+      const { did, linkId } = await setup(h);
+      h.m.config.batchPublication = true;
+      stagePullPage(h.db, {
+        linkId,
+        generation: 1,
+        sourceService: 'listenbrainz',
+        sourceAccount: 'remote',
+        did,
+        proposedCursor: null,
+        proposedWatermarkMs: 100000,
+        nowMs: 2,
+        items: [
+          {
+            itemKey: 'only',
+            listenedAtMs: 100000,
+            payload: { artist: 'Artist', track: 'Only', listenedAt: '1970-01-01T00:01:40Z' },
+          },
+        ],
+      });
+      await writePullSlice(h.m, { linkId, generation: 1, available: async () => ({ available: true }) });
+      const operation = h.db.one<{ id: string }>(
+        "SELECT id FROM operations WHERE did=? AND kind='scrobble.create'",
+        did,
+      )!;
+      h.db.run("UPDATE operations SET record_json='{' WHERE id=?", operation.id);
+      expect(await removeScrobble(h.m, { did, artist: 'Artist', track: 'Only', timestamp: 100 })).toEqual([]);
+      expect(h.db.one('SELECT state FROM operations WHERE id=?', operation.id)).toEqual({ state: 'queued' });
+      expect(h.db.all("SELECT id FROM operations WHERE did=? AND kind='scrobble.delete'", did)).toHaveLength(0);
     });
   });
 

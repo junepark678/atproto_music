@@ -31,6 +31,57 @@ function trace(db: Db, queries: string[], limits: SqlParam[]): Db {
 }
 
 describe('forward storage statistics refresh', () => {
+  it('includes durable live evidence, candidates, and pending removals in bounded marker statistics', async () => {
+    await withMigratedDb((db) => {
+      const uri = `at://${DID}/com.example.atmusic.scrobble/r1`;
+      db.run(
+        `INSERT INTO live_record_evidence(uri,did,collection,rkey,up_rev,up_action,up_cid,del_rev,conflict_rev,received_ms,expires_at_ms)
+         VALUES(?,?,?,?,?,'create',?,NULL,NULL,?,?)`,
+        uri,
+        DID,
+        'com.example.atmusic.scrobble',
+        'r1',
+        '2222222222222',
+        'bafycid',
+        1,
+        9999999999999,
+      );
+      db.run(
+        `INSERT INTO live_pending_removals
+         (uri,member_uri,removed_cid,kind,window_lo,window_hi,replaced_by_cid,identity_key,listened_at,
+          artist_key,track_key,artist,track,recording_mbid,authorized_rev,created_at_ms,expires_at_ms)
+         VALUES(?,?,?,'scrobble','','3333333333333','',?,1,'artist-key','track-key','Artist','Track',NULL,NULL,1,?)`,
+        uri,
+        uri,
+        'bafycid',
+        'listen-key',
+        9999999999999,
+      );
+      db.run(
+        `INSERT INTO live_acceptance_candidates(uri,identity_key,kind,member_uri,cid,created_at_ms,expires_at_ms)
+         VALUES(?,?,'scrobble',?,?,1,?)`,
+        uri,
+        'listen-key',
+        uri,
+        'bafycid',
+        9999999999999,
+      );
+      let complete = false;
+      for (let i = 0; i < 20 && !complete; i++) complete = refreshForwardStorageStats(db, 10);
+      expect(complete).toBe(true);
+      expect(readForwardStorageStats(db)).toMatchObject({
+        markers: { rows: 3 },
+        tables: {
+          live_record_evidence: { rows: 1 },
+          live_acceptance_candidates: { rows: 1 },
+          live_pending_removals: { rows: 1 },
+          live_pending_removal_events: { rows: 0 },
+          live_pending_removal_reconcile: { rows: 0 },
+        },
+      });
+    });
+  });
+
   it('keyset scans bounded pages, resumes after restart, and publishes only a complete cycle', async () => {
     await withMigratedDb((initial, context) => {
       const clock = fixedClock();
@@ -110,6 +161,53 @@ describe('forward storage statistics refresh', () => {
         rows_seen: FORWARD_STORAGE_STATS_SLICE_SIZE,
       });
       expect(context.current).toBe(db);
+    });
+  });
+
+  it('pages receipt and gap primary keys without coercing integer cursor components', async () => {
+    await withMigratedDb((db) => {
+      db.run(
+        `INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,created_at_ms,updated_at_ms)
+         VALUES('stats-link',?,'lastfm','remote',X'00','key',1,1)`,
+        DID,
+      );
+      for (let i = 0; i < 101; i++) {
+        const generation = i < 60 ? 1 : 2;
+        db.run(
+          'INSERT INTO forward_receipts(link_id,generation,kind,dedupe_key,created_at_ms) VALUES(?,?,?,?,?)',
+          'stats-link',
+          generation,
+          'scrobble',
+          `receipt-${String(i).padStart(3, '0')}`,
+          i,
+        );
+        db.run(
+          `INSERT INTO forward_link_gaps(link_id,generation,from_seq,to_seq,reason,opened_at_ms,closed_at_ms)
+           VALUES('stats-link',1,?,?, 'disabled',?,?)`,
+          i,
+          i + 1,
+          i,
+          i,
+        );
+      }
+      expect(refreshForwardStorageStats(db, 10)).toBe(false);
+      const cursorJson = db.one<{ cursor_json: string }>(
+        'SELECT cursor_json FROM forward_storage_scan WHERE table_key=?',
+        'forward_receipts',
+      )?.cursor_json;
+      expect(cursorJson).toBeTypeOf('string');
+      const cursor = JSON.parse(cursorJson!) as Array<string | number>;
+      expect(cursor).toHaveLength(4);
+      expect(cursor[1]).toBe(2);
+      expect(typeof cursor[1]).toBe('number');
+
+      let complete = false;
+      for (let i = 0; i < 30 && !complete; i++) complete = refreshForwardStorageStats(db, 10);
+      expect(complete).toBe(true);
+      expect(readForwardStorageStats(db).tables).toMatchObject({
+        forward_receipts: { rows: 101 },
+        forward_link_gaps: { rows: 101 },
+      });
     });
   });
 });

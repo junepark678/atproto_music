@@ -34,6 +34,12 @@ import type { ValidationFailure } from '@atmusic/core/scrobble';
 import { validateDisplayString } from '@atmusic/core/scrobble';
 import type { OperationRow, Origin } from '../app/rows';
 import type { ModuleDeps } from '../do/contracts';
+import {
+  bindApiLoveCreatedOperation,
+  bindApiLoveOperation,
+  bumpLoveApiIntentEpoch,
+  currentApiLoveRecipientMembers,
+} from '../forward/love-api-recipients';
 import { admitForwardIdentity } from '../forward/projection';
 import { bindPullLoveAdmission, retirePullLoveAdmissions } from '../sync/pull-love-admissions';
 import { tombstoneLove } from '../sync/tombstones';
@@ -132,6 +138,7 @@ export async function enqueueLove(m: ModuleDeps, args: EnqueueLoveArgs): Promise
         now,
         typeof record.recordingMbid === 'string' ? record.recordingMbid : null,
       );
+    if (args.origin !== 'import') bumpLoveApiIntentEpoch(m.db, args.did);
     admitForwardIdentity(m.db, {
       did: args.did,
       identityKey: `love-uri:${args.did}:${outboxCollections(prefix).love}:${op.rkey}`,
@@ -252,6 +259,7 @@ export async function enqueueUnlove(
         now,
         knownRecordingMbid,
       );
+    if (args.origin !== 'import') bumpLoveApiIntentEpoch(m.db, args.did);
     if (args.origin !== 'import') {
       enqueueForwards(m.db, {
         did: args.did,
@@ -402,12 +410,12 @@ export const lovePutExecutor: Executor = {
     if (!hasIdentity(op, ctx, ctx.collections.love) || op.digest === null || key === null) {
       return { kind: 'permanent', code: 'invalid_record_identity' };
     }
-    const existing = existingLove(op, ctx, key);
-    if (existing !== null) {
+    const existing = ctx.m.db.tx(() => {
+      const existing = existingLove(op, ctx, key);
+      if (existing === null) return null;
       // One love per key: an existing love is this love; nothing is written. It
       // is hinted like a written one (hinting an indexed record is harmless),
       // so an unknown DID is admitted too.
-      remember(ctx, op.did, key, { kind: 'love.put', uri: existing.uri, cid: existing.cid });
       const currentIncarnation = ctx.m.db.one<{ incarnation_key: string }>(
         "SELECT incarnation_key FROM love_incarnations WHERE uri=? AND state='present'",
         existing.uri,
@@ -463,11 +471,28 @@ export const lovePutExecutor: Executor = {
           nowMs: ctx.m.clock.nowMs(),
         });
       }
+      if (accepted?.path === 'api' && currentIncarnation !== null) {
+        const bindingArgs = {
+          did: op.did,
+          uri: existing.uri,
+          incarnationKey: currentIncarnation.incarnation_key,
+          operationId: op.id,
+          admissionIdentityKey: `love-uri:${op.did}:${op.collection}:${op.rkey}`,
+          nowMs: ctx.m.clock.nowMs(),
+        };
+        const recipientMembers = currentApiLoveRecipientMembers(ctx.m.db, bindingArgs);
+        if (recipientMembers.length > 0 && !bindApiLoveOperation(ctx.m.db, bindingArgs, recipientMembers))
+          throw new Error('API love recipient binding refused');
+      }
       ctx.m.db.run(
         'DELETE FROM forward_admissions WHERE did=? AND identity_key=?',
         op.did,
         `love-uri:${op.did}:${op.collection}:${op.rkey}`,
       );
+      return existing;
+    });
+    if (existing !== null) {
+      remember(ctx, op.did, key, { kind: 'love.put', uri: existing.uri, cid: existing.cid });
       return {
         kind: 'succeeded',
         uri: existing.uri,
@@ -476,9 +501,20 @@ export const lovePutExecutor: Executor = {
       };
     }
     const outcome = await createWithReconcile(op, ctx, (remote) => sameDigest(op, remote));
-    if (outcome.kind === 'succeeded') {
+    if (outcome.kind === 'succeeded' && outcome.uri !== undefined && outcome.uri !== null) {
+      if (op.origin !== 'import')
+        ctx.m.db.tx(() =>
+          bindApiLoveCreatedOperation(ctx.m.db, {
+            did: op.did,
+            uri: outcome.uri!,
+            collection: op.collection,
+            operationId: op.id,
+            admissionIdentityKey: `love-uri:${op.did}:${op.collection}:${op.rkey}`,
+            nowMs: ctx.m.clock.nowMs(),
+          }),
+        );
       remember(ctx, op.did, key, { kind: 'love.put', uri: outcome.uri ?? null, cid: outcome.cid ?? null });
-      if (outcome.uri !== undefined && outcome.uri !== null)
+      if (op.origin === 'import')
         bindPullLoveAdmission(ctx.m.db, {
           did: op.did,
           operationId: op.id,
@@ -492,14 +528,27 @@ export const lovePutExecutor: Executor = {
   async reconcile(op, ctx) {
     if (!hasIdentity(op, ctx, ctx.collections.love)) return { kind: 'permanent', code: 'invalid_record_identity' };
     const outcome = await lookupCreate(op, ctx, (remote) => sameDigest(op, remote), 'attempts_exhausted');
-    if (outcome.kind === 'succeeded' && outcome.uri !== undefined && outcome.uri !== null)
-      bindPullLoveAdmission(ctx.m.db, {
-        did: op.did,
-        operationId: op.id,
-        uri: outcome.uri,
-        incarnationKey: `love:${outcome.uri}:import:${op.id}`,
-        nowMs: ctx.m.clock.nowMs(),
-      });
+    if (outcome.kind === 'succeeded' && outcome.uri !== undefined && outcome.uri !== null) {
+      if (op.origin !== 'import')
+        ctx.m.db.tx(() =>
+          bindApiLoveCreatedOperation(ctx.m.db, {
+            did: op.did,
+            uri: outcome.uri!,
+            collection: op.collection,
+            operationId: op.id,
+            admissionIdentityKey: `love-uri:${op.did}:${op.collection}:${op.rkey}`,
+            nowMs: ctx.m.clock.nowMs(),
+          }),
+        );
+      else
+        bindPullLoveAdmission(ctx.m.db, {
+          did: op.did,
+          operationId: op.id,
+          uri: outcome.uri,
+          incarnationKey: `love:${outcome.uri}:import:${op.id}`,
+          nowMs: ctx.m.clock.nowMs(),
+        });
+    }
     return outcome;
   },
 };

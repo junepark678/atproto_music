@@ -10,6 +10,62 @@ export const FORWARD_STORAGE_STATS_SLICE_SIZE = 100;
 const COUNTER_NAME = 'forward_storage';
 const TABLES = [
   {
+    key: 'live_record_evidence',
+    primaryKey: ['uri'],
+    columns: ['uri', 'did', 'collection', 'rkey', 'up_rev', 'up_action', 'up_cid', 'del_rev', 'conflict_rev'],
+    marker: true,
+  },
+  {
+    key: 'live_acceptance_candidates',
+    primaryKey: ['uri', 'identity_key'],
+    columns: ['uri', 'identity_key', 'kind', 'member_uri', 'cid'],
+    marker: true,
+  },
+  {
+    key: 'live_pending_removals',
+    primaryKey: ['uri', 'member_uri', 'removed_cid', 'window_lo', 'window_hi', 'replaced_by_cid'],
+    columns: [
+      'uri',
+      'member_uri',
+      'removed_cid',
+      'kind',
+      'window_lo',
+      'window_hi',
+      'replaced_by_cid',
+      'identity_key',
+      'authorized_rev',
+      'conflict_invalidated',
+      'conflicted_auth_rev',
+    ],
+    marker: true,
+  },
+  {
+    key: 'live_pending_removal_events',
+    primaryKey: ['uri', 'rev'],
+    columns: [
+      'uri',
+      'rev',
+      'action',
+      'cid',
+      'conflicted',
+      'cursor_window_hi',
+      'cursor_window_lo',
+      'cursor_replaced_by_cid',
+      'cursor_kind',
+      'cursor_member_uri',
+      'cursor_removed_cid',
+      'scan_complete',
+      'cleanup_due_ms',
+    ],
+    marker: true,
+  },
+  {
+    key: 'live_pending_removal_reconcile',
+    primaryKey: ['uri', 'window_lo', 'window_hi', 'replaced_by_cid'],
+    columns: ['uri', 'window_lo', 'window_hi', 'replaced_by_cid', 'cursor_rev', 'next_due_ms'],
+    marker: true,
+  },
+  {
     key: 'forward_admissions',
     primaryKey: ['did', 'identity_key'],
     columns: ['did', 'identity_key', 'path', 'source_service'],
@@ -37,6 +93,80 @@ const TABLES = [
     key: 'forward_outbox',
     primaryKey: ['id'],
     columns: ['id', 'link_id', 'did', 'kind', 'dedupe_key', 'payload_json', 'state', 'last_error'],
+    marker: false,
+  },
+  {
+    key: 'forward_receipts',
+    primaryKey: ['link_id', 'generation', 'kind', 'dedupe_key'],
+    columns: ['link_id', 'kind', 'dedupe_key'],
+    marker: false,
+  },
+  {
+    key: 'forward_link_gaps',
+    primaryKey: ['link_id', 'generation', 'from_seq'],
+    columns: ['link_id', 'reason'],
+    marker: false,
+  },
+  {
+    key: 'forward_love_delivery',
+    primaryKey: ['link_id', 'generation', 'love_artist_key', 'love_track_key'],
+    columns: ['link_id', 'love_artist_key', 'love_track_key', 'last_sent_kind', 'last_sent_dedupe_key'],
+    marker: false,
+  },
+  {
+    key: 'forward_deferred_love_heads',
+    primaryKey: ['link_id', 'generation', 'love_artist_key', 'love_track_key'],
+    columns: ['link_id', 'love_artist_key', 'love_track_key'],
+    marker: false,
+  },
+  {
+    key: 'forward_deferred_love_intents',
+    primaryKey: ['link_id', 'generation', 'love_artist_key', 'love_track_key', 'intent_seq'],
+    columns: [
+      'link_id',
+      'love_artist_key',
+      'love_track_key',
+      'kind',
+      'operation_id',
+      'origin_class',
+      'payload_json',
+      'authorization_uri',
+      'authorization_rev',
+    ],
+    marker: false,
+  },
+  {
+    key: 'forward_deferred_love_witnesses',
+    primaryKey: ['link_id', 'generation', 'operation_id'],
+    columns: [
+      'link_id',
+      'operation_id',
+      'kind',
+      'love_artist_key',
+      'love_track_key',
+      'authorization_uri',
+      'authorization_rev',
+    ],
+    marker: false,
+  },
+  {
+    key: 'forward_deferred_love_authorities',
+    primaryKey: ['authorization_uri', 'authorization_rev'],
+    columns: [
+      'authorization_uri',
+      'authorization_rev',
+      'action',
+      'cid',
+      'state',
+      'cursor_link_id',
+      'cursor_operation_id',
+    ],
+    marker: false,
+  },
+  {
+    key: 'forward_deferred_love_maintenance',
+    primaryKey: ['singleton'],
+    columns: ['wit_state', 'wit_link_id'],
     marker: false,
   },
 ] as const;
@@ -75,13 +205,13 @@ function writeCounter(db: Db, label: string, value: number): void {
 
 function scanTablePage(db: Db, table: (typeof TABLES)[number], progress: ProgressRow): boolean {
   const columns = [...table.primaryKey];
-  const cursor = progress.cursor_json === null ? null : (JSON.parse(progress.cursor_json) as string[]);
+  const cursor = progress.cursor_json === null ? null : (JSON.parse(progress.cursor_json) as Array<string | number>);
   if (cursor !== null && cursor.length !== columns.length)
     throw new Error(`invalid forwarding scan cursor for ${table.key}`);
 
   const bytes = table.columns.map((column) => `coalesce(length(CAST(${column} AS BLOB)),0)`).join(' + ');
   const keyset = cursor === null ? '' : `WHERE (${columns.join(',')}) > (${columns.map(() => '?').join(',')})`;
-  const rows = db.all<Record<string, string> & { logical_bytes_estimate: number }>(
+  const rows = db.all<Record<string, string | number> & { logical_bytes_estimate: number }>(
     `SELECT ${columns.join(',')},(${bytes}) AS logical_bytes_estimate FROM ${table.key}
      ${keyset} ORDER BY ${columns.join(',')} LIMIT ?`,
     ...(cursor ?? []),

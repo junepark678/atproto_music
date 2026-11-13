@@ -177,6 +177,9 @@ describe('sign-in policy reconciliation', () => {
       // Revoked at the AS, and gone locally.
       expect(w.as.revocations.map((r) => [r.sub, r.source])).toEqual([[alice.did, 'endpoint']]);
       expect(w.as.sessions(alice.did)[0]?.revoked).not.toBeNull();
+      expect(db.all('SELECT reason,to_seq FROM forward_link_gaps WHERE link_id=?', 'alice-link')).toEqual([
+        { reason: 'revoked', to_seq: null },
+      ]);
       const after = snapshot(w, alice.did);
       for (const t of [
         'oauth_sessions',

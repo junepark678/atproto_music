@@ -1,5 +1,98 @@
+import { toStorage } from '@atmusic/core/timestamp';
 import type { Db } from '../do/db';
 import { storedForwardDedupeKey } from '../outbox/forward-key';
+
+/** True while another non-removed projection row still represents this canonical listen. */
+export function hasCanonicalListenSurvivor(
+  db: Db,
+  args: { did: string; listenedAt: number; artistKey: string; trackKey: string; excluding?: ReadonlySet<string> },
+): boolean {
+  const second = BigInt(args.listenedAt) * 1_000_000_000n;
+  const rows = db.all<{ uri: string }>(
+    `SELECT s.uri FROM scrobbles s WHERE s.did=? AND s.artist_key=? AND s.track_key=?
+     AND s.listened_at>=? AND s.listened_at<?`,
+    args.did,
+    args.artistKey,
+    args.trackKey,
+    toStorage(second),
+    toStorage(second + 1_000_000_000n),
+  );
+  return rows.some((row) => {
+    if (args.excluding?.has(row.uri)) return false;
+    // Only tombstones for this exact projected incarnation are removal intent.
+    // In particular, a replacement tombstone for an older CID must not hide a
+    // newly recreated row at the same AT URI.
+    const current = db.one<{
+      cid: string;
+      listened_at: string;
+      artist_key: string;
+      track_key: string;
+      record_uri: string | null;
+    }>(
+      'SELECT cid,listened_at,artist_key,track_key,record_uri FROM scrobbles WHERE did=? AND uri=?',
+      args.did,
+      row.uri,
+    );
+    if (current === null) return false;
+    const exactSecond = Math.floor(Date.parse(current.listened_at) / 1000);
+    if (current.artist_key !== args.artistKey || current.track_key !== args.trackKey || exactSecond !== args.listenedAt)
+      return true;
+    // Tombstone identity alone is not enough: replacement tombstones name the
+    // new CID but carry the old listen tuple. Only matching removal intent can
+    // hide a row, and a later accepted present proof clears that intent.
+    const removal = db.one<{ identity_key: string }>(
+      `SELECT identity_key FROM linked_pull_tombstones WHERE did=? AND kind='listen'
+       AND identity_key IN (?,?,?,?,?,?) AND listen_second=? AND artist_key=? AND track_key=? LIMIT 1`,
+      args.did,
+      `uri:${row.uri}:${current.cid}`,
+      `uri:${row.uri}`,
+      `live:${row.uri}`,
+      `live:${row.uri}:${current.cid}`,
+      `single-replaced:${row.uri}:${current.cid}`,
+      `batch-replaced:${row.uri}:${current.cid}`,
+      exactSecond,
+      args.artistKey,
+      args.trackKey,
+    );
+    if (removal !== null) return false;
+    // Match the unsettled record/member overlay used by visibleScrobblesFrom.
+    // A CID-changing metadata edit does not turn a still-pending API removal
+    // into a surviving canonical listen. Keep this scoped to removal intents;
+    // account suppression and other visibility rules are not removal intent.
+    const pendingOperation = db.one(
+      `SELECT 1 FROM operations d
+       WHERE d.did=? AND d.rkey=(SELECT s.rkey FROM scrobbles s WHERE s.did=? AND s.uri=?)
+         AND d.collection=substr(?, length('at://' || ? || '/') + 1,
+           instr(substr(?, length('at://' || ? || '/') + 1), '/') - 1)
+         AND d.kind='scrobble.delete' AND d.state IN ('queued','running','blocked','failed')
+         AND (NOT EXISTS (SELECT 1 FROM batch_delete_listens bd WHERE bd.operation_id=d.id)
+           OR EXISTS (SELECT 1 FROM batch_delete_listens bd WHERE bd.operation_id=d.id
+             AND (bd.listen_id='*' OR bd.listen_id=(SELECT s.listen_id FROM scrobbles s WHERE s.did=? AND s.uri=?))))
+         LIMIT 1`,
+      args.did,
+      args.did,
+      row.uri,
+      row.uri,
+      args.did,
+      row.uri,
+      args.did,
+      args.did,
+      row.uri,
+    );
+    const pendingListenRemoval = db.one(
+      `SELECT 1 FROM listen_removals lr LEFT JOIN operations ro ON ro.id=lr.operation_id
+       WHERE lr.did=? AND lr.record_uri=(SELECT s.record_uri FROM scrobbles s WHERE s.did=? AND s.uri=?)
+         AND (lr.listen_id=(SELECT s.listen_id FROM scrobbles s WHERE s.did=? AND s.uri=?) OR lr.listen_id='*')
+         AND (ro.id IS NULL OR ro.state IN ('queued','running','blocked','failed')) LIMIT 1`,
+      args.did,
+      args.did,
+      row.uri,
+      args.did,
+      row.uri,
+    );
+    return pendingOperation === null && pendingListenRemoval === null;
+  });
+}
 
 /** Enqueue one local deletion only for a ListenBrainz listen proven delivered to that account generation. */
 export function enqueueListenDelete(
@@ -14,9 +107,15 @@ export function enqueueListenDelete(
     artist: string;
     track: string;
     sourcePath: string;
+    authorizationUri?: string;
+    authorizationRev?: string;
     now: number;
+    excluding?: ReadonlySet<string>;
+    /** Internal synchronous caller already checked this exact canonical tuple. */
+    survivorAlreadyChecked?: boolean;
   },
 ): number {
+  if (!args.survivorAlreadyChecked && hasCanonicalListenSurvivor(db, args)) return 0;
   const links = db.all<{ id: string; generation: number; service: string }>(
     'SELECT id,generation,service FROM linked_accounts WHERE did=?',
     args.did,
@@ -34,8 +133,8 @@ export function enqueueListenDelete(
     const state = link.service === 'listenbrainz' ? 'queued' : 'unsupported';
     const result = db.run(
       `INSERT OR IGNORE INTO listenbrainz_deletes
-      (id,event_key,link_id,generation,did,identity_key,listened_at,artist_key,track_key,artist,track,source_path,state,due_at,deadline_at,created_at_ms,updated_at_ms)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'${state}',?,?,?,?)`,
+      (id,event_key,link_id,generation,did,identity_key,listened_at,artist_key,track_key,artist,track,source_path,state,due_at,deadline_at,created_at_ms,updated_at_ms,authorization_uri,authorization_rev)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'${state}',?,?,?,?,?,?)`,
       `${link.id}:g${link.generation}:${args.eventKey}`,
       args.eventKey,
       link.id,
@@ -52,6 +151,8 @@ export function enqueueListenDelete(
       args.now + 7 * 86400000,
       args.now,
       args.now,
+      args.authorizationUri ?? null,
+      args.authorizationRev ?? null,
     );
     if (result.rowsWritten) queued++;
   }

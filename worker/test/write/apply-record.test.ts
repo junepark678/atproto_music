@@ -20,6 +20,7 @@ import {
   deleteProof,
   dump,
   fixtureScrobble,
+  liveApplyOptions,
   NOW_MS,
   NOW_STORAGE,
   OPTS,
@@ -86,7 +87,7 @@ describe('applyRecordProof', () => {
       );
       db.tx(() => applyRecordProof(db, old, OPTS));
       db.run('DELETE FROM forward_admissions');
-      db.tx(() => applyRecordProof(db, replay, { ...OPTS, forwarding: { random: seededRandom(911) } }));
+      db.tx(() => applyRecordProof(db, replay, liveApplyOptions(replay, seededRandom(911))));
       expect(db.all('SELECT * FROM forward_outbox')).toHaveLength(0);
     });
   });
@@ -107,13 +108,13 @@ describe('applyRecordProof', () => {
         NOW_MS,
         NOW_MS,
       );
-      const live = { ...OPTS, forwarding: { random: seededRandom(21) } };
-      db.tx(() => applyRecordProof(db, created, live));
+      const liveRandom = seededRandom(21);
+      db.tx(() => applyRecordProof(db, created, liveApplyOptions(created, liveRandom)));
       expect(db.all("SELECT kind FROM forward_outbox WHERE kind='love'")).toHaveLength(1);
-      db.tx(() => applyRecordProof(db, metadata, live));
+      db.tx(() => applyRecordProof(db, metadata, liveApplyOptions(metadata, liveRandom, 'update')));
       expect(db.all("SELECT kind FROM forward_outbox WHERE kind='love'")).toHaveLength(1);
-      db.tx(() => applyRecordProof(db, absent, live));
-      db.tx(() => applyRecordProof(db, recreated, live));
+      db.tx(() => applyRecordProof(db, absent, liveApplyOptions(absent, liveRandom, 'delete')));
+      db.tx(() => applyRecordProof(db, recreated, liveApplyOptions(recreated, liveRandom, 'create')));
       expect(db.all<{ kind: string }>('SELECT kind FROM forward_outbox ORDER BY rowid')).toEqual([
         { kind: 'love' },
         { kind: 'unlove' },
@@ -146,7 +147,7 @@ describe('applyRecordProof', () => {
         `love-uri:${ALICE}:${collection}:3lbqlove02ab`,
         NOW_MS,
       );
-      db.tx(() => applyRecordProof(db, proof, { ...OPTS, forwarding: { random: seededRandom(22) } }));
+      db.tx(() => applyRecordProof(db, proof, liveApplyOptions(proof, seededRandom(22))));
       expect(db.all('SELECT * FROM forward_outbox')).toHaveLength(0);
     });
   });
@@ -179,7 +180,7 @@ describe('applyRecordProof', () => {
       db.tx(() => applyRecordProof(db, first, OPTS));
       expect(db.all('SELECT kind FROM forward_outbox')).toHaveLength(0);
       expect(db.all<{ path: string }>("SELECT path FROM forward_admissions WHERE path='snapshot'")).toHaveLength(1);
-      db.tx(() => applyRecordProof(db, second, { ...OPTS, forwarding: { random: seededRandom(3) } }));
+      db.tx(() => applyRecordProof(db, second, liveApplyOptions(second, seededRandom(3), 'update')));
       expect(db.all('SELECT kind FROM forward_outbox')).toHaveLength(0);
     });
   });
@@ -215,7 +216,7 @@ describe('applyRecordProof', () => {
         nowNs: OPTS.nowNs + 32n * 24n * 60n * 60n * 1_000_000_000n,
         receiptNs: OPTS.receiptNs + 32n * 24n * 60n * 60n * 1_000_000_000n,
       };
-      db.tx(() => applyRecordProof(db, proof, { ...d32, forwarding: { random: seededRandom(5) } }));
+      db.tx(() => applyRecordProof(db, proof, { ...liveApplyOptions(proof, seededRandom(5)), ...d32 }));
       expect(db.all('SELECT kind FROM forward_outbox')).toHaveLength(0);
     });
   });
@@ -241,7 +242,7 @@ describe('applyRecordProof', () => {
         key,
         NOW_MS,
       );
-      db.tx(() => applyRecordProof(db, proof, { ...OPTS, forwarding: { random: seededRandom(7) } }));
+      db.tx(() => applyRecordProof(db, proof, liveApplyOptions(proof, seededRandom(7))));
       expect(db.one('SELECT 1 AS hit FROM operations WHERE did=?', ALICE)).toBeNull();
       expect(db.all('SELECT kind FROM forward_outbox')).toHaveLength(0);
     });
@@ -258,9 +259,9 @@ describe('applyRecordProof', () => {
         NOW_MS,
         NOW_MS,
       );
-      db.tx(() => applyRecordProof(db, proof, { ...OPTS, forwarding: { random: seededRandom(99) } }));
+      db.tx(() => applyRecordProof(db, proof, liveApplyOptions(proof, seededRandom(99))));
       expect(db.all('SELECT kind FROM forward_outbox')).toHaveLength(1);
-      db.tx(() => applyRecordProof(db, proof, { ...OPTS, forwarding: { random: seededRandom(99) } }));
+      db.tx(() => applyRecordProof(db, proof, liveApplyOptions(proof, seededRandom(99))));
       expect(db.all('SELECT kind FROM forward_outbox')).toHaveLength(1);
       db.run('DELETE FROM forward_outbox');
       db.tx(() => applyRecordProof(db, proof, OPTS));

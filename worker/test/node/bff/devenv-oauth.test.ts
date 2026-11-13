@@ -6,7 +6,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { ResolvedIdentity } from '@atmusic/atproto/identity/types';
 import type { Transport } from '@atmusic/atproto/transport';
-import { TestPds, TestPlc } from '@atproto/dev-env';
+import type { TestPds, TestPlc } from '@atproto/dev-env';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   type ClientMetadataDocument,
@@ -17,7 +17,9 @@ import {
 } from '../../../src/bff/client-metadata';
 import type { OAuthKeyset } from '../../../src/bff/keyset';
 import { createPolicyFetch } from '../../../src/node/policy-fetch';
+import { closeOwnedDevEnv, createOwnedTestPds, createOwnedTestPlc } from '../support/dev-env-startup';
 import { withMigratedDb } from '../support/node-db';
+import { ownTestResources } from '../support/test-resource-owner';
 import { createWorld, freezeDate } from './oauth-world';
 
 const CLIENT_ORIGIN = 'https://music.214510.xyz';
@@ -108,14 +110,20 @@ async function finishProviderAuthorization(
 
 describe('the confidential OAuth client against @atproto/dev-env', () => {
   it('exchanges a confidential grant, writes and deletes through the PDS, and observes upstream revocation', async () => {
+    const owner = ownTestResources();
+    const startup = {
+      onCaptured: (kind: 'plc' | 'pds', server: TestPds['server'] | TestPlc['server'], roots: string[]) =>
+        owner.trackCaptured(kind, server, roots),
+    };
     freezeDate();
     await withMigratedDb(async (db) => {
       const app = await createWorld(db);
-      const plc = await TestPlc.create({});
+      let plc: TestPlc | undefined;
       let pds: TestPds | undefined;
       const originalFetch = globalThis.fetch;
       let stage = 'PDS setup';
       try {
+        plc = await createOwnedTestPlc({}, startup);
         globalThis.fetch = async (input, init) => {
           const request = input instanceof Request ? input : new Request(input, init);
           const url = new URL(request.url);
@@ -132,7 +140,7 @@ describe('the confidential OAuth client against @atproto/dev-env', () => {
           }
           throw new Error('dev-env OAuth test refused a non-fixture network request');
         };
-        const devPds = await TestPds.create({ didPlcUrl: plc.url, hostname: PDS_HOST });
+        const devPds = await createOwnedTestPds({ didPlcUrl: plc.url, hostname: PDS_HOST }, undefined, startup);
         pds = devPds;
 
         const handle = 'n6-oauth.test';
@@ -268,8 +276,7 @@ describe('the confidential OAuth client against @atproto/dev-env', () => {
         // vitest runs this project sequentially; restore the process fetch even
         // when an assertion or provider operation fails.
         globalThis.fetch = originalFetch;
-        await pds?.close();
-        await plc.close();
+        await closeOwnedDevEnv(pds, plc);
       }
     });
   }, 60_000);

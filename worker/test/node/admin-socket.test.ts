@@ -189,6 +189,46 @@ describe('admin socket', () => {
       clock.nowMs(),
     );
 
+    server.db.run(
+      `INSERT INTO forward_receipts(link_id,generation,kind,dedupe_key,created_at_ms)
+       VALUES ('metric-link',1,'scrobble','metric-listen',?)`,
+      clock.nowMs(),
+    );
+    server.db.run(
+      `INSERT INTO forward_link_gaps(link_id,generation,from_seq,to_seq,reason,opened_at_ms,closed_at_ms)
+       VALUES ('metric-link',1,0,1,'disabled',?,?)`,
+      clock.nowMs(),
+      clock.nowMs(),
+    );
+    server.db.run(
+      `INSERT INTO forward_love_delivery(link_id,generation,love_artist_key,love_track_key,last_sent_kind,last_sent_dedupe_key,row_created_at_ms,sent_at_ms)
+       VALUES('metric-link',1,'björk','jóga','love','metric-love',?,?)`,
+      clock.nowMs(),
+      clock.nowMs(),
+    );
+    server.db.run(
+      `INSERT INTO forward_deferred_love_heads(link_id,generation,love_artist_key,love_track_key,head_seq,created_at_ms)
+       VALUES('metric-link',1,'björk','jóga',1,?)`,
+      clock.nowMs(),
+    );
+    server.db.run(
+      `INSERT INTO forward_deferred_love_intents(link_id,generation,love_artist_key,love_track_key,intent_seq,kind,operation_id,origin_class,payload_json,intent_at_ms)
+       VALUES('metric-link',1,'björk','jóga',1,'unlove','metric-op','operation',?,?)`,
+      payload,
+      clock.nowMs(),
+    );
+    server.db.run(
+      `INSERT INTO forward_deferred_love_witnesses(link_id,generation,operation_id,group_seq,kind,love_artist_key,love_track_key,created_at_ms)
+       VALUES('metric-link',1,'metric-op',1,'unlove','björk','jóga',?)`,
+      clock.nowMs(),
+    );
+    server.db.run(
+      `INSERT INTO forward_deferred_love_authorities(authorization_uri,authorization_rev,authority_seq,action,cid,state,created_at_ms)
+       VALUES('at://did:plc:metrics/com.atproto.repo.record/r','rev',1,'delete','','active',?)`,
+      clock.nowMs(),
+    );
+    server.db.run('INSERT INTO forward_deferred_love_maintenance(singleton) VALUES(1)');
+
     expect(refreshForwardStorageStats(server.db, clock.nowMs())).toBe(true);
     expect(refreshForwardStorageStats(server.db, clock.nowMs() + FORWARD_STORAGE_STATS_REFRESH_MS - 1)).toBe(false);
     const response = await request({ socketPath: server.adminSocket }, 'GET', '/admin/status');
@@ -216,6 +256,30 @@ describe('admin socket', () => {
       'queued',
       null,
     );
+    const deliveryBytes = byteLength('metric-link', 'björk', 'jóga', 'love', 'metric-love');
+    const deferredHeadBytes = byteLength('metric-link', 'björk', 'jóga');
+    const deferredIntentBytes = byteLength(
+      'metric-link',
+      'björk',
+      'jóga',
+      'unlove',
+      'metric-op',
+      'operation',
+      payload,
+      null,
+      null,
+    );
+    const deferredWitnessBytes = byteLength('metric-link', 'metric-op', 'unlove', 'björk', 'jóga', null, null);
+    const deferredAuthorityBytes = byteLength(
+      'at://did:plc:metrics/com.atproto.repo.record/r',
+      'rev',
+      'delete',
+      '',
+      'active',
+      '',
+      '',
+    );
+    const deferredMaintenanceBytes = byteLength('scan', '');
     expect(stats).toEqual({
       refreshedAtMs: clock.nowMs(),
       refreshIntervalMs: FORWARD_STORAGE_STATS_REFRESH_MS,
@@ -225,11 +289,24 @@ describe('admin socket', () => {
       },
       forwardOutbox: { rows: 1, logicalBytesEstimate: outboxBytes },
       tables: {
+        live_record_evidence: { rows: 0, logicalBytesEstimate: 0 },
+        live_acceptance_candidates: { rows: 0, logicalBytesEstimate: 0 },
+        live_pending_removals: { rows: 0, logicalBytesEstimate: 0 },
+        live_pending_removal_events: { rows: 0, logicalBytesEstimate: 0 },
+        live_pending_removal_reconcile: { rows: 0, logicalBytesEstimate: 0 },
         forward_admissions: { rows: 1, logicalBytesEstimate: admissionsBytes },
         love_incarnations: { rows: 1, logicalBytesEstimate: incarnationBytes },
         love_delete_bridges: { rows: 1, logicalBytesEstimate: deleteBridgeBytes },
         love_import_bridges: { rows: 1, logicalBytesEstimate: importBridgeBytes },
         forward_outbox: { rows: 1, logicalBytesEstimate: outboxBytes },
+        forward_receipts: { rows: 1, logicalBytesEstimate: byteLength('metric-link', 'scrobble', 'metric-listen') },
+        forward_link_gaps: { rows: 1, logicalBytesEstimate: byteLength('metric-link', 'disabled') },
+        forward_love_delivery: { rows: 1, logicalBytesEstimate: deliveryBytes },
+        forward_deferred_love_heads: { rows: 1, logicalBytesEstimate: deferredHeadBytes },
+        forward_deferred_love_intents: { rows: 1, logicalBytesEstimate: deferredIntentBytes },
+        forward_deferred_love_witnesses: { rows: 1, logicalBytesEstimate: deferredWitnessBytes },
+        forward_deferred_love_authorities: { rows: 1, logicalBytesEstimate: deferredAuthorityBytes },
+        forward_deferred_love_maintenance: { rows: 1, logicalBytesEstimate: deferredMaintenanceBytes },
       },
     });
     expect(response.json.counters).toContainEqual({

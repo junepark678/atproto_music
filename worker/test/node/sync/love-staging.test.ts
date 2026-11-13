@@ -164,7 +164,6 @@ describe('linked love staging', () => {
           receiptNs: 1_800_000_000_000_000_000n,
           prefix: 'com.example.atmusic',
           nowNs: 1_800_000_000_000_000_000n,
-          forwarding: { random: h.m.random },
         },
       );
       expect(h.db.one("SELECT count(*) AS n FROM linked_pull_tombstones WHERE did=? AND kind='love'", did)).toEqual({

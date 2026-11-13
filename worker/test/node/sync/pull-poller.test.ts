@@ -1,9 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import { createBox, linkedAad } from '../../../src/crypto/box';
-import { runLinkedLastfmPull } from '../../../src/sync/pull-poller';
+import { armAlarm, EXTENSION_LANE, runDue, schedule } from '../../../src/do/timers';
+import { IMPORT_FETCH_CAPS } from '../../../src/imports/jobs';
+import type { HostTimers, TimerHandle } from '../../../src/node/alarm';
+import { NodeAlarm } from '../../../src/node/alarm';
+import { bindPolicyFetch, createPolicyFetch } from '../../../src/node/policy-fetch';
+import { type LinkedPullPollerDeps, runLinkedLastfmPull } from '../../../src/sync/pull-poller';
 import type { PullWriterAvailability } from '../../../src/sync/pull-writer';
 import { remoteRecords, SCROBBLE, T0, withHarness } from '../outbox/support';
 import { FakeLastfm, type LastfmListen, type LastfmLoved } from '../support/fake-lastfm';
+import { FakeListenBrainz } from '../support/fake-listenbrainz';
 
 const API_KEY = 'pull-api-key';
 const SHARED_SECRET = 'pull-shared-secret';
@@ -42,7 +48,7 @@ async function setup(h: Parameters<Parameters<typeof withHarness>[0]>[0]) {
     available: false,
     reason: 'session_missing',
   });
-  const deps = () => ({
+  const deps = (): LinkedPullPollerDeps => ({
     moduleDeps: h.m,
     db: h.db,
     clock: h.m.clock,
@@ -60,6 +66,154 @@ async function setup(h: Parameters<Parameters<typeof withHarness>[0]>[0]) {
 }
 
 describe('linked Last.fm timer poller', () => {
+  it('preserves upstream failure budget during credential downtime and increments on the next real failure', async () => {
+    await withHarness(async (h) => {
+      const { linkId, box, deps } = await setup(h);
+      const options = deps();
+      const now = h.m.clock.nowMs();
+      h.db.run(
+        "UPDATE linked_pull_state SET failures=3,retry_at_ms=?,poll_next_at_ms=?,hold_reason='upstream_retry' WHERE link_id=?",
+        now,
+        now,
+        linkId,
+      );
+      options.box = createBox([{ id: 'replacement', key: new Uint8Array(32).fill(20) }], h.m.random);
+      await runLinkedLastfmPull(options, now);
+      const credentialWait = h.db.one<{
+        failures: number;
+        retry_at_ms: number;
+        poll_next_at_ms: number;
+        hold_reason: string;
+      }>('SELECT failures,retry_at_ms,poll_next_at_ms,hold_reason FROM linked_pull_state WHERE link_id=?', linkId)!;
+      expect(credentialWait).toMatchObject({ failures: 3, hold_reason: 'credential_unavailable' });
+      expect(credentialWait.retry_at_ms).toBeGreaterThan(now);
+      expect(credentialWait.poll_next_at_ms).toBe(credentialWait.retry_at_ms);
+
+      options.box = box;
+      options.fetch = async () => {
+        throw new Error('temporary upstream failure');
+      };
+      h.kit.clock.advance(credentialWait.retry_at_ms - now);
+      await runLinkedLastfmPull(options);
+      expect(h.db.one('SELECT failures,hold_reason FROM linked_pull_state WHERE link_id=?', linkId)).toEqual({
+        failures: 4,
+        hold_reason: 'upstream_retry',
+      });
+    });
+  });
+
+  it('persists credential retry across timer runs and recovers after repeated missing-key attempts', async () => {
+    await withHarness(async (h) => {
+      const { linkId, box, deps } = await setup(h);
+      const options = deps();
+      const originalFetch = options.fetch;
+      let policyRequests = 0;
+      options.fetch = bindPolicyFetch(
+        createPolicyFetch({
+          transport: Object.assign(
+            async (request: Request) => {
+              policyRequests += 1;
+              return originalFetch(request);
+            },
+            { fixture: true as const },
+          ),
+        }),
+        IMPORT_FETCH_CAPS,
+      );
+      let boxOpens = 0;
+      const unavailableBox = createBox([{ id: 'replacement', key: new Uint8Array(32).fill(20) }], h.m.random);
+      options.box = {
+        ...unavailableBox,
+        openText(...args) {
+          boxOpens += 1;
+          return unavailableBox.openText(...args);
+        },
+      };
+      let pending: (() => void) | undefined;
+      const timers: HostTimers = {
+        setTimeout(callback) {
+          pending = callback;
+          return {} as TimerHandle;
+        },
+        clearTimeout() {
+          pending = undefined;
+        },
+        setInterval() {
+          throw new Error('unexpected interval');
+        },
+        clearInterval() {},
+      };
+      const alarm = new NodeAlarm({
+        clock: h.m.clock,
+        timers,
+        log: { log() {} },
+        onAlarm: async () => {
+          await runDue(
+            alarm,
+            h.db,
+            h.m.clock.nowMs(),
+            {
+              'linked-pull': async (at) => {
+                const report = await runLinkedLastfmPull(options, at);
+                schedule(h.db, 'linked-pull', report.nextDueMs ?? at + options.intervalMs);
+              },
+            },
+            { maxRuns: 1 },
+            EXTENSION_LANE,
+          );
+          armAlarm(alarm, h.db, EXTENSION_LANE);
+        },
+      });
+      const state = () =>
+        h.db.one<{
+          poll_next_at_ms: number | null;
+          retry_at_ms: number | null;
+          failures: number;
+          hold_reason: string | null;
+        }>('SELECT poll_next_at_ms,retry_at_ms,failures,hold_reason FROM linked_pull_state WHERE link_id=?', linkId)!;
+      schedule(h.db, 'linked-pull', h.m.clock.nowMs());
+      armAlarm(alarm, h.db, EXTENSION_LANE);
+
+      const fire = async () => {
+        const callback = pending;
+        expect(callback).toBeTypeOf('function');
+        callback!();
+        await alarm.whenIdle();
+      };
+      await fire();
+      const first = state();
+      expect(first).toMatchObject({ hold_reason: 'credential_unavailable', failures: 0 });
+      expect(first.retry_at_ms).toBeGreaterThan(h.m.clock.nowMs());
+      expect(first.poll_next_at_ms).toBe(first.retry_at_ms);
+      h.restart();
+      options.db = h.db;
+      options.moduleDeps = h.m;
+      const early = pending;
+      early?.();
+      await alarm.whenIdle();
+      expect(boxOpens).toBe(1);
+      expect(policyRequests).toBe(0);
+
+      // More than the upstream exhaustion threshold of local key failures must
+      // keep the same-generation credential check recoverable.
+      for (let attempt = 0; attempt < 9; attempt += 1) {
+        h.kit.clock.advance(Math.max(1, (state().retry_at_ms ?? h.m.clock.nowMs()) - h.m.clock.nowMs()));
+        await fire();
+        expect(state()).toMatchObject({ hold_reason: 'credential_unavailable', failures: 0 });
+      }
+      expect(boxOpens).toBe(10);
+      expect(policyRequests).toBe(0);
+
+      options.box = box;
+      h.kit.clock.advance(Math.max(1, (state().retry_at_ms ?? h.m.clock.nowMs()) - h.m.clock.nowMs()));
+      await fire();
+      expect(state()).toMatchObject({ retry_at_ms: null, failures: 0 });
+      expect(state().hold_reason).not.toBe('credential_unavailable');
+      expect(policyRequests).toBeGreaterThan(0);
+      alarm.stop();
+    });
+  });
+
   it('pins multi-page recent and loved rounds across restart, skips now-playing, and commits only completed boundaries', async () => {
     await withHarness(async (h) => {
       const { linkId, remote, deps } = await setup(h);
@@ -253,6 +407,127 @@ describe('linked Last.fm timer poller', () => {
     });
   });
 
+  it('reports the earliest remaining link deadline after completing a love page', async () => {
+    await withHarness(async (h) => {
+      const { linkId, box, remote, deps } = await setup(h);
+      h.account(h.bob);
+      const laterLink = h.link(h.bob, 'lastfm');
+      remote.addUser('remote-bob');
+      const bobSession = remote.addSession('remote-bob');
+      const bobCredential = box.seal('linked-lastfm', bobSession, linkedAad(h.bob, 'lastfm'));
+      h.db.run(
+        "UPDATE linked_accounts SET remote_user='remote-bob',credential_ciphertext=? WHERE id=?",
+        bobCredential.buffer.slice(
+          bobCredential.byteOffset,
+          bobCredential.byteOffset + bobCredential.byteLength,
+        ) as ArrayBuffer,
+        laterLink,
+      );
+      const now = h.m.clock.nowMs();
+      const remainingDue = now + 5_000;
+      h.db.run("UPDATE linked_pull_state SET poll_phase='love' WHERE link_id=?", linkId);
+      h.db.run(
+        `INSERT INTO linked_pull_state(link_id,generation,source_service,source_account,listen_watermark_ms,
+          poll_next_at_ms,updated_at_ms) VALUES(?,1,'lastfm','other',?,?,?)`,
+        laterLink,
+        now,
+        now,
+        now,
+      );
+      h.db.run('UPDATE linked_pull_state SET poll_next_at_ms=? WHERE link_id=?', remainingDue, laterLink);
+
+      const report = await runLinkedLastfmPull(deps());
+
+      expect(report.requested).toBe(1);
+      expect(report.nextDueMs).toBe(remainingDue);
+      h.kit.clock.advance(remainingDue - now);
+      const later = await runLinkedLastfmPull(deps());
+      expect(later.requested).toBe(1);
+      expect(remote.calls.entries.at(-1)?.params).toMatchObject({
+        user: ['remote-bob'],
+        method: ['user.getRecentTracks'],
+      });
+    });
+  });
+
+  it('does not schedule links held for reauthentication or terminal failure', async () => {
+    await withHarness(async (h) => {
+      const { linkId, remote, deps } = await setup(h);
+      h.db.run("UPDATE linked_pull_state SET poll_phase='love' WHERE link_id=?", linkId);
+      remote.revokeSession(SESSION_KEY);
+
+      const reauth = await runLinkedLastfmPull(deps());
+      expect(reauth).toMatchObject({ requested: 1, held: 'upstream_unauthorized', nextDueMs: null });
+
+      h.db.run(
+        "UPDATE linked_pull_state SET hold_reason='retry_exhausted',poll_next_at_ms=? WHERE link_id=?",
+        h.m.clock.nowMs() + 60_000,
+        linkId,
+      );
+      const held = await runLinkedLastfmPull(deps());
+      expect(held.nextDueMs).toBeNull();
+    });
+  });
+
+  it('does not report disabled or revoked links as eligible work', async () => {
+    await withHarness(async (h) => {
+      const { linkId, deps } = await setup(h);
+      h.db.run('UPDATE linked_accounts SET pull_enabled=0 WHERE id=?', linkId);
+      expect(await runLinkedLastfmPull(deps())).toMatchObject({ requested: 0, nextDueMs: null });
+
+      h.db.run("UPDATE linked_accounts SET pull_enabled=1,status='revoked' WHERE id=?", linkId);
+      expect(await runLinkedLastfmPull(deps())).toMatchObject({ requested: 0, nextDueMs: null });
+    });
+  });
+
+  it('continues to an independent eligible link when Last.fm pacing defers its request', async () => {
+    await withHarness(async (h) => {
+      const { box, remote, deps } = await setup(h);
+      h.account(h.bob);
+      const linkId = h.link(h.bob, 'listenbrainz');
+      const lbToken = 'linked-lb-token';
+      const sealed = box.seal('linked-listenbrainz', lbToken, linkedAad(h.bob, 'listenbrainz'));
+      h.db.run(
+        "UPDATE linked_accounts SET remote_user='remote-bob-lb',credential_ciphertext=? WHERE id=?",
+        sealed.buffer.slice(sealed.byteOffset, sealed.byteOffset + sealed.byteLength) as ArrayBuffer,
+        linkId,
+      );
+      const now = h.m.clock.nowMs();
+      h.db.run(
+        `INSERT INTO linked_pull_state(link_id,generation,source_service,source_account,listen_watermark_ms,
+          listen_floor_at_ms,love_floor_at_ms,love_boundary_ms,poll_next_at_ms,poll_phase,updated_at_ms)
+         VALUES(?,1,'listenbrainz','remote-bob-lb',?,?,?,?,?,'love',?)`,
+        linkId,
+        now - 3_600_000,
+        now - 86_400_000,
+        now - 86_400_000,
+        now - 86_400_000,
+        now,
+        now,
+      );
+      const lb = new FakeListenBrainz({ clock: h.kit.clock });
+      lb.addToken('remote-bob-lb', lbToken);
+      const options = deps();
+      const lastfmFetch = options.fetch;
+      options.listenbrainzApiRoot = 'https://listenbrainz.test/';
+      options.listenbrainzPacer = () => ({ take: () => null, holdUntil: () => undefined });
+      options.pacer = {
+        take: (at) => at + 1_000,
+        holdUntil: () => undefined,
+      };
+      options.fetch = async (url, init) => {
+        const request = url instanceof Request ? url : new Request(url, init);
+        return new URL(request.url).hostname === 'listenbrainz.test' ? lb.fetch(request) : lastfmFetch(url, init);
+      };
+
+      const report = await runLinkedLastfmPull(options);
+
+      expect(report).toMatchObject({ requested: 1, nextDueMs: now + 1_000 });
+      expect(lb.feedbackCalls).toHaveLength(1);
+      expect(remote.calls.entries).toHaveLength(0);
+    });
+  });
+
   it('persists bounded exponential retry and does not rearm after eight failures', async () => {
     await withHarness(async (h) => {
       const { linkId, deps } = await setup(h);
@@ -263,11 +538,13 @@ describe('linked Last.fm timer poller', () => {
         return new Response('{}', { status: 503 });
       };
       for (let attempt = 0; attempt < 8; attempt++) {
-        expect((await runLinkedLastfmPull(options)).requested).toBe(1);
+        const report = await runLinkedLastfmPull(options);
+        expect(report.requested).toBe(1);
         const state = h.db.one<{ poll_next_at_ms: number | null }>(
           'SELECT poll_next_at_ms FROM linked_pull_state WHERE link_id=?',
           linkId,
         )!;
+        expect(report.nextDueMs).toBe(state.poll_next_at_ms);
         if (state.poll_next_at_ms !== null) h.kit.clock.advance(state.poll_next_at_ms - h.m.clock.nowMs());
       }
       expect(requests).toBe(8);
