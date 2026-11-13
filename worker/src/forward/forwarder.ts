@@ -784,6 +784,14 @@ const nowPlayingBoostedAt = new WeakMap<Db, Map<string, number>>();
  * needs no global bound.
  */
 const lastfmLastTurnBoosted = new WeakMap<Db, boolean>();
+/**
+ * The same bound over the whole delivery loop, all services: runForward
+ * awaits every delivery in turn and shares its per-run request budget across
+ * Last.fm and ListenBrainz, so after any boosted selection the next selection
+ * goes to ordinary work. Rotating ListenBrainz links can therefore not starve
+ * ordinary forwarding either (including Last.fm work whose token is free).
+ */
+const lastTurnBoosted = new WeakMap<Db, boolean>();
 
 function pickJob(rt: ForwardRuntime, now: number, localWork: Map<string, { remaining: number }>): Job | null {
   const links = rt.db.all<LinkRow>("SELECT * FROM linked_accounts WHERE status='active' ORDER BY id");
@@ -818,7 +826,8 @@ function pickJob(rt: ForwardRuntime, now: number, localWork: Map<string, { remai
     const oldest = Math.min(...due.filter((hint) => hint.priority === priority).map((hint) => hint.created_at_ms));
     const nowPlayingHint = hints[0];
     const lastBoost = boostedAt.get(link.id);
-    const globalBoostFree = link.service !== 'lastfm' || lastfmLastTurnBoosted.get(rt.db) !== true;
+    const globalBoostFree =
+      lastTurnBoosted.get(rt.db) !== true && (link.service !== 'lastfm' || lastfmLastTurnBoosted.get(rt.db) !== true);
     candidates.push({
       link,
       priority,
@@ -859,6 +868,7 @@ function pickJob(rt: ForwardRuntime, now: number, localWork: Map<string, { remai
     if (job !== null) {
       const boosted = nowPlaying && job.kind === 'nowplaying';
       if (boosted) boostedAt.set(link.id, now);
+      lastTurnBoosted.set(rt.db, boosted);
       if (link.service === 'lastfm') lastfmLastTurnBoosted.set(rt.db, boosted);
       return job;
     }

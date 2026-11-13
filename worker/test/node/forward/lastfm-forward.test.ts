@@ -1440,6 +1440,59 @@ describe('Last.fm forwarding', () => {
     },
   );
 
+  it('rotating ListenBrainz now playing cannot fill the shared delivery loop and starve Last.fm scrobbles', async () => {
+    const w = await world();
+    // 25 ListenBrainz players, five due per run, each again only after its 30 s cooldown:
+    // without a loop-wide bound, the five boosted updates would take every request of every run.
+    const players = Array.from({ length: 25 }, (_, i) => {
+      const did = `did:plc:${`lbplayer${i}`.padEnd(24, 'x')}`;
+      ensureAccount({ db: w.app.db, clock: w.clock }, { did, verifiedHandle: null });
+      const token = `lb-token-${i}`;
+      w.lb.addToken(`lb_player_${i}`, token);
+      const saved = saveLink(
+        { db: w.app.db, clock: w.clock, random: w.rt.random, box: w.rt.box },
+        { did, service: 'listenbrainz', remoteUser: `lb_player_${i}`, credential: token },
+      );
+      return { did, linkId: saved.link.id };
+    });
+    w.linkLastfm(BOB, 'victim');
+    let victimQueued = 0;
+    for (let step = 0; step < 15; step++) {
+      for (let k = 0; k < 5; k++) {
+        const { did, linkId } = players[(step * 5 + k) % players.length]!;
+        const startedAtMs = w.clock.nowMs();
+        enqueueForwards(w.app.db, {
+          did,
+          linkId,
+          items: [
+            {
+              kind: 'nowplaying',
+              startedAtMs,
+              artist: 'Artist',
+              track: `Track ${step}-${k}`,
+              payload: {
+                track: { artist: 'Artist', track: `Track ${step}-${k}` },
+                startedAtMs,
+                origin: 'listenbrainz',
+              },
+            },
+          ],
+          now: startedAtMs,
+          random: enqueueRandom,
+        });
+      }
+      if (step % 3 === 0) {
+        w.scrobbles(BOB, 1, `lb-victim-${step}`);
+        victimQueued++;
+      }
+      await w.run();
+      w.clock.advance(8 * SECOND);
+    }
+    const victim = w.rows(BOB).filter((row) => row.kind === 'scrobble');
+    expect(victim).toHaveLength(victimQueued);
+    expect(victim.map((row) => row.state)).toEqual(Array(victimQueued).fill('sent'));
+  });
+
   it('love, unlove, love for one track forwards track.love, track.unlove, track.love in order, and the same track played as now playing twice 10 minutes apart is forwarded twice', async () => {
     const w = await world();
     w.linkLastfm(ALICE, 'alice_fm');
