@@ -8,10 +8,69 @@ import { IndexingSection } from '../../src/routes/settings';
 import SettingsCredentials from '../../src/routes/settings-credentials';
 import SettingsImports from '../../src/routes/settings-imports';
 import SettingsLinks from '../../src/routes/settings-links';
+import { sessionClient } from '../../src/session/client';
 import { AppStateContext, createAppState, setSession } from '../../src/state/store';
 import { META, mount, SESSION } from './support';
 
 describe('web/test/routes/settings.test.tsx', () => {
+  it('isolates sharing reads and pending writes across A to B to A account changes', async () => {
+    const accountA = SESSION;
+    const accountB = { ...SESSION, did: 'did:plc:bbbbbbbbbbbbbbbbbbbbbbbb' as typeof SESSION.did, handle: 'bob.test' };
+    let currentSession = accountA;
+    const reads: Array<(response: Response) => void> = [];
+    const patches: Array<(response: Response) => void> = [];
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init: RequestInit = {}) => {
+      const url = new URL(String(input), 'https://music.test');
+      if (url.pathname === '/api/v1/auth/session') return Response.json(currentSession);
+      if (url.pathname === '/api/v1/account' && (init.method ?? 'GET') === 'GET')
+        return new Promise<Response>((resolve) => reads.push(resolve));
+      if (url.pathname === '/api/v1/account' && init.method === 'PATCH')
+        return new Promise<Response>((resolve) => patches.push(resolve));
+      return Response.json({ error: { code: 'not_found', message: 'not found', requestId: 'test' } }, { status: 404 });
+    });
+    await sessionClient().refresh();
+    const app = mount('/settings');
+    app.state.session.value = accountA;
+    await vi.waitFor(() => expect(reads).toHaveLength(1));
+    reads[0]!(Response.json({ shareNowPlaying: true }));
+    const checkbox = () => app.root.querySelector<HTMLInputElement>('.share-now-playing input')!;
+    await vi.waitFor(() => expect(checkbox().checked).toBe(true));
+    checkbox().click();
+    await vi.waitFor(() => expect(patches).toHaveLength(1));
+
+    currentSession = accountB;
+    await sessionClient().refresh();
+    app.state.session.value = accountB;
+    await vi.waitFor(() => expect(reads).toHaveLength(2));
+    expect(checkbox().checked).toBe(false);
+    expect(checkbox().disabled).toBe(true);
+    patches[0]!(Response.json({ shareNowPlaying: false }));
+    await Promise.resolve();
+    expect(checkbox().checked).toBe(false);
+    expect(checkbox().disabled).toBe(true);
+    reads[1]!(Response.json({ shareNowPlaying: false }));
+    await vi.waitFor(() => expect(checkbox().disabled).toBe(false));
+    checkbox().click();
+    await vi.waitFor(() => expect(patches).toHaveLength(2));
+
+    currentSession = accountA;
+    await sessionClient().refresh();
+    app.state.session.value = accountA;
+    await vi.waitFor(() => expect(reads).toHaveLength(3));
+    expect(checkbox().checked).toBe(false);
+    expect(checkbox().disabled).toBe(true);
+    patches[1]!(
+      Response.json({ error: { code: 'unavailable', message: 'unavailable', requestId: 'test' } }, { status: 503 }),
+    );
+    await Promise.resolve();
+    expect(checkbox().disabled).toBe(true);
+    expect(app.root.querySelector('[role="alert"]')).toBeNull();
+    reads[2]!(Response.json({ shareNowPlaying: true }));
+    await vi.waitFor(() => expect(checkbox().checked).toBe(true));
+    expect(app.root.textContent).not.toContain('did:plc:');
+    app.cleanup();
+  });
+
   it('shows server session identity and the public export link without a local browser outbox', async () => {
     const app = mount('/settings');
     app.state.session.value = SESSION;
