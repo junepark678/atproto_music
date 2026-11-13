@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import type { SqlParam } from '../../src/do/db';
 import { migrate } from '../../src/do/migrate';
 import { MIGRATIONS, SCHEMA_VERSION, TABLE_CLASS, TABLES } from '../../src/do/schema';
 import { backfillLoveReviveKeys, enqueueRevivedLoves } from '../../src/musicbrainz/revive-loves';
@@ -10,7 +11,13 @@ import {
   deleteLoveReviveJob,
   enqueueTrack,
   loveReviveJobs,
+  matchedArtistKeys,
+  matchedArtistMbids,
+  matchedEntityMbid,
+  matchedRecordingKeys,
   matchedRecordingMbid,
+  matchedReleaseKeys,
+  matchedReleaseMbids,
   recordingByMbid,
   seedHistoricalTracks,
   stageLoveReviveJob,
@@ -33,6 +40,72 @@ function database() {
 }
 
 describe('MusicBrainz storage', () => {
+  it('reads distinct matched reverse keys and rejects invalid IDs and non-matched rows', () => {
+    const db = database();
+    try {
+      const recording = '66666666-6666-4666-8666-666666666666';
+      const artist = '77777777-7777-4777-8777-777777777777';
+      const release = '88888888-8888-4888-8888-888888888888';
+      db.run(
+        "INSERT INTO mb_tracks(artist_key,track_key,album_key,status,recording_mbid,artist_mbids,release_mbid,created_at_ms) VALUES('a','t','x','matched',?,?,?,1)",
+        recording,
+        JSON.stringify([artist]),
+        release,
+      );
+      db.run(
+        "INSERT INTO mb_tracks(artist_key,track_key,album_key,status,recording_mbid,artist_mbids,release_mbid,created_at_ms) VALUES('a','t','y','pending',?,?,?,2)",
+        recording,
+        JSON.stringify([artist]),
+        release,
+      );
+      db.run(
+        "INSERT INTO mb_tracks(artist_key,track_key,album_key,status,recording_mbid,artist_mbids,release_mbid,created_at_ms) VALUES('b','u','','matched',?,?,?,3)",
+        recording,
+        JSON.stringify([artist]),
+        release,
+      );
+      expect(matchedRecordingKeys(db, recording)).toEqual([
+        { artistKey: 'a', trackKey: 't' },
+        { artistKey: 'b', trackKey: 'u' },
+      ]);
+      expect(matchedArtistKeys(db, artist)).toEqual(['a', 'b']);
+      expect(matchedReleaseKeys(db, release)).toEqual([{ artistKey: 'a', albumKey: 'x' }]);
+      expect(matchedArtistMbids(db, ['a', 'b', 'missing'])).toEqual(
+        new Map([
+          ['a', artist],
+          ['b', artist],
+          ['missing', null],
+        ]),
+      );
+      expect(
+        matchedReleaseMbids(db, [
+          { artistKey: 'a', albumKey: 'x' },
+          { artistKey: 'missing', albumKey: '' },
+        ]),
+      ).toEqual(
+        new Map([
+          [JSON.stringify(['a', 'x']), release],
+          [JSON.stringify(['missing', '']), null],
+        ]),
+      );
+      for (const read of [matchedRecordingKeys, matchedArtistKeys, matchedReleaseKeys])
+        expect(read(db, 'bad')).toEqual([]);
+      expect(matchedArtistMbids(db, ['a'])).toEqual(new Map([['a', artist]]));
+      expect(matchedEntityMbid(db, 'artist', 'a')).toBe(artist);
+
+      db.run(
+        "INSERT INTO mb_tracks(artist_key,track_key,album_key,status,artist_mbids,release_mbid,created_at_ms) VALUES('a','other','x','matched',?,?,4)",
+        JSON.stringify([null, 'invalid', release]),
+        'not-a-uuid',
+      );
+      expect(matchedArtistMbids(db, ['a']).get('a')).toBeNull();
+      expect(matchedReleaseMbids(db, [{ artistKey: 'a', albumKey: 'x' }]).get(JSON.stringify(['a', 'x']))).toBe(
+        release,
+      );
+    } finally {
+      db.close();
+    }
+  });
   it('migration 18 stores bounded love revival jobs across reopen and supports cursor advance and deletion', () => {
     const db = database();
     const path = join(dirs[dirs.length - 1]!, 'db.sqlite');
@@ -121,12 +194,81 @@ describe('MusicBrainz storage', () => {
         "SELECT kind,payload_json FROM forward_outbox WHERE dedupe_key LIKE 'mb-match:%'",
       );
       expect(revived?.kind).toBe('unlove');
+      expect(
+        db.one<{ love_lane: number }>("SELECT love_lane FROM forward_outbox WHERE dedupe_key LIKE 'mb-match:%'")
+          ?.love_lane,
+      ).toBe(1);
+      expect(
+        db.one(
+          "SELECT 1 FROM forward_love_lanes WHERE link_id='link-a' AND love_artist_key='artist' AND love_track_key='track'",
+        ),
+      ).not.toBeNull();
       expect(JSON.parse(revived!.payload_json)).toMatchObject({
         artist: 'Artist',
         track: 'Track',
         recordingMbid: '3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10',
       });
       expect(enqueueRevivedLoves(db, key, '3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10', 11, 1).enqueued).toBe(0);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('rolls back a revived forward row and love pointer when its lane write fails', () => {
+    const db = database();
+    try {
+      const did = 'did:plc:cccccccccccccccccccccccc';
+      db.run(
+        "INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,created_at_ms,updated_at_ms) VALUES('atomic-link',?,'listenbrainz','user',x'00','key',1,1)",
+        did,
+      );
+      db.run(
+        `INSERT INTO forward_outbox(id,link_id,did,kind,dedupe_key,payload_json,state,attempts,due_at,last_error,created_at_ms,updated_at_ms)
+         VALUES('atomic-ignored','atomic-link',?,'love','atomic-op',?,'ignored',0,0,'mbid_unresolved',1,1)`,
+        did,
+        JSON.stringify({ artist: 'Atomic Artist', track: 'Atomic Track' }),
+      );
+      const key = { artistKey: 'atomic artist', trackKey: 'atomic track' };
+      backfillLoveReviveKeys(db, 100);
+      const originalRun = db.run.bind(db);
+      db.run = ((sql: string, ...params: SqlParam[]) => {
+        if (sql.includes('INSERT INTO forward_love_lanes')) throw new Error('injected lane failure');
+        return originalRun(sql, ...params);
+      }) as typeof db.run;
+      try {
+        expect(() => enqueueRevivedLoves(db, key, '3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10', 10, 1)).toThrow(
+          'injected lane failure',
+        );
+      } finally {
+        db.run = originalRun;
+      }
+      expect(db.one("SELECT 1 FROM forward_outbox WHERE dedupe_key LIKE 'mb-match:%'")).toBeNull();
+      expect(db.one("SELECT 1 FROM forward_love_lanes WHERE link_id='atomic-link'")).toBeNull();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('unframes a legacy queued love when revival key backfill changes its normalized key', () => {
+    const db = database();
+    try {
+      const did = 'did:plc:dddddddddddddddddddddddd';
+      db.run(
+        "INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,created_at_ms,updated_at_ms) VALUES('backfill-link',?,'listenbrainz','user',x'00','key',1,1)",
+        did,
+      );
+      db.run(
+        `INSERT INTO forward_outbox(id,link_id,did,kind,dedupe_key,payload_json,state,attempts,due_at,created_at_ms,updated_at_ms,love_artist_key,love_track_key,love_lane)
+         VALUES('backfill-love','backfill-link',?,'love','backfill-op',?,'queued',0,0,1,1,'old-artist','old-track',1)`,
+        did,
+        JSON.stringify({ artist: 'New Artist', track: 'New Track' }),
+      );
+      expect(backfillLoveReviveKeys(db, 100)).toMatchObject({ scanned: 1, complete: true });
+      expect(
+        db.one<{ love_artist_key: string; love_track_key: string; love_lane: number | null }>(
+          "SELECT love_artist_key,love_track_key,love_lane FROM forward_outbox WHERE id='backfill-love'",
+        ),
+      ).toEqual({ love_artist_key: 'new artist', love_track_key: 'new track', love_lane: null });
     } finally {
       db.close();
     }

@@ -290,6 +290,11 @@ const NON_DERIVED: readonly string[] = Object.entries(TABLE_CLASS)
   .filter(([, c]) => c === 'non-derived')
   .map(([t]) => t);
 
+// These implicit rowids are persisted by bounded lookup caches and framing
+// pointers. They are canonical identities during a live merge, so the generic
+// declared-column copy must carry rowid only for these two rowid tables.
+const ROWID_REFERENCED_TABLES = new Set(['forward_outbox', 'operations']);
+
 /** Opens `path` read-only and immutable (a backup file is never written). */
 function openImmutable(path: string): NodeDatabase {
   const url = pathToFileURL(path);
@@ -587,14 +592,21 @@ function mergeLive(tmp: NodeDatabase, live: NodeDatabase, liveTables: readonly s
       if (extra.length > 0) {
         throw new RestoreAbort(`the live table ${table} has columns this code does not know (${extra.join(', ')})`);
       }
+      const preserveRowid = ROWID_REFERENCED_TABLES.has(table);
       const list = liveColumns.map(quoteIdent).join(', ');
+      const insertColumns = preserveRowid ? `rowid,${list}` : list;
       const insert = tmp.prepare(
-        `INSERT INTO ${quoteIdent(table)} (${list}) VALUES (${liveColumns.map(() => '?').join(', ')})`,
+        `INSERT INTO ${quoteIdent(table)} (${insertColumns}) VALUES (${[...(preserveRowid ? ['?'] : []), ...liveColumns.map(() => '?')].join(', ')})`,
       );
-      const select = live.prepare(`SELECT ${list} FROM ${quoteIdent(table)}`);
+      const select = live.prepare(
+        `SELECT ${preserveRowid ? 'rowid AS __restore_rowid,' : ''}${list} FROM ${quoteIdent(table)}`,
+      );
       select.setReadBigInts(true);
       for (const row of select.iterate() as Iterable<Row>) {
-        insert.run(...liveColumns.map((c) => row[c] as sqlite.SQLInputValue));
+        insert.run(
+          ...(preserveRowid ? [row.__restore_rowid as sqlite.SQLInputValue] : []),
+          ...liveColumns.map((c) => row[c] as sqlite.SQLInputValue),
+        );
       }
     }
     tmp.exec('COMMIT');

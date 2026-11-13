@@ -67,7 +67,7 @@ function SignedInSettings({ did, onSignedOut }: { did: Did; onSignedOut(): void 
   const outboxState = useOutbox();
   return (
     <>
-      <AccountSection did={did} onSignedOut={onSignedOut} />
+      <AccountSection key={did} did={did} onSignedOut={onSignedOut} />
       <section aria-labelledby="export-title">
         <h2 id="export-title">Your data</h2>
         <p>

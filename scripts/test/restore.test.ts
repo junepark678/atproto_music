@@ -54,6 +54,7 @@ import { type Box, createBox } from '../../worker/src/crypto/box.ts';
 import { migrate } from '../../worker/src/do/migrate.ts';
 import { SCHEMA_VERSION, TABLE_CLASS } from '../../worker/src/do/schema.ts';
 import { applyRecordProof } from '../../worker/src/do/write/apply-record.ts';
+import { FORWARD_LOVE_RECORDING_LOOKUP_SQL } from '../../worker/src/forward/forwarder.ts';
 import { deleteLink, getLinkById, openLinkCredential, saveLink } from '../../worker/src/forward/links.ts';
 import { admitForwardIdentity } from '../../worker/src/forward/projection.ts';
 import { enqueueCoverArt, putCoverArt } from '../../worker/src/musicbrainz/cover-art-store.ts';
@@ -836,6 +837,101 @@ describe('restore.ts', () => {
     }
   }, 30_000);
 
+  it('preserves sparse canonical rowids referenced by forwarding caches across live restore', async () => {
+    const world = await buildWorld();
+    const db = openSqliteDb(world.dbPath, { busyTimeoutMs: BUSY_MS });
+    const link = db.one<{ id: string; did: string }>('SELECT id,did FROM linked_accounts LIMIT 1')!;
+    // Leave holes and use equal timestamps so temporal ordering's rowid tie
+    // breaker and the initializer cursors are exercised through real restore.
+    db.run(
+      `INSERT INTO forward_outbox(rowid,id,link_id,did,kind,dedupe_key,payload_json,state,due_at,created_at_ms,updated_at_ms,love_artist_key,love_track_key,generation,love_lane)
+      VALUES(100,'retained-love',?,?,'love','retained-love','{"artist":"Band","track":"Song","recordingMbid":"8f3471b5-7e6a-48da-86a9-c1c07a0f47ae"}','sent',1,1,1,'band','song',1,1)`,
+      link.id,
+      link.did,
+    );
+    db.run(
+      `INSERT INTO forward_outbox(rowid,id,link_id,did,kind,dedupe_key,payload_json,state,due_at,created_at_ms,updated_at_ms,love_artist_key,love_track_key,generation,love_lane)
+      VALUES(101,'retained-unlove',?,?,'unlove','retained-unlove','{"artist":"Band","track":"Song"}','queued',1,1,1,'band','song',1,1)`,
+      link.id,
+      link.did,
+    );
+    db.run(
+      "INSERT INTO forward_love_recording_targets(forward_rowid,link_id,generation,artist_key,track_key,created_at_ms,recording_mbid) VALUES(100,?,1,'band','song',1,'8f3471b5-7e6a-48da-86a9-c1c07a0f47ae')",
+      link.id,
+    );
+    db.run('INSERT INTO forward_love_recording_targets_state VALUES(1,101,1)');
+    db.run(
+      `INSERT INTO operations(rowid,id,did,kind,origin,priority,collection,record_json,digest,due_at,created_at_ms,updated_at_ms)
+      VALUES(200,'retained-love-op',?,'love.put','web',0,'fm.rocksky.love','{"artist":"Band","track":"Song","recordingMbid":"11111111-2222-4333-8444-555555555555"}','digest',1,1,1)`,
+      link.did,
+    );
+    db.run(
+      `INSERT INTO forward_love_operation_targets(operation_rowid,did,artist_key,track_key,created_at_ms,recording_mbid)
+      VALUES(200,?,'band','song',1,'11111111-2222-4333-8444-555555555555')`,
+      link.did,
+    );
+    db.run('INSERT INTO forward_love_operation_targets_state VALUES(1,200,1)');
+    db.run('INSERT INTO forward_unlove_lookup_progress VALUES(101,1,200)');
+    db.close();
+
+    const systemd = new FakeSystemd(world, { servicePort: null });
+    await systemd.boot();
+    const result = await restoreCli(world, systemd, [...baseArgs(world), '--no-ready-check']);
+    expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(
+      query(
+        world.dbPath,
+        `SELECT f.rowid AS actual,t.forward_rowid AS cached FROM forward_outbox f JOIN forward_love_recording_targets t ON t.link_id=f.link_id WHERE f.id='retained-love'`,
+      ),
+    ).toEqual([{ actual: 100, cached: 100 }]);
+    expect(query(world.dbPath, "SELECT rowid FROM forward_outbox WHERE id='retained-unlove'")).toEqual([
+      { rowid: 101 },
+    ]);
+    expect(query(world.dbPath, "SELECT rowid FROM operations WHERE id='retained-love-op'")).toEqual([{ rowid: 200 }]);
+    expect(
+      query(world.dbPath, 'SELECT unlove_rowid,cursor_operation_rowid FROM forward_unlove_lookup_progress'),
+    ).toEqual([{ unlove_rowid: 101, cursor_operation_rowid: 200 }]);
+    const found = query(world.dbPath, FORWARD_LOVE_RECORDING_LOOKUP_SQL, link.id, 1, 'band', 'song', 1, 101);
+    expect(found).toEqual([{ recording_mbid: '8f3471b5-7e6a-48da-86a9-c1c07a0f47ae' }]);
+    expect(query(world.dbPath, 'SELECT cursor_rowid,complete FROM forward_love_recording_targets_state')).toEqual([
+      { cursor_rowid: 101, complete: 1 },
+    ]);
+    expect(query(world.dbPath, 'SELECT cursor_rowid,complete FROM forward_love_operation_targets_state')).toEqual([
+      { cursor_rowid: 200, complete: 1 },
+    ]);
+    expect(query(world.dbPath, 'PRAGMA integrity_check')).toEqual([{ integrity_check: 'ok' }]);
+  }, 30_000);
+
+  it('keeps canonical rows and dependent caches intact when live merge rejects an unknown column', async () => {
+    const world = await buildWorld({ liveSql: ['ALTER TABLE operations ADD COLUMN future_column TEXT'] });
+    const db = openSqliteDb(world.dbPath, { busyTimeoutMs: BUSY_MS });
+    const link = db.one<{ id: string; did: string }>('SELECT id,did FROM linked_accounts LIMIT 1')!;
+    db.run(
+      `INSERT INTO forward_outbox(rowid,id,link_id,did,kind,dedupe_key,payload_json,state,due_at,created_at_ms,updated_at_ms,love_artist_key,love_track_key,generation,love_lane)
+      VALUES(100,'restore-atomic-love',?,?,'love','restore-atomic-love','{"artist":"Band","track":"Song","recordingMbid":"8f3471b5-7e6a-48da-86a9-c1c07a0f47ae"}','sent',1,1,1,'band','song',1,1)`,
+      link.id,
+      link.did,
+    );
+    db.run(
+      "INSERT INTO forward_love_recording_targets(forward_rowid,link_id,generation,artist_key,track_key,created_at_ms,recording_mbid) VALUES(100,?,1,'band','song',1,'8f3471b5-7e6a-48da-86a9-c1c07a0f47ae')",
+      link.id,
+    );
+    db.close();
+    const systemd = new FakeSystemd(world, { servicePort: null });
+    await systemd.boot();
+    const result = await restoreCli(world, systemd, [...baseArgs(world), '--no-ready-check']);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain('the live table operations has columns this code does not know (future_column)');
+    expect(query(world.dbPath, "SELECT rowid,id FROM forward_outbox WHERE id='restore-atomic-love'")).toEqual([
+      { rowid: 100, id: 'restore-atomic-love' },
+    ]);
+    expect(query(world.dbPath, 'SELECT forward_rowid,recording_mbid FROM forward_love_recording_targets')).toEqual([
+      { forward_rowid: 100, recording_mbid: '8f3471b5-7e6a-48da-86a9-c1c07a0f47ae' },
+    ]);
+    expect(query(world.dbPath, 'PRAGMA integrity_check')).toEqual([{ integrity_check: 'ok' }]);
+    expect(existsSync(`${world.dbPath}.restore.tmp`)).toBe(false);
+  }, 30_000);
+
   it('with a fake systemctl, restore stops atmusic.socket and atmusic.service, proceeds only when both report inactive, swaps the db in, and starts both units only afterwards; a connection attempted mid-restore starts no server', async () => {
     const world = await buildWorld();
     const servicePort = await freePort();
@@ -1201,6 +1297,20 @@ describe('restore.ts', () => {
       { did: DID_A },
       { did: DID_B },
     ]);
+    const backup = new sqlite.DatabaseSync(world.backupPath);
+    try {
+      backup.exec(`
+        INSERT INTO forward_outbox(rowid,id,link_id,did,kind,dedupe_key,payload_json,state,due_at,created_at_ms,updated_at_ms)
+        SELECT 100,'restore-cached-love',id,did,'love','restore-cached-love','{}','sent',1,1,1 FROM linked_accounts LIMIT 1;
+        INSERT INTO forward_outbox(rowid,id,link_id,did,kind,dedupe_key,payload_json,state,due_at,created_at_ms,updated_at_ms)
+        SELECT 101,'restore-cached-unlove',id,did,'unlove','restore-cached-unlove','{}','queued',1,1,1 FROM linked_accounts LIMIT 1;
+        INSERT INTO forward_love_recording_targets(forward_rowid,link_id,generation,artist_key,track_key,created_at_ms,recording_mbid)
+        SELECT 100,id,1,'band','song',1,'8f3471b5-7e6a-48da-86a9-c1c07a0f47ae' FROM linked_accounts LIMIT 1;
+        INSERT INTO forward_unlove_lookup_progress VALUES(101,1,200);
+      `);
+    } finally {
+      backup.close();
+    }
     corruptLive(world);
 
     const systemd = new FakeSystemd(world, { servicePort: null });
@@ -1216,6 +1326,9 @@ describe('restore.ts', () => {
     expect(rows('SELECT count(*) AS n FROM app_passwords WHERE id = ?', world.ids.p1Id as string)).toEqual([{ n: 0 }]);
     expect(rows('SELECT count(*) AS n FROM app_passwords')).toEqual([{ n: 1 }]); // bob's P3, never revoked
     expect(rows('SELECT count(*) AS n FROM linked_accounts')).toEqual([{ n: 0 }]);
+    expect(rows('SELECT count(*) AS n FROM forward_outbox')).toEqual([{ n: 0 }]);
+    expect(rows('SELECT count(*) AS n FROM forward_love_recording_targets')).toEqual([{ n: 0 }]);
+    expect(rows('SELECT count(*) AS n FROM forward_unlove_lookup_progress')).toEqual([{ n: 0 }]);
     expect(rows('SELECT did FROM oauth_sessions ORDER BY did')).toEqual([{ did: DID_A }]);
     // The raw unreadable files are kept aside.
     expect(readFileSync(`${world.dbPath}.pre-restore`).equals(Buffer.alloc(8192, 0x5a))).toBe(true);

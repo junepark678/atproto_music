@@ -38,7 +38,7 @@ export default function Feed() {
   return (
     <section aria-labelledby="page-title">
       <h1 id="page-title">Feed</h1>
-      {session !== null ? <ListeningNow api={state.api} /> : null}
+      {session !== null ? <ListeningNow key={session.did} api={state.api} viewer={session.did} /> : null}
       <div class="tabs" role="tablist" aria-label="Feed scope">
         {SCOPES.map((s) => (
           <button

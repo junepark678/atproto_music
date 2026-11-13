@@ -234,6 +234,17 @@ export function replayRevocations(db: Db, entries: readonly RevocationEntry[]): 
     const n = db.all<{ one: number }>(`DELETE FROM ${table} WHERE ${sql} RETURNING 1 AS one`, ...params).length;
     deleted[table] = (deleted[table] ?? 0) + n;
   };
+  const clearForwardCachesForLinks = (links: readonly { id: string }[]): void => {
+    for (const { id } of links) {
+      db.run('DELETE FROM forward_love_recording_targets WHERE link_id = ?', id);
+      db.run(
+        `DELETE FROM forward_unlove_lookup_progress WHERE unlove_rowid IN (
+          SELECT rowid FROM forward_outbox WHERE link_id = ? AND kind = 'unlove'
+        )`,
+        id,
+      );
+    }
+  };
   db.tx(() => {
     for (const raw of entries) {
       const e = normalise(raw, raw.at);
@@ -255,13 +266,33 @@ export function replayRevocations(db: Db, entries: readonly RevocationEntry[]): 
           break;
         case 'linked_account':
           // A relink may update the same row in place; only the revoked version goes.
-          del('linked_accounts', 'id = ? AND updated_at_ms <= ?', e.id, e.at);
+          // Clear rowid-keyed caches before the FK cascade discards canonical rows.
+          {
+            const eligible = db.all<{ id: string }>(
+              'SELECT id FROM linked_accounts WHERE id = ? AND did = ? AND updated_at_ms <= ?',
+              e.id,
+              e.did,
+              e.at,
+            );
+            clearForwardCachesForLinks(eligible);
+            del('linked_accounts', 'id = ? AND did = ? AND updated_at_ms <= ?', e.id, e.did, e.at);
+          }
           break;
         case 'oauth_session':
           // A later sign-in stores a new session under the same DID; it stays.
           del('oauth_sessions', 'did = ? AND updated_at_ms <= ?', e.did, e.at);
           break;
         case 'account_disconnect':
+          // The canonical forward rows cascade with eligible links. Their caches
+          // have no FK, so remove only caches attached to links this event deletes.
+          {
+            const eligible = db.all<{ id: string }>(
+              'SELECT id FROM linked_accounts WHERE did = ? AND updated_at_ms <= ?',
+              e.did,
+              e.at,
+            );
+            clearForwardCachesForLinks(eligible);
+          }
           for (const [table, writtenAt] of DISCONNECT_TABLES) {
             del(table, `did = ? AND ${writtenAt} <= ?`, e.did, e.at);
           }

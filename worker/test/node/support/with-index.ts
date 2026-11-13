@@ -54,14 +54,14 @@ import { openSqliteDb, type SqliteDb } from '../../../src/node/sqlite-db';
 import {
   makeTempDir,
   type ReopenOptions,
-  reopen,
+  reopen as reopenDatabase,
   TEST_BUSY_TIMEOUT_MS,
   type TempDbContext,
   type WithMigratedDbOptions,
   withMigratedDb,
 } from './node-db';
 
-export { type ReopenOptions, reopen, TEST_BUSY_TIMEOUT_MS };
+export { type ReopenOptions, TEST_BUSY_TIMEOUT_MS };
 
 // ---------------------------------------------------------------------------
 // Harness configuration
@@ -230,7 +230,7 @@ export function withIndex<T>(
   fn: (db: SqliteDb, ix: TestIndex) => T | Promise<T>,
   options: WithIndexOptions = {},
 ): Promise<T> {
-  return withMigratedDb((db, ctx: TempDbContext) => {
+  return withMigratedDb(async (db, ctx: TempDbContext) => {
     let opens = 1;
     const ix: TestIndex = {
       get db() {
@@ -248,7 +248,12 @@ export function withIndex<T>(
         return next;
       },
     };
-    return fn(db, ix);
+    try {
+      return await fn(db, ix);
+    } finally {
+      closeSchemaReplica(db);
+      if (ctx.current !== db) closeSchemaReplica(ctx.current);
+    }
   }, options);
 }
 
@@ -266,6 +271,7 @@ export async function withEmptyDb<T>(fn: (db: SqliteDb, path: string) => T | Pro
     return await fn(db, path);
   } finally {
     try {
+      if (db !== null) closeSchemaReplica(db);
       db?.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -497,6 +503,51 @@ export function isSchemaIntrospection(query: string): boolean {
   return INTROSPECTION.test(maskQuoted(query));
 }
 
+interface SchemaReplica {
+  ddl: string[];
+  replica: NodeDatabase;
+}
+
+// One schema-only connection per source handle, with a small global bound for
+// callers that do not use one of this file's managed database helpers.
+const MAX_SCHEMA_REPLICAS = 16;
+const schemaReplicas = new Map<Db, SchemaReplica>();
+
+/** Close the cached schema-only connection belonging to `db`, if any. */
+function closeSchemaReplica(db: Db): void {
+  const cached = schemaReplicas.get(db);
+  if (cached === undefined) return;
+  schemaReplicas.delete(db);
+  cached.replica.close();
+}
+
+function schemaReplica(db: Db, ddl: string[]): NodeDatabase {
+  const cached = schemaReplicas.get(db);
+  if (cached !== undefined && cached.ddl.length === ddl.length && cached.ddl.every((sql, i) => sql === ddl[i])) {
+    // Refresh insertion order so the bound behaves as a least-recently-used
+    // cache without changing ownership or sharing replicas across databases.
+    schemaReplicas.delete(db);
+    schemaReplicas.set(db, cached);
+    return cached.replica;
+  }
+
+  closeSchemaReplica(db);
+  const replica = new DatabaseClass(':memory:');
+  try {
+    for (const statement of ddl) replica.exec(statement);
+  } catch (error) {
+    replica.close();
+    throw error;
+  }
+  schemaReplicas.set(db, { ddl, replica });
+  while (schemaReplicas.size > MAX_SCHEMA_REPLICAS) {
+    const oldest = schemaReplicas.keys().next().value as Db | undefined;
+    if (oldest === undefined) break;
+    closeSchemaReplica(oldest);
+  }
+  return replica;
+}
+
 function bindable(params: readonly SqlParam[]): sqlite.SQLInputValue[] {
   return params.map((value) => {
     if (typeof value === 'number') return Number.isInteger(value) ? BigInt(value) : value;
@@ -513,8 +564,10 @@ function plainValue(value: unknown): unknown {
 /**
  * Runs a schema-introspection SELECT (`isSchemaIntrospection`) against a
  * schema-only replica of `db`: an in-memory database built from exactly the
- * DDL in `db`'s sqlite_master, holding no rows. Those pragma functions depend
- * on the schema only, so the answer is the one `db` itself would give.
+ * DDL in `db`'s sqlite_master, holding no rows. The DDL is read and compared
+ * on every call so transactional schema changes, rollbacks and replacements
+ * cannot leave a stale replica. Those pragma functions depend on the schema
+ * only, so the answer is the one `db` itself would give.
  */
 export function schemaAll<T = Row>(db: Db, query: string, ...params: SqlParam[]): T[] {
   if (!isSchemaIntrospection(query)) {
@@ -525,14 +578,15 @@ export function schemaAll<T = Row>(db: Db, query: string, ...params: SqlParam[])
       "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' ORDER BY rowid",
     )
     .map((r) => r.sql);
-  const replica = new DatabaseClass(':memory:');
-  try {
-    for (const statement of ddl) replica.exec(statement);
-    const rows = replica.prepare(query).all(...bindable(params)) as Row[];
-    return rows.map((row) => Object.fromEntries(Object.entries(row).map(([k, v]) => [k, plainValue(v)])) as T);
-  } finally {
-    replica.close();
-  }
+  const replica = schemaReplica(db, ddl);
+  const rows = replica.prepare(query).all(...bindable(params)) as Row[];
+  return rows.map((row) => Object.fromEntries(Object.entries(row).map(([k, v]) => [k, plainValue(v)])) as T);
+}
+
+/** Closes a handle's cached schema replica before closing and replacing it. */
+export function reopen(db: SqliteDb, options?: ReopenOptions): SqliteDb {
+  closeSchemaReplica(db);
+  return reopenDatabase(db, options);
 }
 
 // ---------------------------------------------------------------------------
@@ -589,7 +643,11 @@ export class IndexSet {
   reset(name: string): SqliteDb {
     if (this.#closed) throw new Error('this index set was closed');
     const path = this.pathOf(name);
-    this.#open.get(name)?.close();
+    const existing = this.#open.get(name);
+    if (existing !== undefined) {
+      closeSchemaReplica(existing);
+      existing.close();
+    }
     this.#open.delete(name);
     for (const p of [path, `${path}-wal`, `${path}-shm`, `${path}-journal`]) rmSync(p, { force: true });
     const db = openSqliteDb(path, { busyTimeoutMs: TEST_BUSY_TIMEOUT_MS, create: true });
@@ -600,7 +658,11 @@ export class IndexSet {
 
   /** Closes `name`'s handle; the next `get` reopens the same file and migrates again. */
   reopen(name: string): SqliteDb {
-    this.#open.get(name)?.close();
+    const existing = this.#open.get(name);
+    if (existing !== undefined) {
+      closeSchemaReplica(existing);
+      existing.close();
+    }
     this.#open.delete(name);
     return this.get(name);
   }
@@ -609,7 +671,10 @@ export class IndexSet {
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
-    for (const db of this.#open.values()) db.close();
+    for (const db of this.#open.values()) {
+      closeSchemaReplica(db);
+      db.close();
+    }
     this.#open.clear();
     rmSync(this.dir, { recursive: true, force: true });
   }

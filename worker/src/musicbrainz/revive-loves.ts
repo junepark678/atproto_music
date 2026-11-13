@@ -1,5 +1,7 @@
 import { MusicKeyError, trackKey } from '@atmusic/core/music-key';
 import type { Db } from '../do/db';
+import { noteForwardLoveCurrent, touchLoveLane } from '../forward/love-lanes';
+import { indexForwardLoveTarget } from '../forward/love-recording-targets';
 import { storedForwardDedupeKey } from '../outbox/forward-key';
 
 const MAX_SCAN = 100;
@@ -27,20 +29,14 @@ export function backfillLoveReviveKeys(db: Db, limit: number): { scanned: number
         if (typeof payload.artist !== 'string' || typeof payload.track !== 'string') continue;
         const [artistKey, trackKey] = trackKeyFn(payload.artist, payload.track);
         db.run(
-          'UPDATE forward_outbox SET love_artist_key=?,love_track_key=? WHERE rowid=?',
+          'UPDATE forward_outbox SET love_artist_key=?,love_track_key=?,love_lane=CASE WHEN love_artist_key IS ? AND love_track_key IS ? THEN love_lane ELSE NULL END WHERE rowid=?',
+          artistKey,
+          trackKey,
           artistKey,
           trackKey,
           row.rowid,
         );
-        db.run(
-          `INSERT INTO mb_forward_love_current(link_id,love_artist_key,love_track_key,forward_rowid) VALUES(?,?,?,?)
-           ON CONFLICT(link_id,love_artist_key,love_track_key) DO UPDATE SET forward_rowid=excluded.forward_rowid
-           WHERE excluded.forward_rowid>mb_forward_love_current.forward_rowid`,
-          row.link_id,
-          artistKey,
-          trackKey,
-          row.rowid,
-        );
+        noteForwardLoveCurrent(db, row.link_id, artistKey, trackKey, row.rowid);
       } catch (error) {
         if (!(error instanceof SyntaxError) && !(error instanceof MusicKeyError)) throw error;
       }
@@ -110,40 +106,54 @@ export function enqueueRevivedLoves(
       row.generation,
       `mb-match:${matchedMbid}:${row.link_id}:${key.artistKey}:${key.trackKey}`,
     );
-    const insertedCount = db.run(
-      `INSERT INTO forward_outbox(id,link_id,did,kind,dedupe_key,payload_json,state,attempts,due_at,created_at_ms,updated_at_ms,love_artist_key,love_track_key,generation)
-       VALUES(?,?,?,?,?,?,'queued',0,?,?,?,?,?,?) ON CONFLICT(link_id,kind,dedupe_key) DO NOTHING`,
-      crypto.randomUUID().replaceAll('-', '').slice(0, 32),
-      row.link_id,
-      row.did,
-      kind,
-      dedupe,
-      JSON.stringify(payload),
-      now,
-      now,
-      now,
-      key.artistKey,
-      key.trackKey,
-      row.generation,
-    ).rowsWritten;
-    enqueued += insertedCount;
-    if (insertedCount === 1) {
-      const inserted = db.one<{ rowid: number }>(
-        'SELECT rowid FROM forward_outbox WHERE link_id=? AND kind=? AND dedupe_key=?',
+    const insertedCount = db.tx(() => {
+      const inserted = db.run(
+        `INSERT INTO forward_outbox(id,link_id,did,kind,dedupe_key,payload_json,state,attempts,due_at,created_at_ms,updated_at_ms,love_artist_key,love_track_key,generation,love_lane)
+         VALUES(?,?,?,?,?,?,'queued',0,?,?,?,?,?,?,1) ON CONFLICT(link_id,kind,dedupe_key) DO NOTHING`,
+        crypto.randomUUID().replaceAll('-', '').slice(0, 32),
         row.link_id,
+        row.did,
         kind,
         dedupe,
-      );
-      if (inserted) {
-        db.run(
-          'UPDATE mb_forward_love_current SET forward_rowid=? WHERE link_id=? AND love_artist_key=? AND love_track_key=?',
-          inserted.rowid,
+        JSON.stringify(payload),
+        now,
+        now,
+        now,
+        key.artistKey,
+        key.trackKey,
+        row.generation,
+      ).rowsWritten;
+      if (inserted === 1) {
+        const created = db.one<{ rowid: number }>(
+          'SELECT rowid FROM forward_outbox WHERE link_id=? AND kind=? AND dedupe_key=?',
           row.link_id,
-          key.artistKey,
-          key.trackKey,
+          kind,
+          dedupe,
         );
+        if (created) {
+          if (kind === 'love')
+            indexForwardLoveTarget(db, {
+              rowid: created.rowid,
+              linkId: row.link_id,
+              generation: row.generation,
+              createdAtMs: now,
+              payloadJson: JSON.stringify(payload),
+            });
+          noteForwardLoveCurrent(db, row.link_id, key.artistKey, key.trackKey, created.rowid);
+          touchLoveLane(db, {
+            linkId: row.link_id,
+            generation: row.generation,
+            artistKey: key.artistKey,
+            trackKey: key.trackKey,
+            priority: 0,
+            dueAt: now,
+            createdAtMs: now,
+          });
+        }
       }
-    }
+      return inserted;
+    });
+    enqueued += insertedCount;
   }
   return { enqueued, scanned: rows.length, cursorLinkId, complete: rows.length < limit };
 }
