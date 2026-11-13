@@ -16,6 +16,8 @@ const chromiumExecutable = chromium.executablePath();
 const tsx = require.resolve('tsx/cli') as string;
 const driver = fileURLToPath(new URL('./owned-chromium-driver.ts', import.meta.url));
 
+let runnerFailureContinuationFulfilled = false;
+
 function processExists(pid: number, group = false): boolean {
   try {
     process.kill(group ? -pid : pid, 0);
@@ -151,9 +153,17 @@ test.fails('runner failure hook kills an owned group before releasing a suspende
   owner.deferCleanup(() => held.resolve());
   owner.trackOperation(
     'suspended body continuation',
-    held.promise.then(() => expect(() => owner.assertActive()).toThrow(/is closed/)),
+    held.promise
+      .then(() => expect(() => owner.assertActive()).toThrow(/is closed/))
+      .then(() => {
+        runnerFailureContinuationFulfilled = true;
+      }),
   );
   throw new Error('controlled runner failure');
+});
+
+test('runner failure continuation assertion fulfilled after cleanup', () => {
+  expect(runnerFailureContinuationFulfilled).toBe(true);
 });
 
 test('a pre-ready connection rejection cannot satisfy ready-and-stopped lifecycle coverage', async () => {
@@ -307,9 +317,12 @@ test('owner discovers and reaps Chromium when its driver stops before the PID ha
 test('Playwright ECONNRESET is observed and its artifacts stay inside the removed owned root', async () => {
   const owner = createOwnedIngestTestOwner('Playwright ECONNRESET');
   const tempRoot = await mkdtemp(join(tmpdir(), 'atmusic-owned-artifact-test-'));
+  let acquisitionRoot = '';
   owner.deferCleanup(() => rmSync(tempRoot, { recursive: true, force: true }));
   try {
-    const result = await spawnDriver('reset', owner, { ...process.env, TMPDIR: tempRoot });
+    const result = await spawnDriver('reset', owner, { ...process.env, TMPDIR: tempRoot }, (root) => {
+      acquisitionRoot = root;
+    });
     expect(result.status, result.stderr).toBe(0);
     const payload = JSON.parse(result.stdout.trim()) as {
       readyError: string;
@@ -318,7 +331,8 @@ test('Playwright ECONNRESET is observed and its artifacts stay inside the remove
     expect(payload.readyError).toMatch(/ECONNRESET|socket hang up|WebSocket|closed/i);
     expect(payload.status).toEqual({ processStopped: true, profileRemoved: true, connectionSettled: true });
     const { readdir } = await import('node:fs/promises');
-    expect((await readdir(tempRoot)).filter((entry) => entry.startsWith('playwright-artifacts'))).toEqual([]);
+    expect(acquisitionRoot).not.toBe('');
+    expect((await readdir(acquisitionRoot)).filter((entry) => entry.startsWith('playwright-artifacts'))).toEqual([]);
   } finally {
     await owner.cleanup();
   }
