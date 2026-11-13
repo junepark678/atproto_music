@@ -1,4 +1,6 @@
+import { fixedClock } from '@atmusic/core/test-support/clock';
 import { describe, expect, it } from 'vitest';
+import { parseConfig } from '../../../src/config';
 import type { Db } from '../../../src/do/db';
 import {
   ensureOwnerResnapshotTimer,
@@ -7,7 +9,8 @@ import {
   runOwnerResnapshot,
 } from '../../../src/do/ingest/owner-resnapshot';
 import { dueAt } from '../../../src/do/timers';
-import { withMigratedDb } from '../support/node-db';
+import { reopen, withMigratedDb } from '../support/node-db';
+import { indexCore, runAlarmNow, withIndex } from '../support/with-index';
 
 const NOW = Date.parse('2026-11-13T00:00:00Z');
 const A = 'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa';
@@ -149,7 +152,76 @@ describe('owner signed resnapshot scheduler', () => {
       }
 
       expect(db.one('SELECT 1 AS x FROM users WHERE did=?', 'did:plc:000000000000000000000000')).toBeNull();
-      expect(db.one("SELECT value FROM counters WHERE name='owner_resnapshot_receipt' AND label=?", 'did:plc:000000000000000000000000')).toBeNull();
+      expect(
+        db.one(
+          "SELECT value FROM counters WHERE name='owner_resnapshot_receipt' AND label=?",
+          'did:plc:000000000000000000000000',
+        ),
+      ).toBeNull();
+    });
+  });
+
+  it('persists the accepted receipt and the next periodic deadline across a database reopen', async () => {
+    await withMigratedDb(async (db) => {
+      owner(db, A, 'alice');
+      user(db, A);
+      const report = runOwnerResnapshot(db, NOW);
+      expect(report.accepted).toBe(1);
+      expect(dueAt(db, OWNER_RESNAPSHOT_TIMER)).toBe(NOW + OWNER_RESNAPSHOT_INTERVAL_MS);
+
+      const reopened = reopen(db);
+      expect(reopened.one("SELECT value FROM counters WHERE name='owner_resnapshot_receipt' AND label=?", A)).toEqual({
+        value: NOW,
+      });
+      expect(dueAt(reopened, OWNER_RESNAPSHOT_TIMER)).toBe(NOW + OWNER_RESNAPSHOT_INTERVAL_MS);
+      ensureOwnerResnapshotTimer(reopened, NOW + 123, true);
+      expect(dueAt(reopened, OWNER_RESNAPSHOT_TIMER)).toBe(NOW + OWNER_RESNAPSHOT_INTERVAL_MS);
+      expect(runOwnerResnapshot(reopened, NOW + OWNER_RESNAPSHOT_INTERVAL_MS - 1).examined).toBe(0);
+      expect(reopened.one("SELECT value FROM counters WHERE name='owner_resnapshot_receipt' AND label=?", A)).toEqual({
+        value: NOW,
+      });
+    });
+  });
+
+  it('recovers an actual claimed owner timer when IndexCore starts after reopen', async () => {
+    await withIndex(async (db, ix) => {
+      const clock = fixedClock('2026-11-13T00:00:00Z');
+      const config = parseConfig(
+        {
+          PUBLIC_ORIGIN: 'https://music.example.test',
+          LEXICON_PREFIX: 'com.example.atmusic',
+          NAMESPACE_OWNERSHIP_REF: '',
+          NAMESPACE_PUBLICATION_REF: '',
+          INGEST_MODE: 'socket',
+          JETSTREAM_URLS: 'wss://jetstream.example.test',
+          JETSTREAM_LOOKBACK_HOURS: '24',
+          RELAY_URL: 'https://relay.example.test',
+        },
+        { allowFixturePrefix: true },
+      );
+      const first = indexCore(db, { clock, config });
+      first.core.start();
+      const preservedDeadline = NOW + 12_345;
+      db.run('UPDATE timers SET due_at=? WHERE name=?', preservedDeadline, OWNER_RESNAPSHOT_TIMER);
+      db.run('UPDATE timers SET name=? WHERE name=?', `~running:${OWNER_RESNAPSHOT_TIMER}`, OWNER_RESNAPSHOT_TIMER);
+
+      const reopened = ix.reopen();
+      const restarted = indexCore(reopened, { clock, config });
+      restarted.core.start();
+      expect(dueAt(reopened, OWNER_RESNAPSHOT_TIMER)).toBeNull();
+      expect(reopened.one('SELECT due_at FROM timers WHERE name=?', `~running:${OWNER_RESNAPSHOT_TIMER}`)).toEqual({
+        due_at: preservedDeadline,
+      });
+      // Recovery goes through the production core timer runner and executes the overdue scheduler.
+      clock.advance(preservedDeadline - clock.nowMs());
+      const report = await runAlarmNow(restarted.core);
+      expect(report?.recovered.some((timer) => timer.name === OWNER_RESNAPSHOT_TIMER)).toBe(true);
+      expect(reopened.one('SELECT 1 AS x FROM timers WHERE name=?', `~running:${OWNER_RESNAPSHOT_TIMER}`)).toBeNull();
+      expect(dueAt(reopened, OWNER_RESNAPSHOT_TIMER)).toBe(report?.recovered[0]?.retryAtMs);
+      clock.advance((report?.recovered[0]?.retryAtMs ?? clock.nowMs()) - clock.nowMs());
+      await runAlarmNow(restarted.core);
+      expect(restarted.log.entries.some((entry) => entry.event === 'owner_resnapshot.done')).toBe(true);
+      expect(dueAt(reopened, OWNER_RESNAPSHOT_TIMER)).toBe(clock.nowMs() + OWNER_RESNAPSHOT_INTERVAL_MS);
     });
   });
 
