@@ -764,8 +764,23 @@ export const KIND_CANDIDATE_SQL = `SELECT min(priority) AS priority,min(created_
 export const LANE_FIRST_DUE_SQL = `SELECT priority,head_created_at_ms FROM forward_love_lanes INDEXED BY forward_love_lanes_due
   WHERE link_id=? AND generation=? AND priority=? AND due_at<=? ORDER BY due_at,rowid LIMIT 1`;
 
+/**
+ * A link's due now playing jumps ahead of other links' backlog at most once per
+ * this interval. All Last.fm links share one 1 request/second token, so an
+ * unbounded boost would let one link that keeps a now-playing update due take
+ * every token and starve other links' scrobbles, loves and imports.
+ */
+export const NOW_PLAYING_PRIORITY_INTERVAL_MS = 30_000;
+/** When each link's now playing last took the cross-link boost, per Db handle (in memory). */
+const nowPlayingBoostedAt = new WeakMap<Db, Map<string, number>>();
+
 function pickJob(rt: ForwardRuntime, now: number, localWork: Map<string, { remaining: number }>): Job | null {
   const links = rt.db.all<LinkRow>("SELECT * FROM linked_accounts WHERE status='active' ORDER BY id");
+  let boostedAt = nowPlayingBoostedAt.get(rt.db);
+  if (boostedAt === undefined) {
+    boostedAt = new Map();
+    nowPlayingBoostedAt.set(rt.db, boostedAt);
+  }
   const candidates: Array<{ link: LinkRow; priority: number; oldest: number; nowPlaying: boolean }> = [];
   for (const link of links) {
     const hints: Array<{ priority: number; created_at_ms: number | null } | null> = [];
@@ -791,15 +806,21 @@ function pickJob(rt: ForwardRuntime, now: number, localWork: Map<string, { remai
     const priority = Math.min(...due.map((hint) => hint.priority));
     const oldest = Math.min(...due.filter((hint) => hint.priority === priority).map((hint) => hint.created_at_ms));
     const nowPlayingHint = hints[0];
+    const lastBoost = boostedAt.get(link.id);
     candidates.push({
       link,
       priority,
       oldest,
-      nowPlaying: nowPlayingHint !== undefined && nowPlayingHint !== null && nowPlayingHint.created_at_ms !== null,
+      nowPlaying:
+        nowPlayingHint !== undefined &&
+        nowPlayingHint !== null &&
+        nowPlayingHint.created_at_ms !== null &&
+        (lastBoost === undefined || now - lastBoost >= NOW_PLAYING_PRIORITY_INTERVAL_MS),
     });
   }
   // A live now-playing update is useful only while current (60 s). Let it
-  // take the next Last.fm token before historical/live listen backlog.
+  // take the next Last.fm token before historical/live listen backlog, at most
+  // once per NOW_PLAYING_PRIORITY_INTERVAL_MS per link.
   candidates.sort(
     (a, b) =>
       Number(b.nowPlaying) - Number(a.nowPlaying) ||
@@ -807,7 +828,7 @@ function pickJob(rt: ForwardRuntime, now: number, localWork: Map<string, { remai
       a.oldest - b.oldest ||
       a.link.id.localeCompare(b.link.id),
   );
-  for (const { link } of candidates) {
+  for (const { link, nowPlaying } of candidates) {
     if (!upstreamFree(rt, link, now)) continue;
     let budget = localWork.get(link.id);
     if (budget === undefined) {
@@ -817,7 +838,10 @@ function pickJob(rt: ForwardRuntime, now: number, localWork: Map<string, { remai
     const job = rt.db.tx(
       () => nowPlayingJob(rt, link, now) ?? older(scrobbleJob(rt, link, now), loveJob(rt, link, now, budget!)),
     );
-    if (job !== null) return job;
+    if (job !== null) {
+      if (nowPlaying && job.kind === 'nowplaying') boostedAt.set(link.id, now);
+      return job;
+    }
   }
   return null;
 }

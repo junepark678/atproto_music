@@ -1248,11 +1248,11 @@ describe('Last.fm forwarding', () => {
 
   it('sends pending now playing before an older scrobble on another Last.fm link', async () => {
     const w = await world();
-    const backlogLink = w.linkLastfm(ALICE, 'older_backlog');
+    const backlogLink = w.linkLastfm(BOB, 'older_backlog');
     const playerLink = w.linkLastfm(ALICE, 'current_player');
     const now = w.clock.nowMs();
     enqueueForwards(w.app.db, {
-      did: ALICE,
+      did: BOB,
       linkId: backlogLink.id,
       items: [
         {
@@ -1291,6 +1291,63 @@ describe('Last.fm forwarding', () => {
     expect(w.lastfm.calls.filter({ nsid: 'track.scrobble' })).toHaveLength(0);
     expect(w.rows().find((row) => row.kind === 'nowplaying')).toMatchObject({ state: 'sent' });
     expect(w.rows().find((row) => row.kind === 'scrobble')).toMatchObject({ state: 'queued' });
+  });
+
+  it("boosts one link's now playing ahead of other links at most once per NOW_PLAYING_PRIORITY_INTERVAL_MS", async () => {
+    const w = await world();
+    const backlogLink = w.linkLastfm(BOB, 'older_backlog');
+    const playerLink = w.linkLastfm(ALICE, 'current_player');
+    const nowPlayingOn = (title: string) => {
+      const startedAtMs = w.clock.nowMs();
+      enqueueForwards(w.app.db, {
+        did: ALICE,
+        linkId: playerLink.id,
+        items: [
+          {
+            kind: 'nowplaying',
+            startedAtMs,
+            artist: 'Current Artist',
+            track: title,
+            payload: { track: { artist: 'Current Artist', track: title }, startedAtMs, origin: 'lastfm' },
+          },
+        ],
+        now: startedAtMs,
+        random: enqueueRandom,
+      });
+    };
+    enqueueForwards(w.app.db, {
+      did: BOB,
+      linkId: backlogLink.id,
+      items: [
+        {
+          kind: 'scrobble',
+          listenKey: 'starvation-backlog',
+          payload: {
+            listen: { artist: 'Old Artist', track: 'Old Track', listenedAt: '2026-01-14T00:00:00.000Z' },
+            origin: 'lastfm',
+          },
+        },
+      ],
+      now: w.clock.nowMs(),
+      random: enqueueRandom,
+    });
+    w.clock.advance(SECOND);
+    nowPlayingOn('First');
+    await w.run();
+    expect(w.lastfm.nowPlayingCalls.map((call) => call.track)).toEqual(['First']);
+    expect(w.lastfm.calls.count({ nsid: 'track.scrobble' })).toBe(0);
+
+    // A second update inside the interval no longer jumps the other link's older scrobble.
+    w.clock.advance(SECOND);
+    nowPlayingOn('Second');
+    await w.run();
+    expect(w.lastfm.calls.count({ nsid: 'track.scrobble' })).toBe(1);
+    expect(w.lastfm.nowPlayingCalls.map((call) => call.track)).toEqual(['First']);
+
+    // It still goes out on the next token, well inside its 60 s lifetime.
+    w.clock.advance(SECOND);
+    await w.run();
+    expect(w.lastfm.nowPlayingCalls.map((call) => call.track)).toEqual(['First', 'Second']);
   });
 
   it('love, unlove, love for one track forwards track.love, track.unlove, track.love in order, and the same track played as now playing twice 10 minutes apart is forwarded twice', async () => {
