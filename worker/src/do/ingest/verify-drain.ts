@@ -208,10 +208,23 @@ export function drainState(db: Db, budget: Pick<SliceBudget, 'concurrentFetches'
  * DRAIN_MIN_INTERVAL_MS from now (the queue is the source of truth, so this
  * replaces whatever was stored), or cancel it when the queue is empty.
  */
-export function scheduleDrainTimer(db: Db, now: number): number | null {
+export function hasOrphanLiveEvidence(db: Db, now: number): boolean {
+  return (
+    db.one(
+      `SELECT 1 FROM live_record_evidence e
+       WHERE e.expires_at_ms>? AND NOT EXISTS (SELECT 1 FROM hints h WHERE h.uri=e.uri)
+         AND NOT EXISTS (SELECT 1 FROM repo_jobs j WHERE j.did=e.did AND j.kind='snapshot' AND j.state IN ('pending','running'))
+       LIMIT 1`,
+      now,
+    ) !== null
+  );
+}
+
+export function scheduleDrainTimer(db: Db, now: number, orphanRecoveryPending = false): number | null {
   const hintDue = nextHintDue(db);
   const pendingDue = nextPendingRemovalDue(db, now);
-  const next = hintDue === null ? pendingDue : pendingDue === null ? hintDue : Math.min(hintDue, pendingDue);
+  const queued = hintDue === null ? pendingDue : pendingDue === null ? hintDue : Math.min(hintDue, pendingDue);
+  const next = orphanRecoveryPending ? (queued === null ? now : Math.min(now, queued)) : queued;
   if (next === null) {
     cancel(db, 'drain');
     return null;
@@ -684,7 +697,7 @@ export async function drain(m: ModuleDeps, now: number, budget: SliceBudget = m.
       committedOrphanCursor = lastScannedUri;
       orphanReconciled = rows.length < 200;
     }
-    scheduleDrainTimer(m.db, now);
+    scheduleDrainTimer(m.db, now, !state.orphanReconciled && !orphanReconciled);
     if (pendingSweep.groups >= LIVE_SWEEP_LIMIT || pendingSweep.expired >= LIVE_SWEEP_LIMIT)
       schedule(m.db, 'drain', sweptAt + DRAIN_MIN_INTERVAL_MS, { force: true });
   });
