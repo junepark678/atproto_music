@@ -101,7 +101,11 @@ it('hint durable before cursor advance; replay of inclusive cursor creates no du
 
     // A hint write fails: the cursor stays on the previous event (nothing of the
     // failed event is written) and the link drops so the event is not skipped.
-    const beforeFault = { hints: i.db.all('SELECT * FROM hints ORDER BY uri'), cp: checkpointRow(i.db) };
+    const beforeFault = {
+      hints: i.db.all('SELECT * FROM hints ORDER BY uri'),
+      evidence: i.db.all('SELECT * FROM live_record_evidence ORDER BY uri'),
+      cp: checkpointRow(i.db),
+    };
     fault = /INSERT INTO hints/;
     const r11 = await k.externalPut('Carol', S, 'r11', {
       $type: S,
@@ -113,8 +117,13 @@ it('hint durable before cursor advance; replay of inclusive cursor creates no du
     const r11Seq = k.jetstream.events.at(-1)!.seq;
     expect(r11Seq).toBe(lastSeq + 1);
     await flush();
-    expect({ hints: i.db.all('SELECT * FROM hints ORDER BY uri'), cp: checkpointRow(i.db) }).toEqual({
+    expect({
+      hints: i.db.all('SELECT * FROM hints ORDER BY uri'),
+      evidence: i.db.all('SELECT * FROM live_record_evidence ORDER BY uri'),
+      cp: checkpointRow(i.db),
+    }).toEqual({
       hints: beforeFault.hints,
+      evidence: beforeFault.evidence,
       cp: { ...beforeFault.cp, connected: 0, updated_at_ms: k.clock.nowMs() },
     });
     expect(server.last().closeCode).toBe(1011);
@@ -144,6 +153,7 @@ it('hint durable before cursor advance; replay of inclusive cursor creates no du
 
     // M4.1.3/duplicate_commit: the same event delivered twice is one hint and one cursor value.
     const lastEvent = k.jetstream.events.at(-1)!;
+    if (lastEvent.kind !== 'commit') throw new Error('expected Jetstream commit event');
     const text = encodeEvent(lastEvent);
     expect(onMessage(m, text, k.clock.nowMs())).toEqual({
       kind: 'hint',
@@ -153,6 +163,19 @@ it('hint durable before cursor advance; replay of inclusive cursor creates no du
     });
     expect(onMessage(m, text, k.clock.nowMs())).toMatchObject({ kind: 'hint', uri: r11Uri });
     expect(hintUris(i.db)).toEqual([r11Uri]);
+    expect(i.db.one('SELECT up_rev,up_action,up_cid,del_rev FROM live_record_evidence WHERE uri=?', r11Uri)).toEqual(
+      lastEvent.commit.operation === 'delete'
+        ? { up_rev: null, up_action: null, up_cid: null, del_rev: lastEvent.commit.rev }
+        : {
+            up_rev: lastEvent.commit.rev,
+            up_action: lastEvent.commit.operation,
+            up_cid: lastEvent.commit.cid,
+            del_rev: null,
+          },
+    );
+    expect(
+      i.db.one<{ evidence_rev: string | null }>('SELECT evidence_rev FROM hints WHERE uri=?', r11Uri)?.evidence_rev,
+    ).toBe(lastEvent.commit.rev);
     // An ignored event (another collection) still advances the cursor, with no hint;
     // an invalid frame is counted and moves nothing.
     const other = JSON.stringify({

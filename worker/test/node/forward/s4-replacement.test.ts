@@ -7,14 +7,26 @@ import { enqueueListenDelete, hasCanonicalListenSurvivor } from '../../../src/fo
 import { projectionListenKey } from '../../../src/forward/projection';
 import { enqueueForwards } from '../../../src/outbox/forward-enqueue';
 import { tombstoneListen } from '../../../src/sync/tombstones';
-import { ALICE, deleteProof, NOW_MS, OPTS, putProof, repoFor, SCROBBLE, scrobble, seedUser } from '../../write/support';
+import {
+  ALICE,
+  authorizedLiveOptions,
+  deleteProof,
+  NOW_MS,
+  OPTS,
+  putProof,
+  repoFor,
+  SCROBBLE,
+  scrobble,
+  seedUser,
+} from '../../write/support';
 import { withMigratedDb } from '../support/node-db';
 
 const record = scrobble({ artist: 'Björk', track: 'Jóga' });
 const second = Date.parse(record.listenedAt as string) / 1000;
 const [artistKey, musicTrackKey] = trackKey('Björk', 'Jóga');
 const identity = projectionListenKey(ALICE, record.listenedAt as string, artistKey, musicTrackKey);
-const live = { ...OPTS, forwarding: { random: seededRandom(619) } };
+const live = (db: Db, proof: Awaited<ReturnType<typeof putProof>>) =>
+  authorizedLiveOptions(db, proof, seededRandom(619));
 function seedLink(db: Db) {
   seedUser(db, ALICE);
   db.run(
@@ -108,12 +120,12 @@ describe('S4 generation and single replacement', () => {
         seedLink(db);
         db.tx(() => applyRecordProof(db, original, OPTS));
         delivered(db);
-        expect(db.tx(() => applyRecordProof(db, replacement, live)).outcome).toBe('applied');
+        expect(db.tx(() => applyRecordProof(db, replacement, live(db, replacement))).outcome).toBe('applied');
         expect(db.all('SELECT identity_key,listened_at,artist,track FROM listenbrainz_deletes')).toEqual([
           { identity_key: identity, listened_at: second, artist: 'Björk', track: 'Jóga' },
         ]);
         expect(db.all('SELECT listen_second FROM linked_pull_tombstones')).toEqual([{ listen_second: second }]);
-        db.tx(() => applyRecordProof(db, replacement, live));
+        db.tx(() => applyRecordProof(db, replacement, live(db, replacement)));
         expect(db.all('SELECT id FROM listenbrainz_deletes')).toHaveLength(1);
       });
     },
@@ -132,7 +144,7 @@ describe('S4 generation and single replacement', () => {
       db.tx(() => applyRecordProof(db, original, OPTS));
       if (mode === 'retained') db.tx(() => applyRecordProof(db, copy, OPTS));
       delivered(db);
-      db.tx(() => applyRecordProof(db, replacement, mode === 'snapshot' ? OPTS : live));
+      db.tx(() => applyRecordProof(db, replacement, mode === 'snapshot' ? OPTS : live(db, replacement)));
       expect(db.all('SELECT id FROM listenbrainz_deletes')).toHaveLength(0);
       expect(db.all('SELECT identity_key FROM linked_pull_tombstones')).toHaveLength(0);
     });
@@ -153,7 +165,7 @@ describe('S4 generation and single replacement', () => {
       db.tx(() => applyRecordProof(db, single, OPTS));
       db.tx(() => applyRecordProof(db, batch, OPTS));
       delivered(db);
-      db.tx(() => applyRecordProof(db, gone, live));
+      db.tx(() => applyRecordProof(db, gone, live(db, gone)));
       expect(db.all('SELECT id FROM listenbrainz_deletes')).toHaveLength(0);
     });
   });
@@ -182,7 +194,7 @@ describe('S4 canonical batch replacement', () => {
       expect(db.tx(() => applyRecordProof(db, original, OPTS)).outcome).toBe('applied');
       if (mode === 'retained-copy') db.tx(() => applyRecordProof(db, copy, OPTS));
       delivered(db);
-      expect(db.tx(() => applyRecordProof(db, replacement, live)).outcome).toBe('applied');
+      expect(db.tx(() => applyRecordProof(db, replacement, live(db, replacement))).outcome).toBe('applied');
       const expected = mode === 'changed-canonical' ? 1 : 0;
       expect(db.all('SELECT identity_key FROM listenbrainz_deletes')).toHaveLength(expected);
       expect(db.all('SELECT identity_key FROM linked_pull_tombstones')).toHaveLength(expected);

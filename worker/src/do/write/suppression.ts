@@ -72,17 +72,21 @@ export interface DisconnectInput {
 /** Drop every local row of `did` and keep only the suppression marker. */
 export function disconnectLocalData(db: Db, did: string, input: DisconnectInput): void {
   if (did === 'global') throw new RangeError('refusing to disconnect the global indexing scope');
-  for (const sql of DISCONNECT_DELETES) db.run(sql, did);
-  cleanupForwardAdmissionsForSuppression(db, did);
-  db.run(
-    `INSERT INTO suppression(did, suppressed_at, settings_uri, settings_rev) VALUES (?, ?, ?, ?)
-     ON CONFLICT(did) DO UPDATE SET suppressed_at = excluded.suppressed_at,
-       settings_uri = excluded.settings_uri, settings_rev = excluded.settings_rev`,
-    did,
-    toStorage(input.nowNs),
-    input.settingsUri,
-    input.settingsRev,
-  );
+  db.tx(() => {
+    // Cancel only already accepted direct decisions before any local state is
+    // removed. The entire suppression transition remains atomic for callers.
+    cleanupForwardAdmissionsForSuppression(db, did);
+    for (const sql of DISCONNECT_DELETES) db.run(sql, did);
+    db.run(
+      `INSERT INTO suppression(did, suppressed_at, settings_uri, settings_rev) VALUES (?, ?, ?, ?)
+       ON CONFLICT(did) DO UPDATE SET suppressed_at = excluded.suppressed_at,
+         settings_uri = excluded.settings_uri, settings_rev = excluded.settings_rev`,
+      did,
+      toStorage(input.nowNs),
+      input.settingsUri,
+      input.settingsRev,
+    );
+  });
 }
 
 export interface SettingsTarget {

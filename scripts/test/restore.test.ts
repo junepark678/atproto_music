@@ -17,6 +17,7 @@
 // 127.2.0.1:8888 is involved.
 
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import {
   chmodSync,
@@ -37,31 +38,72 @@ import { dirname, join, resolve } from 'node:path';
 import * as sqlite from 'node:sqlite';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { fixtureKeys } from '@atmusic/atproto/test-support/keys';
+import { createFixtureKit } from '@atmusic/atproto/test-support/read-models';
 import { type FixtureTransport, routerTransport } from '@atmusic/atproto/test-support/router-transport';
 import { SignedRepo } from '@atmusic/atproto/test-support/signed-repo';
 import { verifyRecordProof } from '@atmusic/atproto/verify/record-proof';
+import { trackKey } from '@atmusic/core/music-key';
 import { type FixedClock, fixedClock } from '@atmusic/core/test-support/clock';
 import { seededRandom } from '@atmusic/core/test-support/random';
 import { fromMs } from '@atmusic/core/timestamp';
 import { build } from 'esbuild';
 import { afterEach, describe, expect, it } from 'vitest';
+import type { ExtensionContext } from '../../worker/src/app/host.ts';
 import { FileRevocations, revocationLogPath } from '../../worker/src/app/revocations.ts';
 import { OAuthSessionStore } from '../../worker/src/bff/oauth-stores.ts';
 import { createWebSessions } from '../../worker/src/bff/sessions.ts';
+import { parseConfig } from '../../worker/src/config.ts';
 import { ensureAccount, renameAccount } from '../../worker/src/credentials/accounts.ts';
 import { createAppPassword, revokeAppPassword, verifyAppPassword } from '../../worker/src/credentials/app-passwords.ts';
 import { type Box, createBox } from '../../worker/src/crypto/box.ts';
+import type { ModuleDeps } from '../../worker/src/do/contracts.ts';
+import { enqueueHints } from '../../worker/src/do/ingest/hints';
+import { cachedIdentityResolver } from '../../worker/src/do/ingest/identity-cache';
+import { recordLiveEvidence } from '../../worker/src/do/ingest/live-evidence';
+import {
+  executeAuthorizedRemovals,
+  nextPendingRemovalDue,
+  recordPendingRemovals,
+} from '../../worker/src/do/ingest/live-pending-removals';
 import { migrate } from '../../worker/src/do/migrate.ts';
-import { SCHEMA_VERSION, TABLE_CLASS } from '../../worker/src/do/schema.ts';
+import { MIGRATIONS, SCHEMA_VERSION, TABLE_CLASS } from '../../worker/src/do/schema.ts';
 import { applyRecordProof } from '../../worker/src/do/write/apply-record.ts';
-import { FORWARD_LOVE_RECORDING_LOOKUP_SQL } from '../../worker/src/forward/forwarder.ts';
-import { deleteLink, getLinkById, openLinkCredential, saveLink } from '../../worker/src/forward/links.ts';
+import { runLinkBackfill } from '../../worker/src/forward/backfill.ts';
+import { settleRows } from '../../worker/src/forward/forward-outbox.ts';
+import {
+  FORWARD_LOVE_RECORDING_LOOKUP_SQL,
+  type ForwardRuntime,
+  runForward,
+} from '../../worker/src/forward/forwarder.ts';
+import { LastfmClient } from '../../worker/src/forward/lastfm-client.ts';
+import {
+  deleteLink,
+  getLinkById,
+  openLinkCredential,
+  patchLink,
+  revokeLink,
+  saveLink,
+} from '../../worker/src/forward/links.ts';
+import { ListenbrainzClient } from '../../worker/src/forward/listenbrainz-client.ts';
+import { reclaimLoveApiProofRows } from '../../worker/src/forward/love-api-maintenance.ts';
+import { materializeLoveApiRecipientDecisions } from '../../worker/src/forward/love-api-materializer.ts';
+import { prepareLoveApiRecipientHandoff } from '../../worker/src/forward/love-api-recipients.ts';
+import { runLoveApiMaintenance } from '../../worker/src/forward/love-api-scheduler.ts';
+import { runDeferredLoveMaintenance } from '../../worker/src/forward/love-deferral-maintenance.ts';
 import { admitForwardIdentity } from '../../worker/src/forward/projection.ts';
+import { UpstreamPacing } from '../../worker/src/forward/upstream-pacing.ts';
 import { enqueueCoverArt, putCoverArt } from '../../worker/src/musicbrainz/cover-art-store.ts';
 import { createBackups } from '../../worker/src/node/backup.ts';
+import { bindPolicyFetch, createPolicyFetch } from '../../worker/src/node/policy-fetch.ts';
 import { type ExitCode, type RunningServer, run } from '../../worker/src/node/run.ts';
 import { parseSecrets, type Secrets } from '../../worker/src/node/secrets.ts';
 import { openSqliteDb, type SqliteDb } from '../../worker/src/node/sqlite-db.ts';
+import { enqueueForwards } from '../../worker/src/outbox/forward-enqueue.ts';
+import { acceptListens } from '../../worker/src/outbox/ingress.ts';
+import { enqueueLove } from '../../worker/src/outbox/love-ops.ts';
+import { cancelUnsent } from '../../worker/src/outbox/operations.ts';
+import { PDS_WRITER_CAPS } from '../../worker/src/outbox/pds-writer.ts';
+import { type OutboxDeps, runOutbox } from '../../worker/src/outbox/runner.ts';
 import {
   captureLog,
   manualTimers,
@@ -69,6 +111,7 @@ import {
   testEnv,
   testSecretsDocument,
 } from '../../worker/test/node/support/app.ts';
+import { authorizedLiveOptions } from '../../worker/test/write/support.ts';
 import { type CommandResult, main, type RestoreStep } from '../admin/restore.ts';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -77,6 +120,7 @@ const DID_A = 'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa';
 const DID_B = 'did:plc:bbbbbbbbbbbbbbbbbbbbbbbb';
 const DID_C = 'did:plc:cccccccccccccccccccccccc';
 const PREFIX = 'com.example.atmusic';
+const LOVE_COLLECTION = `${PREFIX}.love`;
 const LASTFM_SK = 'lastfm-session-key-of-alice-0123456789';
 const ORIGINAL_FETCH = globalThis.fetch;
 
@@ -178,6 +222,12 @@ interface WorldOptions {
   keepWal?: boolean;
   /** Extra SQL run on the live database after the backup. */
   liveSql?: string[];
+  /** SQL run immediately before the backup for stale-backup merge coverage. */
+  backupSql?: string[];
+  /** Production writes run immediately before the online backup. */
+  beforeBackup?: (context: { db: SqliteDb; clock: FixedClock; linkId: string }) => void;
+  /** Production writes run against the live DB after the backup. */
+  afterBackup?: (context: { db: SqliteDb; clock: FixedClock; linkId: string }) => void;
 }
 
 /**
@@ -247,6 +297,9 @@ async function buildWorld(
   ).link.id;
   insertOperation(db, 'op1', DID_A, clock.nowMs());
 
+  for (const sql of options.backupSql ?? []) db.exec(sql);
+  options.beforeBackup?.({ db, clock, linkId: ids.link! });
+
   const backups = createBackups({ db, dir: join(state, 'backups'), clock, log, minFreeBytes: 0, revocations: journal });
   const outcome = await backups.run('manual');
   if (outcome.status !== 'ok') throw new Error(`backup failed: ${JSON.stringify(outcome)}`);
@@ -287,12 +340,548 @@ async function buildWorld(
     oauth.del(DID_B);
   }
   for (const sql of options.liveSql ?? []) db.exec(sql);
+  options.afterBackup?.({ db, clock, linkId: ids.link! });
   journal.close();
 
   const world = { dir, state, dbPath, backupPath, secretsFile, secretsDoc, dist, clock, ids, backupCiphertextA };
   if (options.keepWal === true) return { ...world, live: db };
   db.close();
   return { ...world, live: null };
+}
+
+function populateDeferredLoveState(db: SqliteDb, clock: FixedClock, linkId: string, label: string): string {
+  const now = clock.nowMs();
+  const link = getLinkById(db, linkId);
+  if (link === null) throw new Error(`restore fixture link ${linkId} is missing`);
+  const tag = label.toLowerCase();
+  const loveOperation = `${tag}-delivery-love`;
+  const unloveOperation = `${tag}-deferred-unlove`;
+  const sharedPayload = {
+    artist: 'Restore Matrix Artist',
+    track: `${label} shared track`,
+    recordingMbid: '8f3471b5-7e6a-48da-86a9-c1c07a0f47ae',
+    origin: 'web',
+  };
+  const lovePayload = sharedPayload;
+  const deferredPayload = sharedPayload;
+  db.run("UPDATE linked_accounts SET service='listenbrainz' WHERE id=?", linkId);
+  const [deliveryArtist, deliveryTrack] = trackKey(lovePayload.artist, lovePayload.track);
+  const [deferredArtist, deferredTrack] = trackKey(deferredPayload.artist, deferredPayload.track);
+
+  if (link.forward_scrobbles !== 1) patchLink({ db, clock }, link.did, linkId, { forwardScrobbles: true });
+  db.run("UPDATE linked_accounts SET backfill_state='done' WHERE id=?", linkId);
+  enqueueForwards(db, {
+    did: link.did,
+    items: [{ kind: 'love', operationId: loveOperation, payload: lovePayload }],
+    now,
+    random: seededRandom(label.length + 1),
+  });
+  const storedLoveKey = link.generation === 1 ? loveOperation : `g${link.generation}:${loveOperation}`;
+  const row = db.one<{ id: string }>(
+    "SELECT id FROM forward_outbox WHERE link_id=? AND generation=? AND kind='love' AND dedupe_key=?",
+    linkId,
+    link.generation,
+    storedLoveKey,
+  );
+  if (row === null) throw new Error(`restore fixture ${label} love was not enqueued`);
+  settleRows(db, [row.id], 'sent', now + 1);
+  patchLink({ db, clock }, link.did, linkId, { forwardScrobbles: false });
+
+  const uri = `at://${link.did}/${PREFIX}.love/${tag}-authorized-unlove`;
+  const rev = '3lbcdefghijkm';
+  db.run(
+    `INSERT INTO operations(id,did,kind,origin,priority,collection,rkey,record_json,digest,state,due_at,
+       created_at_ms,updated_at_ms,send_state)
+     VALUES(?,?,'love.delete','web',0,?,?,?,?,'queued',?,?,?,'unsent')`,
+    unloveOperation,
+    link.did,
+    `${PREFIX}.love`,
+    `${tag}-authorized-unlove`,
+    JSON.stringify(deferredPayload),
+    `digest-${tag}`,
+    now,
+    now,
+    now,
+  );
+  enqueueHints(db, [
+    {
+      did: link.did,
+      collection: `${PREFIX}.love`,
+      rkey: `${tag}-authorized-unlove`,
+      source: 'jetstream',
+      hintRev: rev,
+      live: { operation: 'delete' },
+      receiptMs: now,
+    },
+  ]);
+  enqueueForwards(db, {
+    did: link.did,
+    items: [{ kind: 'unlove', operationId: unloveOperation, payload: deferredPayload, authorization: { uri, rev } }],
+    now: now + 2,
+    random: seededRandom(label.length + 2),
+  });
+  // This is the actual bounded maintenance entry point; it initializes and
+  // advances allocator/frontier metadata without fabricating any row ids.
+  runDeferredLoveMaintenance(db, now + 3);
+  if (
+    db.one(
+      'SELECT 1 FROM forward_love_delivery WHERE link_id=? AND love_artist_key=? AND love_track_key=?',
+      linkId,
+      deliveryArtist,
+      deliveryTrack,
+    ) === null ||
+    db.one(
+      'SELECT 1 FROM forward_deferred_love_heads WHERE link_id=? AND love_artist_key=? AND love_track_key=?',
+      linkId,
+      deferredArtist,
+      deferredTrack,
+    ) === null ||
+    db.one(
+      'SELECT 1 FROM forward_deferred_love_intents WHERE link_id=? AND operation_id=?',
+      linkId,
+      unloveOperation,
+    ) === null ||
+    db.one(
+      'SELECT 1 FROM forward_deferred_love_witnesses WHERE link_id=? AND operation_id=?',
+      linkId,
+      unloveOperation,
+    ) === null ||
+    db.one(
+      'SELECT 1 FROM forward_deferred_love_authorities WHERE authorization_uri=? AND authorization_rev=?',
+      uri,
+      rev,
+    ) === null ||
+    db.one('SELECT 1 FROM forward_deferred_love_maintenance WHERE singleton=1') === null
+  )
+    throw new Error(`restore fixture ${label} did not populate all six B2 tables`);
+  return unloveOperation;
+}
+
+const LOVE_API_TABLES = [
+  'love_api_bindings',
+  'love_api_recipients',
+  'love_api_recipient_members',
+  'love_api_comparison_facts',
+  'love_api_window_owners',
+  'love_api_unlove_decisions',
+  'love_api_intent_epochs',
+  'love_api_proof_state',
+] as const;
+
+function populateLoveApiProofState(db: SqliteDb, clock: FixedClock, linkId: string, label: string): string {
+  const link = getLinkById(db, linkId);
+  if (link === null) throw new Error(`restore fixture link ${linkId} is missing`);
+  const now = clock.nowMs();
+  const tag = label.toLowerCase();
+  const uri = `at://${link.did}/${PREFIX}.love/${tag}-api-origin`;
+  const incarnation = `love:${uri}:api:${tag}-api-put`;
+  const apiOperation = `${tag}-api-put`;
+  const pendingOperation = `${tag}-api-pending-put`;
+  const memberUri = `at://${link.did}/${PREFIX}.scrobble/${tag}-removed-member`;
+  const rev = '3lbcdefghijkm';
+  const windowLo = '3lbcdefghijkh';
+  const windowHi = '3lbcdefghijkn';
+  const artist = `Restore ${label} artist`;
+  const track = `Restore ${label} track`;
+  const [artistKey, trackKeyValue] = trackKey(artist, track);
+  const payload = JSON.stringify({ artist, track, origin: 'lastfm' });
+  const horizon = now + 60 * 60_000;
+  const bindingSeq = label === 'Backup' ? 31 : 41;
+  const aggregateSeq = label === 'Backup' ? 32 : 42;
+  const factSeq = label === 'Backup' ? 33 : 43;
+  const dedupe = link.generation === 1 ? apiOperation : `g${link.generation}:${apiOperation}`;
+  db.run(
+    `INSERT INTO operations(id,did,kind,origin,priority,collection,rkey,record_json,digest,state,due_at,
+       created_at_ms,updated_at_ms,send_state)
+     VALUES(?,?,'love.put','lastfm',0,?,?,?,?, 'succeeded',?,?,?,'sent')`,
+    apiOperation,
+    link.did,
+    `${PREFIX}.love`,
+    `${tag}-request-rkey`,
+    JSON.stringify({ $type: `${PREFIX}.love`, artist, track }),
+    `digest-${tag}-api`,
+    now,
+    now,
+    now,
+  );
+  db.run(
+    `INSERT INTO operations(id,did,kind,origin,priority,collection,rkey,record_json,digest,state,due_at,
+       created_at_ms,updated_at_ms,send_state)
+     VALUES(?,?,'love.put','lastfm',0,?,?,?,?, 'queued',?,?,?,'unsent')`,
+    pendingOperation,
+    link.did,
+    `${PREFIX}.love`,
+    `${tag}-pending-rkey`,
+    JSON.stringify({ $type: `${PREFIX}.love`, artist, track }),
+    `digest-${tag}-pending`,
+    now,
+    now,
+    now,
+  );
+  db.run(
+    `INSERT INTO love_incarnations(uri,incarnation_key,state,path,source_service,updated_at_ms)
+     VALUES(?,?,'present','api',NULL,?)`,
+    uri,
+    incarnation,
+    now,
+  );
+  db.run(
+    `INSERT INTO love_api_bindings(did,operation_id,api_origin,uri,incarnation_key,binding_seq,created_at_ms)
+     VALUES(?,?,'lastfm',?,?,?,?)`,
+    link.did,
+    apiOperation,
+    uri,
+    incarnation,
+    bindingSeq,
+    now,
+  );
+  db.run(
+    `INSERT INTO forward_outbox(id,link_id,generation,did,kind,dedupe_key,payload_json,state,attempts,due_at,created_at_ms,updated_at_ms)
+     VALUES(?,?,?,?,?,? ,?,'sent',1,?,?,?)`,
+    `${tag}-api-sent-row`,
+    linkId,
+    link.generation,
+    link.did,
+    'love',
+    dedupe,
+    payload,
+    now,
+    now,
+    now,
+  );
+  db.run(
+    `INSERT INTO love_api_recipients(did,uri,incarnation_key,link_id,generation,aggregate_seq,state,sent_operation_id,created_at_ms,updated_at_ms)
+     VALUES(?,?,?,?,?,?,'sealed',?,?,?)`,
+    link.did,
+    uri,
+    incarnation,
+    linkId,
+    link.generation,
+    aggregateSeq,
+    apiOperation,
+    now,
+    now,
+  );
+  db.run(
+    `INSERT INTO love_api_recipient_members(link_id,generation,operation_id,did,uri,incarnation_key,member_seq,created_at_ms)
+     VALUES(?,?,?,?,?,?,1,?)`,
+    linkId,
+    link.generation,
+    pendingOperation,
+    link.did,
+    uri,
+    incarnation,
+    now,
+  );
+  db.run(
+    `INSERT INTO live_pending_removals(uri,member_uri,removed_cid,kind,window_lo,window_hi,replaced_by_cid,identity_key,
+       listened_at,artist_key,track_key,artist,track,recording_mbid,love_source_service,love_import_sources,
+       authorized_rev,created_at_ms,expires_at_ms,conflict_invalidated,conflicted_auth_rev)
+     VALUES(?,?,?,'love',?,?,? ,?,NULL,?,?,?,?,NULL,'lastfm',NULL,?,?,?,0,NULL)`,
+    uri,
+    memberUri,
+    `removed-${tag}-cid`,
+    windowLo,
+    windowHi,
+    '',
+    incarnation,
+    artistKey,
+    trackKeyValue,
+    artist,
+    track,
+    rev,
+    now,
+    horizon,
+  );
+  db.run(
+    `INSERT INTO love_api_window_owners(uri,member_uri,removed_cid,window_lo,window_hi,replaced_by_cid,did,incarnation_key,link_id,generation,created_at_ms)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+    uri,
+    memberUri,
+    `removed-${tag}-cid`,
+    windowLo,
+    windowHi,
+    '',
+    link.did,
+    incarnation,
+    linkId,
+    link.generation,
+    now,
+  );
+  db.run(
+    `INSERT INTO love_api_comparison_facts(authorization_uri,authorization_rev,fact_seq,action,cid,horizon_ms,created_at_ms)
+     VALUES(?,?,?,'delete','',?,?)`,
+    uri,
+    rev,
+    factSeq,
+    horizon,
+    now,
+  );
+  db.run(
+    `INSERT INTO love_api_unlove_decisions(did,uri,incarnation_key,link_id,generation,artist,track,artist_key,track_key,
+       recording_mbid,payload_json,love_source_service,love_import_sources,authorization_uri,authorization_rev,
+       fact_action,fact_cid,expires_at_ms,due_at_ms,scan_session,alias_epoch,alias_cursor,created_at_ms)
+     VALUES(?,?,?,?,?,?,?,?,?,NULL,?,NULL,NULL,?,?,'delete','',?,?,NULL,NULL,NULL,?)`,
+    link.did,
+    uri,
+    incarnation,
+    linkId,
+    link.generation,
+    artist,
+    track,
+    artistKey,
+    trackKeyValue,
+    payload,
+    uri,
+    rev,
+    horizon,
+    now,
+    now,
+  );
+  db.run(
+    `INSERT INTO love_api_intent_epochs(did,epoch) VALUES(?,?)
+     ON CONFLICT(did) DO UPDATE SET epoch=excluded.epoch`,
+    link.did,
+    label === 'Backup' ? 3 : 5,
+  );
+  db.run(
+    `INSERT INTO love_api_proof_state(singleton,next_binding_seq,next_aggregate_seq,next_fact_seq,updated_at_ms)
+     VALUES(1,?,?,?,?)
+     ON CONFLICT(singleton) DO UPDATE SET next_binding_seq=excluded.next_binding_seq,
+       next_aggregate_seq=excluded.next_aggregate_seq,next_fact_seq=excluded.next_fact_seq,updated_at_ms=excluded.updated_at_ms`,
+    bindingSeq + 1,
+    aggregateSeq + 1,
+    factSeq + 1,
+    now,
+  );
+  for (const table of LOVE_API_TABLES)
+    if (db.one(`SELECT 1 FROM ${table} LIMIT 1`) === null) throw new Error(`restore fixture omitted ${table}`);
+  return uri;
+}
+
+function restoreB2Snapshot(path: string): string {
+  const tables: Array<[string, string]> = [
+    ['forward_love_delivery', 'link_id,generation,love_artist_key,love_track_key'],
+    ['forward_deferred_love_heads', 'link_id,generation,love_artist_key,love_track_key'],
+    ['forward_deferred_love_intents', 'link_id,generation,love_artist_key,love_track_key,intent_seq'],
+    ['forward_deferred_love_witnesses', 'link_id,generation,operation_id'],
+    ['forward_deferred_love_authorities', 'authorization_uri,authorization_rev'],
+    ['forward_deferred_love_maintenance', 'singleton'],
+    ['forward_receipts', 'link_id,generation,kind,dedupe_key'],
+    ['forward_link_gaps', 'link_id,generation,from_seq'],
+    ['forward_outbox', 'id'],
+  ];
+  return JSON.stringify(
+    tables.map(([table, order]) => [table, query(path, `SELECT * FROM ${table} ORDER BY ${order}`)]),
+  );
+}
+
+function restoreLoveApiSnapshot(path: string): string {
+  return JSON.stringify(
+    LOVE_API_TABLES.map((table) => {
+      const columns = query(path, `PRAGMA table_info(${table})`).map((row) => row.name as string);
+      return [table, query(path, `SELECT * FROM ${table} ORDER BY ${columns.join(',')}`)];
+    }),
+  );
+}
+
+async function dispatchListenbrainz(
+  db: SqliteDb,
+  now: number,
+): Promise<{ report: Awaited<ReturnType<typeof runForward>>; feedbacks: unknown[] }> {
+  const feedbacks: unknown[] = [];
+  const clock = { nowMs: () => now };
+  const listenbrainz = new ListenbrainzClient({
+    apiRoot: 'https://listenbrainz.invalid/',
+    fetch: async (_url, init) => {
+      feedbacks.push(JSON.parse(String(init?.body)));
+      return new Response(JSON.stringify({ status: 'ok' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    },
+  });
+  const runtime = {
+    db,
+    clock,
+    random: seededRandom(741),
+    log: { log: () => undefined },
+    box: { openText: () => 'fixture-token' },
+    pacing: new UpstreamPacing(clock),
+    lastfm: null,
+    listenbrainz,
+  } as unknown as ForwardRuntime;
+  return { report: await runForward(runtime, now), feedbacks };
+}
+
+async function produceApiLoveWithRealPds(
+  db: SqliteDb,
+  clock: FixedClock,
+  label: string,
+  reuse?: { rkey: string; artist: string; track: string; album: string; recordingMbid: string },
+) {
+  const kit = await createFixtureKit({ clock });
+  expect(kit.users.Alice.did).toBe(DID_A);
+  const random = seededRandom(label === 'Live' ? 0x71 : 0x70);
+  const box = createBox(parseSecrets(testSecretsDocument()).encryptionKeys, random);
+  const transport = kit.transport;
+  const policyFetch = bindPolicyFetch(createPolicyFetch({ transport }), PDS_WRITER_CAPS);
+  const writers: OutboxDeps['writers'] = {
+    async writerFor(did) {
+      const user = kit.user(did);
+      return {
+        did,
+        scope: 'transition:generic',
+        fetchHandler(pathname, init) {
+          const headers = new Headers(init?.headers);
+          headers.set('authorization', `Bearer ${user.token}`);
+          return policyFetch(new URL(pathname, user.origin), { ...init, headers });
+        },
+      };
+    },
+  };
+  const config = {
+    ...parseConfig(
+      {
+        PUBLIC_ORIGIN: 'https://music.example.test',
+        LEXICON_PREFIX: PREFIX,
+        NAMESPACE_OWNERSHIP_REF: '',
+        NAMESPACE_PUBLICATION_REF: '',
+        INGEST_MODE: 'off',
+        JETSTREAM_URLS: '',
+        JETSTREAM_LOOKBACK_HOURS: '24',
+        RELAY_URL: 'https://relay.example.test',
+      } as Parameters<typeof parseConfig>[0],
+      { allowFixturePrefix: true },
+    ),
+    publication: true,
+    batchPublication: true,
+  };
+  const m: OutboxDeps = {
+    db,
+    clock,
+    random,
+    transport,
+    identity: cachedIdentityResolver(db, { transport, clock }),
+    config,
+    log: captureLog().logger,
+    writers,
+  };
+  const listenbrainzLink = saveLink(
+    { db, clock, random, box },
+    {
+      did: DID_A,
+      service: 'listenbrainz',
+      remoteUser: `restore-${label.toLowerCase()}`,
+      credential: `fixture-${label}-token`,
+    },
+  ).link.id;
+  db.run("UPDATE operations SET state='cancelled' WHERE id IN ('op1','op2')");
+  const projectionRkey = reuse?.rkey ?? `3kimport${label.toLowerCase()}001`;
+  const projectionArtist = reuse?.artist ?? `Producer restore ${label}`;
+  const projectionTrack = reuse?.track ?? 'SENT love';
+  const projectionAlbum = reuse?.album ?? 'Actual producer album';
+  const projectionMbid = reuse?.recordingMbid ?? '12345678-1234-1234-1234-123456789abc';
+  const projectionUri = `at://${DID_A}/${LOVE_COLLECTION}/${projectionRkey}`;
+  await kit.externalPut('Alice', LOVE_COLLECTION, projectionRkey, {
+    $type: LOVE_COLLECTION,
+    artist: projectionArtist,
+    track: projectionTrack,
+    album: projectionAlbum,
+    recordingMbid: projectionMbid,
+    createdAt: new Date(clock.nowMs()).toISOString(),
+  });
+  expect(
+    admitForwardIdentity(db, {
+      did: DID_A,
+      identityKey: `love-uri:${DID_A}:${LOVE_COLLECTION}:${projectionRkey}`,
+      path: 'import',
+      sourceService: 'lastfm',
+      now: clock.nowMs(),
+    }),
+  ).toBe(true);
+  const importedCar = await kit.repos.Alice.getRecordCar(LOVE_COLLECTION, projectionRkey);
+  const importedProof = await verifyRecordProof(importedCar, {
+    did: DID_A,
+    collection: LOVE_COLLECTION,
+    rkey: projectionRkey,
+    signingKey: kit.users.Alice.key.didKey,
+  });
+  const importProofNow = fromMs(clock.nowMs());
+  db.tx(() =>
+    applyRecordProof(db, importedProof, {
+      prefix: PREFIX,
+      nowNs: importProofNow,
+      receiptNs: importProofNow,
+      live: authorizedLiveOptions(db, importedProof, random).live,
+    }),
+  );
+  const created = await enqueueLove(m, {
+    did: DID_A,
+    input: {
+      artist: projectionArtist,
+      track: projectionTrack,
+      album: projectionAlbum,
+      recordingMbid: projectionMbid,
+    },
+    origin: 'lastfm',
+  });
+  if (!created.ok) throw new Error(`restore producer API love rejected: ${created.reason.code}`);
+  for (let attempt = 0; attempt < 4; attempt++) {
+    await runOutbox(m, clock.nowMs());
+    const state = db.one<{ state: string }>('SELECT state FROM operations WHERE id=?', created.operation.id)?.state;
+    if (state === 'succeeded') break;
+    if (state === 'failed') throw new Error('restore producer PDS love failed');
+  }
+  const operation = db.one<{ state: string; rkey: string; result_uri: string | null }>(
+    'SELECT state,rkey,result_uri FROM operations WHERE id=?',
+    created.operation.id,
+  );
+  if (operation?.state !== 'succeeded' || operation.result_uri === null)
+    throw new Error('restore producer PDS love did not reach SENT success');
+  expect(operation.result_uri).toBe(projectionUri);
+  return {
+    kit,
+    m,
+    operationId: created.operation.id,
+    uri: operation.result_uri,
+    rkey: projectionRkey,
+    requestRkey: operation.rkey,
+    listenbrainzLink,
+  };
+}
+
+async function dispatchRestoreLoveTransports(db: SqliteDb, now: number) {
+  const listenbrainzRequests: unknown[] = [];
+  const lastfmRequests: string[] = [];
+  const clock = { nowMs: () => now };
+  const listenbrainz = new ListenbrainzClient({
+    apiRoot: 'https://listenbrainz.invalid/',
+    fetch: async (_url, init) => {
+      listenbrainzRequests.push(JSON.parse(String(init?.body)));
+      return new Response(JSON.stringify({ status: 'ok' }), { status: 200 });
+    },
+  });
+  const lastfm = new LastfmClient({
+    apiRoot: 'https://lastfm.invalid/2.0/',
+    apiKey: 'fixture-key',
+    sharedSecret: 'fixture-secret',
+    fetch: async (_url, init) => {
+      lastfmRequests.push(new URLSearchParams(String(init?.body)).get('method') ?? 'unknown');
+      return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+    },
+  });
+  const runtime = {
+    db,
+    clock,
+    random: seededRandom(0x72),
+    log: { log: () => undefined },
+    box: { openText: () => 'fixture-token' },
+    pacing: new UpstreamPacing(clock),
+    lastfm,
+    listenbrainz,
+  } as unknown as ForwardRuntime;
+  return { report: await runForward(runtime, now), listenbrainzRequests, lastfmRequests };
 }
 
 /** Overwrites the live database with bytes that are not SQLite (a failed disk). */
@@ -569,6 +1158,125 @@ function query(path: string, sql: string, ...params: sqlite.SQLInputValue[]): Re
   }
 }
 
+function downgradeFixtureTo56(path: string): void {
+  const db = openSqliteDb(path, { busyTimeoutMs: BUSY_MS });
+  try {
+    expect(migrate(db, MIGRATIONS)).toEqual({ status: 'ready', version: 57 });
+    db.tx(() => {
+      for (const index of [
+        'love_api_intent_alias_scan',
+        'love_api_active_love_put',
+        'love_api_active_love_put_malformed',
+      ])
+        db.exec(`DROP INDEX ${index}`);
+      for (const table of [
+        'love_api_unlove_decisions',
+        'love_api_window_owners',
+        'love_api_recipient_members',
+        'love_api_recipients',
+        'love_api_bindings',
+        'love_api_comparison_facts',
+        'love_api_intent_epochs',
+        'love_api_proof_state',
+      ])
+        db.exec(`DROP TABLE ${table}`);
+      db.run('DELETE FROM schema_migrations WHERE version=57');
+    });
+    expect(migrate(db, MIGRATIONS.slice(0, 56))).toEqual({ status: 'ready', version: 56 });
+  } finally {
+    db.close();
+  }
+}
+
+function downgradeFixtureTo55(path: string): void {
+  downgradeFixtureTo56(path);
+  const db = openSqliteDb(path, { busyTimeoutMs: BUSY_MS });
+  try {
+    db.tx(() => {
+      db.exec('DROP INDEX forward_outbox_unlove_authority_dependency');
+      for (const table of [
+        'forward_deferred_love_intents',
+        'forward_deferred_love_witnesses',
+        'forward_deferred_love_authorities',
+        'forward_deferred_love_heads',
+        'forward_love_delivery',
+        'forward_deferred_love_maintenance',
+      ])
+        db.exec(`DROP TABLE ${table}`);
+      db.run('DELETE FROM schema_migrations WHERE version=56');
+    });
+    expect(migrate(db, MIGRATIONS.slice(0, 55))).toEqual({ status: 'ready', version: 55 });
+  } finally {
+    db.close();
+  }
+}
+
+function sha256(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+function canonicalSchema(db: sqlite.DatabaseSync | SqliteDb): string {
+  const sql = "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name";
+  const rows = 'prepare' in db ? db.prepare(sql).all() : db.exec(sql);
+  return rows
+    .map((row) => {
+      const value = row as { type: string; name: string; tbl_name: string; sql: string };
+      return `${value.type}\t${value.name}\t${value.tbl_name}\t${value.sql.replace(/\\s+/g, ' ').trim()}`;
+    })
+    .join('\n');
+}
+
+interface Schema56Manifest extends Record<string, string | number> {
+  schemaVersion: number;
+}
+
+function verifySchema56Fixture(sql: string, metadataText: string, manifest: Schema56Manifest, schema: string): void {
+  if (manifest.sourceCommit !== '5d573706bf07bb50e0c8b79cf1d34a3f6c56a975')
+    throw new Error('fixture source pin mismatch');
+  if (manifest.sqlSha256 !== sha256(sql)) throw new Error('schema-56 SQL fixture checksum mismatch');
+  if (manifest.metadataSha256 !== sha256(metadataText)) throw new Error('schema-56 metadata checksum mismatch');
+  if (manifest.canonicalMigration1To56DdlSha256 !== sha256(schema))
+    throw new Error('schema-56 canonical DDL checksum mismatch');
+}
+
+/** Load the one-time old-producer SQL export; CI does not need historical Git objects. */
+function loadSchema56Fixture(outputPath: string): Record<string, string> {
+  const sql = readFileSync(new URL('./fixtures/schema56-parent-producer.sql', import.meta.url), 'utf8');
+  const metadataText = readFileSync(new URL('./fixtures/schema56-parent-producer.json', import.meta.url), 'utf8');
+  const manifest = JSON.parse(
+    readFileSync(new URL('./fixtures/schema56-parent-producer.manifest.json', import.meta.url), 'utf8'),
+  ) as Schema56Manifest;
+  const metadata = JSON.parse(metadataText) as Record<string, string>;
+  const db = new sqlite.DatabaseSync(outputPath);
+  try {
+    db.exec(sql);
+    db.exec('PRAGMA foreign_keys = ON');
+    expect(db.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+    expect(db.prepare('PRAGMA integrity_check').get()).toEqual({ integrity_check: 'ok' });
+    const schema = canonicalSchema(db);
+    const scratchDir = mkdtempSync(join(tmpdir(), 'atmusic-schema56-ddl-'));
+    dirs.push(scratchDir);
+    const scratch = openSqliteDb(join(scratchDir, 'schema56.db'), { create: true, busyTimeoutMs: BUSY_MS });
+    try {
+      expect(migrate(scratch, MIGRATIONS.slice(0, 56))).toEqual({ status: 'ready', version: 56 });
+      verifySchema56Fixture(sql, metadataText, manifest, schema);
+      expect(schema).toBe(canonicalSchema(scratch));
+      expect(manifest.schemaVersion).toBe(56);
+      expect(() => verifySchema56Fixture(`${sql}\n-- altered`, metadataText, manifest, schema)).toThrow(
+        'schema-56 SQL fixture checksum mismatch',
+      );
+      expect(() => verifySchema56Fixture(sql, metadataText, manifest, `${schema}\nALTERED`)).toThrow(
+        'schema-56 canonical DDL checksum mismatch',
+      );
+    } finally {
+      scratch.close();
+    }
+  } finally {
+    db.close();
+  }
+  return metadata;
+}
+
 function boxOf(doc: Record<string, unknown>): { box: Box; secrets: Secrets } {
   const secrets = parseSecrets(doc);
   return { box: createBox(secrets.encryptionKeys, seededRandom(1)), secrets };
@@ -577,6 +1285,1638 @@ function boxOf(doc: Record<string, unknown>): { box: Box; secrets: Secrets } {
 // ---------------------------------------------------------------------------
 
 describe('restore.ts', () => {
+  it('retains live receipts and gaps in a readable restore', async () => {
+    const world = await buildWorld({
+      backupSql: [
+        `INSERT INTO forward_outbox(id,link_id,did,kind,dedupe_key,payload_json,state,attempts,due_at,created_at_ms,updated_at_ms)
+         SELECT 'backup-receipt-row',id,did,'scrobble','backup-receipt','{}','sent',0,10,10,10 FROM linked_accounts WHERE did='${DID_A}'`,
+        `INSERT INTO forward_receipts(link_id,generation,kind,dedupe_key,created_at_ms)
+         SELECT id,generation,'scrobble','backup-receipt',10 FROM linked_accounts WHERE did='${DID_A}'`,
+      ],
+      liveSql: [
+        `INSERT INTO forward_outbox(id,link_id,did,kind,dedupe_key,payload_json,state,attempts,due_at,created_at_ms,updated_at_ms)
+         SELECT 'live-receipt-row',id,did,'love','live-receipt','{}','sent',0,20,20,20 FROM linked_accounts WHERE did='${DID_A}'`,
+        `INSERT INTO forward_receipts(link_id,generation,kind,dedupe_key,created_at_ms)
+         SELECT id,generation,'love','live-receipt',20 FROM linked_accounts WHERE did='${DID_A}'`,
+        `INSERT INTO forward_link_gaps(link_id,generation,from_seq,to_seq,reason,opened_at_ms,closed_at_ms)
+         SELECT id,generation,3,8,'revoked',20,25 FROM linked_accounts WHERE did='${DID_A}'`,
+      ],
+    });
+    const systemd = new FakeSystemd(world, { servicePort: null });
+    await systemd.boot();
+    const result = await restoreCli(world, systemd, [...baseArgs(world), '--no-ready-check']);
+    expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(query(world.dbPath, 'SELECT kind,dedupe_key FROM forward_receipts ORDER BY generation,kind')).toEqual([
+      { kind: 'love', dedupe_key: 'live-receipt' },
+      { kind: 'scrobble', dedupe_key: 'backup-receipt' },
+    ]);
+    expect(query(world.dbPath, 'SELECT generation,from_seq,to_seq,reason FROM forward_link_gaps')).toEqual([
+      { generation: 1, from_seq: 3, to_seq: 8, reason: 'revoked' },
+    ]);
+    expect(query(world.dbPath, 'PRAGMA foreign_key_check')).toEqual([]);
+  });
+
+  it('restores real acceptance, cancellation, revocation, relink, and backfill across a fresh server composition', async () => {
+    const world = await buildWorld();
+    const servicePort = await freePort();
+    const systemd = new FakeSystemd(world, { servicePort });
+    await systemd.boot();
+    let liveServer = systemd.server as Started;
+    const liveDb = liveServer.server.db;
+    const linkId = world.ids.link as string;
+    const now = world.clock.nowMs();
+    const m = {
+      db: liveDb,
+      clock: world.clock,
+      random: seededRandom(0x22),
+      config: liveServer.server.config.app,
+      log: captureLog().logger,
+    } as unknown as ModuleDeps;
+    const makeListen = async (track: string, listenedAt: string) => {
+      const result = await acceptListens(m, {
+        did: DID_A,
+        origin: 'web',
+        listens: [{ input: { artist: 'Restore Artist', track, listenedAt } }],
+        receiptMs: world.clock.nowMs(),
+      });
+      const item = result.results[0];
+      expect(item?.status).toBe('accepted');
+      if (item?.status !== 'accepted' || item.operationId === null) throw new Error('live listen was not accepted');
+      return { ...item, operationId: item.operationId };
+    };
+    const original = getLinkById(liveDb, linkId);
+    expect(original).not.toBeNull();
+    patchLink({ db: liveDb, clock: world.clock }, DID_A, linkId, { forwardScrobbles: false });
+    const cancelled = await makeListen('Cancel then retry', '2026-01-15T11:59:00Z');
+    expect(cancelUnsent(liveDb, cancelled.operationId, now + 1)).toBe(true);
+    expect(liveDb.one('SELECT state FROM operations WHERE id=?', cancelled.operationId)).toEqual({
+      state: 'cancelled',
+    });
+    patchLink({ db: liveDb, clock: world.clock }, DID_A, linkId, { forwardScrobbles: true });
+    const reaccepted = await makeListen('Cancel then retry', '2026-01-15T11:59:00Z');
+    expect(liveDb.one('SELECT state FROM operations WHERE id=?', reaccepted.operationId)).toEqual({ state: 'queued' });
+    expect(
+      liveDb.one('SELECT 1 FROM forward_receipts WHERE link_id=? AND dedupe_key=?', linkId, reaccepted.listenKey),
+    ).not.toBeNull();
+    patchLink({ db: liveDb, clock: world.clock }, DID_A, linkId, { forwardScrobbles: false });
+    const revokedListen = await makeListen('Restore revoked history', '2026-01-15T11:59:30Z');
+    expect(revokeLink(liveDb, original!, 'credential_revoked', now + 2)).toBe(true);
+    expect(liveDb.one('SELECT status FROM linked_accounts WHERE id=?', linkId)).toEqual({ status: 'revoked' });
+
+    const keys = await fixtureKeys();
+    const repo = new SignedRepo(DID_A, keys.alice, { clock: world.clock });
+    const proofs = [] as Array<{
+      proof: Awaited<ReturnType<typeof verifyRecordProof>>;
+      collection: string;
+      rkey: string;
+    }>;
+    for (const operationId of [reaccepted.operationId, revokedListen.operationId]) {
+      const operation = liveDb.one<{ collection: string; rkey: string; record_json: string }>(
+        'SELECT collection,rkey,record_json FROM operations WHERE id=?',
+        operationId,
+      )!;
+      const record = JSON.parse(operation.record_json) as Record<string, unknown>;
+      await repo.put(operation.collection, operation.rkey, record);
+      const proof = await verifyRecordProof(await repo.getRecordCar(operation.collection, operation.rkey), {
+        did: DID_A,
+        collection: operation.collection,
+        rkey: operation.rkey,
+        signingKey: repo.key.didKey,
+      });
+      expect(proof.state).toBe('present');
+      if (proof.state !== 'present') throw new Error('expected signed live record proof');
+      proofs.push({ proof, collection: operation.collection, rkey: operation.rkey });
+      const proofNow = fromMs(world.clock.nowMs());
+      liveDb.tx(() =>
+        applyRecordProof(liveDb, proof, {
+          prefix: PREFIX,
+          nowNs: proofNow,
+          receiptNs: proofNow,
+          live: authorizedLiveOptions(liveDb, proof, seededRandom(0x28)).live,
+        }),
+      );
+    }
+    expect(liveDb.all('SELECT from_seq,to_seq,reason FROM forward_link_gaps WHERE link_id=?', linkId)).toEqual([
+      { from_seq: 0, to_seq: 1, reason: 'disabled' },
+      { from_seq: 2, to_seq: null, reason: 'disabled' },
+    ]);
+
+    // Backup predates disable, cancel/reaccept, revocation and both verified proof applications.
+    const result = await restoreCli(world, systemd, [...baseArgs(world), '--listen', `127.0.0.1:${servicePort}`]);
+    expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
+    liveServer = systemd.server as Started;
+    const db = liveServer.server.db;
+    expect(db.one('SELECT state FROM operations WHERE id=?', cancelled.operationId)).toEqual({ state: 'cancelled' });
+    expect(
+      db.one('SELECT 1 FROM forward_receipts WHERE link_id=? AND dedupe_key=?', linkId, reaccepted.listenKey),
+    ).not.toBeNull();
+    for (const { proof } of proofs) {
+      const proofNow = fromMs(world.clock.nowMs());
+      db.tx(() =>
+        applyRecordProof(db, proof, {
+          prefix: PREFIX,
+          nowNs: proofNow,
+          receiptNs: proofNow,
+          live: authorizedLiveOptions(db, proof, seededRandom(0x29)).live,
+        }),
+      );
+    }
+    const secrets = parseSecrets(world.secretsDoc);
+    const box = createBox(secrets.encryptionKeys, seededRandom(0x26));
+    const relinked = saveLink(
+      { db, clock: world.clock, random: seededRandom(0x27), box },
+      { did: DID_A, service: 'lastfm', remoteUser: 'alice', credential: LASTFM_SK },
+    );
+    expect(relinked.link).toMatchObject({ id: world.ids.link, generation: 1, status: 'active' });
+    patchLink({ db, clock: world.clock }, DID_A, linkId, { forwardScrobbles: true });
+    db.run("UPDATE users SET indexing_state='current' WHERE did=?", DID_A);
+    const revision = db.one<{ backfill_run_revision: number; backfill_state: string }>(
+      'SELECT backfill_run_revision,backfill_state FROM linked_accounts WHERE id=?',
+      linkId,
+    );
+    expect(revision?.backfill_state).toBe('pending');
+    await runLinkBackfill(db, seededRandom(0x30), world.clock.nowMs(), 1);
+    const running = db.one<{
+      backfill_run_revision: number;
+      backfill_state: string;
+      backfill_cursor: string | null;
+      backfill_discovery_cursor: string | null;
+    }>(
+      'SELECT backfill_run_revision,backfill_state,backfill_cursor,backfill_discovery_cursor FROM linked_accounts WHERE id=?',
+      linkId,
+    );
+    expect(running?.backfill_state).toBe('running');
+    const progressBeforeCompose = {
+      receiptCount: db.one<{ n: number }>('SELECT count(*) AS n FROM forward_receipts WHERE link_id=?', linkId)?.n,
+      gapRows: db.all('SELECT from_seq,to_seq,reason FROM forward_link_gaps WHERE link_id=? ORDER BY from_seq', linkId),
+    };
+    const oldComposition = liveServer.server;
+    await systemd.systemctl(['stop', 'atmusic.service']);
+    await systemd.systemctl(['start', 'atmusic.service']);
+    liveServer = systemd.server as Started;
+    expect(liveServer.server).not.toBe(oldComposition);
+    const resumedDb = liveServer.server.db;
+    expect(
+      resumedDb.one(
+        'SELECT backfill_state,backfill_run_revision,backfill_cursor,backfill_discovery_cursor FROM linked_accounts WHERE id=?',
+        linkId,
+      ),
+    ).toEqual(running);
+    expect(resumedDb.one<{ n: number }>('SELECT count(*) AS n FROM forward_receipts WHERE link_id=?', linkId)?.n).toBe(
+      progressBeforeCompose.receiptCount,
+    );
+    expect(
+      resumedDb.all('SELECT from_seq,to_seq,reason FROM forward_link_gaps WHERE link_id=? ORDER BY from_seq', linkId),
+    ).toEqual(progressBeforeCompose.gapRows);
+    for (let index = 0; index < 10; index++)
+      await runLinkBackfill(resumedDb, seededRandom(0x31 + index), world.clock.nowMs(), 1);
+
+    expect(resumedDb.one('SELECT state FROM operations WHERE id=?', cancelled.operationId)).toEqual({
+      state: 'cancelled',
+    });
+    expect(
+      resumedDb.one("SELECT count(*) AS n FROM forward_outbox WHERE link_id=? AND kind='scrobble'", linkId),
+    ).toEqual({ n: 3 });
+    expect(
+      resumedDb.one("SELECT count(*) AS n FROM forward_receipts WHERE link_id=? AND kind='scrobble'", linkId),
+    ).toEqual({ n: 3 });
+    expect(resumedDb.one('SELECT backfill_state FROM linked_accounts WHERE id=?', linkId)).toEqual({
+      backfill_state: 'done',
+    });
+    await systemd.systemctl(['stop', 'atmusic.service']);
+    expect(query(world.dbPath, 'PRAGMA foreign_key_check')).toEqual([]);
+  }, 30_000);
+
+  it('clears migration-55 state when readable live schema 54 has no receipt or gap tables', async () => {
+    const world = await buildWorld({
+      backupSql: [
+        `INSERT INTO forward_receipts(link_id,generation,kind,dedupe_key,created_at_ms)
+         SELECT id,generation,'scrobble','backup-only',1 FROM linked_accounts WHERE did='${DID_A}'`,
+        `INSERT INTO forward_link_gaps(link_id,generation,from_seq,to_seq,reason,opened_at_ms,closed_at_ms)
+         SELECT id,generation,0,1,'disabled',1,2 FROM linked_accounts WHERE did='${DID_A}'`,
+      ],
+    });
+    const oldLivePath = join(world.dir, 'live-schema-54.db');
+    const oldLive = openSqliteDb(oldLivePath, { create: true, busyTimeoutMs: BUSY_MS });
+    expect(migrate(oldLive, MIGRATIONS.slice(0, 54))).toEqual({ status: 'ready', version: 54 });
+    oldLive.run(
+      `INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,created_at_ms,updated_at_ms)
+       VALUES(?,?,'lastfm','alice',X'00','e1',1,1)`,
+      world.ids.link!,
+      DID_A,
+    );
+    oldLive.run(
+      `INSERT INTO forward_outbox(id,link_id,did,kind,dedupe_key,payload_json,state,attempts,due_at,created_at_ms,updated_at_ms)
+       VALUES('live-54-row',?,?,'scrobble','live-54-key','{}','sent',0,1,1,1)`,
+      world.ids.link!,
+      DID_A,
+    );
+    oldLive.close();
+
+    const liveWorld = { ...world, dbPath: oldLivePath };
+    const systemd = new FakeSystemd(liveWorld, { servicePort: null });
+    await systemd.boot();
+    const result = await restoreCli(liveWorld, systemd, [...baseArgs(liveWorld), '--no-ready-check']);
+    expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
+    const restored = openSqliteDb(oldLivePath, { busyTimeoutMs: BUSY_MS });
+    try {
+      expect(restored.one('SELECT id FROM forward_outbox WHERE link_id=?', world.ids.link!)).toEqual({
+        id: 'live-54-row',
+      });
+      expect(restored.one('SELECT 1 FROM forward_receipts')).toBeNull();
+      expect(restored.one('SELECT 1 FROM forward_link_gaps')).toBeNull();
+    } finally {
+      restored.close();
+    }
+    expect(query(oldLivePath, 'PRAGMA foreign_key_check')).toEqual([]);
+  });
+
+  it('migrates a real schema-55 backup to 56 while preserving a readable schema-55 live receipt and gap', async () => {
+    const world = await buildWorld({
+      backupSql: [
+        `INSERT INTO forward_receipts(link_id,generation,kind,dedupe_key,created_at_ms)
+         SELECT id,generation,'scrobble','schema55-receipt',101 FROM linked_accounts WHERE did='${DID_A}'`,
+        `INSERT INTO forward_link_gaps(link_id,generation,from_seq,to_seq,reason,opened_at_ms,closed_at_ms)
+         SELECT id,generation,4,7,'disabled','101','102' FROM linked_accounts WHERE did='${DID_A}'`,
+      ],
+      liveSql: [
+        `INSERT INTO forward_receipts(link_id,generation,kind,dedupe_key,created_at_ms)
+         SELECT id,generation,'scrobble','schema55-live-receipt',201 FROM linked_accounts WHERE did='${DID_A}'`,
+        `INSERT INTO forward_link_gaps(link_id,generation,from_seq,to_seq,reason,opened_at_ms,closed_at_ms)
+         SELECT id,generation,8,9,'disabled','201','202' FROM linked_accounts WHERE did='${DID_A}'`,
+      ],
+    });
+    const backup55 = join(world.dir, 'backup-schema-55.db');
+    const live55 = join(world.dir, 'live-schema-55.db');
+    copyFileSync(world.backupPath, backup55);
+    copyFileSync(world.dbPath, live55);
+    downgradeFixtureTo55(backup55);
+    downgradeFixtureTo55(live55);
+    expect(query(backup55, 'SELECT max(version) AS v FROM schema_migrations')).toEqual([{ v: 55 }]);
+    expect(query(live55, 'SELECT max(version) AS v FROM schema_migrations')).toEqual([{ v: 55 }]);
+
+    const oldWorld = { ...world, dbPath: live55, backupPath: backup55 };
+    const systemd = new FakeSystemd(oldWorld, { servicePort: null });
+    await systemd.boot();
+    const result = await restoreCli(oldWorld, systemd, [...baseArgs(oldWorld), '--no-ready-check']);
+    expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.stdout).toContain('migrated the copy from version 55 to 57');
+    const restored = openSqliteDb(live55, { busyTimeoutMs: BUSY_MS });
+    try {
+      expect(restored.one('SELECT max(version) AS version FROM schema_migrations')).toEqual({ version: 57 });
+      expect(restored.all('SELECT kind,dedupe_key,created_at_ms FROM forward_receipts ORDER BY dedupe_key')).toEqual([
+        { kind: 'scrobble', dedupe_key: 'schema55-live-receipt', created_at_ms: 201 },
+        { kind: 'scrobble', dedupe_key: 'schema55-receipt', created_at_ms: 101 },
+      ]);
+      expect(
+        restored.all(
+          'SELECT from_seq,to_seq,reason FROM forward_link_gaps WHERE link_id=? ORDER BY from_seq',
+          world.ids.link!,
+        ),
+      ).toEqual([
+        { from_seq: 4, to_seq: 7, reason: 'disabled' },
+        { from_seq: 8, to_seq: 9, reason: 'disabled' },
+      ]);
+      for (const table of [
+        'forward_love_delivery',
+        'forward_deferred_love_heads',
+        'forward_deferred_love_intents',
+        'forward_deferred_love_witnesses',
+        'forward_deferred_love_authorities',
+        'forward_deferred_love_maintenance',
+      ])
+        expect(restored.one(`SELECT 1 AS present FROM ${table}`)).toBeNull();
+    } finally {
+      restored.close();
+    }
+    expect(query(live55, 'PRAGMA foreign_key_check')).toEqual([]);
+  }, 30_000);
+
+  it('migrates real schema-56 backup and live files to 57 through the restore CLI', async () => {
+    const world = await buildWorld();
+    const backup56 = join(world.dir, 'backup-schema-56.db');
+    const live56 = join(world.dir, 'live-schema-56.db');
+    copyFileSync(world.backupPath, backup56);
+    copyFileSync(world.dbPath, live56);
+    downgradeFixtureTo56(backup56);
+    downgradeFixtureTo56(live56);
+    expect(query(backup56, 'SELECT max(version) AS v FROM schema_migrations')).toEqual([{ v: 56 }]);
+    expect(query(live56, 'SELECT max(version) AS v FROM schema_migrations')).toEqual([{ v: 56 }]);
+
+    const oldWorld = { ...world, dbPath: live56, backupPath: backup56 };
+    const systemd = new FakeSystemd(oldWorld, { servicePort: null });
+    await systemd.boot();
+    const result = await restoreCli(oldWorld, systemd, [...baseArgs(oldWorld), '--no-ready-check']);
+    expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.stdout).toContain('migrated the copy from version 56 to 57');
+    const restored = openSqliteDb(live56, { busyTimeoutMs: BUSY_MS });
+    try {
+      expect(restored.one('SELECT max(version) AS version FROM schema_migrations')).toEqual({ version: 57 });
+      expect(
+        restored.all("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'love_api_%' ORDER BY name"),
+      ).toHaveLength(8);
+      expect(
+        restored.all("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'love_api_%' ORDER BY name"),
+      ).toHaveLength(9);
+      for (const table of LOVE_API_TABLES)
+        expect(restored.one(`SELECT count(*) AS count FROM ${table}`), table).toEqual({ count: 0 });
+    } finally {
+      restored.close();
+    }
+    expect(query(live56, 'PRAGMA foreign_key_check')).toEqual([]);
+  }, 30_000);
+
+  it('restores an exact-parent schema-56 API/PDS reused projection without historical proof, then proves a new post-upgrade SENT', async () => {
+    const world = await buildWorld();
+    const parentDb = join(world.dir, 'schema-56-parent-producer.db');
+    const parent = loadSchema56Fixture(parentDb) as {
+      apiId: string;
+      reuseId: string;
+      uri: string;
+      rkey: string;
+      historicalUri: string;
+      positiveUri: string;
+      positiveRkey: string;
+    };
+    expect(query(parentDb, 'SELECT max(version) AS version FROM schema_migrations')).toEqual([{ version: 56 }]);
+    expect(query(parentDb, "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'love_api_%'")).toEqual([]);
+    expect(
+      query(
+        parentDb,
+        'SELECT id,state,result_uri FROM operations WHERE id IN (?,?) ORDER BY id',
+        parent.apiId,
+        parent.reuseId,
+      ),
+    ).toEqual([
+      { id: parent.apiId, state: 'succeeded', result_uri: parent.historicalUri },
+      { id: parent.reuseId, state: 'succeeded', result_uri: parent.uri },
+    ]);
+    expect(query(parentDb, 'SELECT uri,path FROM love_incarnations WHERE uri=?', parent.uri)).toEqual([
+      { uri: parent.uri, path: 'import' },
+    ]);
+    expect(query(parentDb, 'SELECT uri,rkey FROM loves WHERE uri=?', parent.uri)).toEqual([
+      { uri: parent.uri, rkey: parent.rkey },
+    ]);
+
+    // Use the exact-parent file as both the real backup and stopped live state.
+    rmSync(`${world.dbPath}-wal`, { force: true });
+    rmSync(`${world.dbPath}-shm`, { force: true });
+    copyFileSync(parentDb, world.dbPath);
+    copyFileSync(parentDb, world.backupPath);
+    const oldWorld = { ...world };
+    const servicePort = await freePort();
+    const systemd = new FakeSystemd(oldWorld, { servicePort });
+    await systemd.boot();
+    await systemd.systemctl(['stop', 'atmusic.service', 'atmusic.socket']);
+    const result = await restoreCli(oldWorld, systemd, [...baseArgs(oldWorld), '--listen', `127.0.0.1:${servicePort}`]);
+    expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.stdout).toContain('migrated the copy from version 56 to 57');
+    expect(systemd.server).not.toBeNull();
+    const db = systemd.server!.server.db;
+    expect(db.one('SELECT max(version) AS version FROM schema_migrations')).toEqual({ version: 57 });
+    expect(db.one('SELECT 1 FROM love_api_bindings WHERE operation_id=?', parent.apiId)).toBeNull();
+    expect(db.one('SELECT 1 FROM love_api_bindings WHERE operation_id=?', parent.reuseId)).toBeNull();
+    for (const table of LOVE_API_TABLES) expect(db.one(`SELECT count(*) AS n FROM ${table}`), table).toEqual({ n: 0 });
+    // A new post-upgrade API admission reuses that legacy projection through the
+    // real PDS fixture. Its exact SENT is the first source of recipient authority.
+    const restoreBox = createBox(parseSecrets(world.secretsDoc).encryptionKeys, seededRandom(0x66));
+    const lastfm = saveLink(
+      { db, clock: world.clock, random: seededRandom(0x67), box: restoreBox },
+      { did: DID_A, service: 'lastfm', remoteUser: 'schema56-same-remote', credential: 'schema56-resume-token' },
+    ).link;
+    const source = await produceApiLoveWithRealPds(db, world.clock, 'Live', {
+      rkey: parent.positiveRkey,
+      artist: 'Legacy API producer',
+      track: 'Legacy SENT projection',
+      album: 'Legacy producer album',
+      recordingMbid: '12345678-1234-1234-1234-123456789abc',
+    });
+    expect(source.uri).toBe(parent.positiveUri);
+    expect(source.requestRkey).not.toBe(source.rkey);
+    expect(db.one('SELECT state,result_uri FROM operations WHERE id=?', source.operationId)).toEqual({
+      state: 'succeeded',
+      result_uri: parent.positiveUri,
+    });
+    const currentBinding = db.all<{
+      did: string;
+      operation_id: string;
+      api_origin: string;
+      uri: string;
+      incarnation_key: string;
+    }>(
+      'SELECT did,operation_id,api_origin,uri,incarnation_key FROM love_api_bindings WHERE operation_id=?',
+      source.operationId,
+    );
+    expect(currentBinding).toHaveLength(1);
+    expect(currentBinding[0]).toMatchObject({
+      did: DID_A,
+      operation_id: source.operationId,
+      api_origin: 'lastfm',
+      uri: parent.positiveUri,
+    });
+    const currentRecipients = db.all<{
+      did: string;
+      uri: string;
+      incarnation_key: string;
+      link_id: string;
+      generation: number;
+      state: string;
+      sent_operation_id: string | null;
+      service: string;
+      current_generation: number;
+    }>(
+      `SELECT r.did,r.uri,r.incarnation_key,r.link_id,r.generation,r.state,r.sent_operation_id,
+         l.service,l.generation AS current_generation
+       FROM love_api_recipients r JOIN linked_accounts l ON l.id=r.link_id AND l.did=r.did
+       WHERE r.uri=? ORDER BY l.service`,
+      source.uri,
+    );
+    expect(currentRecipients).toHaveLength(2);
+    expect(currentRecipients.map(({ service }) => service)).toEqual(['lastfm', 'listenbrainz']);
+    expect(currentRecipients.map(({ link_id }) => link_id).sort()).toEqual([lastfm.id, source.listenbrainzLink].sort());
+    for (const recipient of currentRecipients)
+      expect(recipient).toMatchObject({
+        did: DID_A,
+        uri: source.uri,
+        incarnation_key: currentBinding[0]!.incarnation_key,
+        generation: recipient.current_generation,
+      });
+
+    const firstDelivery = await dispatchRestoreLoveTransports(db, world.clock.nowMs());
+    expect(firstDelivery.report.requests).toBe(2);
+    expect(firstDelivery.lastfmRequests).toEqual(['track.love']);
+    expect(firstDelivery.listenbrainzRequests).toEqual([
+      { recording_mbid: '12345678-1234-1234-1234-123456789abc', score: 1 },
+    ]);
+    const deliveredLoveRows = db.all<{
+      did: string;
+      kind: string;
+      link_id: string;
+      generation: number;
+      dedupe_key: string;
+      state: string;
+      authorization_uri: string | null;
+      payload_json: string;
+    }>(
+      `SELECT did,kind,link_id,generation,dedupe_key,state,authorization_uri,payload_json
+       FROM forward_outbox WHERE kind='love' AND dedupe_key=? ORDER BY link_id`,
+      source.operationId,
+    );
+    expect(deliveredLoveRows).toHaveLength(2);
+    expect(deliveredLoveRows.map(({ link_id }) => link_id).sort()).toEqual([lastfm.id, source.listenbrainzLink].sort());
+    for (const row of deliveredLoveRows) {
+      expect(row).toMatchObject({
+        did: DID_A,
+        kind: 'love',
+        dedupe_key: source.operationId,
+        state: 'sent',
+        authorization_uri: null,
+      });
+      expect(JSON.parse(row.payload_json)).toEqual({
+        artist: 'Legacy API producer',
+        track: 'Legacy SENT projection',
+        album: 'Legacy producer album',
+        recordingMbid: '12345678-1234-1234-1234-123456789abc',
+        origin: 'lastfm',
+      });
+      expect(currentRecipients.find((recipient) => recipient.link_id === row.link_id)?.generation).toBe(row.generation);
+    }
+    const loveRow = db.one<{
+      uri: string;
+      cid: string;
+      artist_key: string;
+      track_key: string;
+      artist: string;
+      track: string;
+      recording_mbid: string | null;
+    }>('SELECT uri,cid,artist_key,track_key,artist,track,recording_mbid FROM loves WHERE uri=?', source.uri)!;
+    const incarnation = db.one<{ incarnation_key: string }>(
+      "SELECT incarnation_key FROM love_incarnations WHERE uri=? AND state='present'",
+      source.uri,
+    )!;
+    const presentProof = await verifyRecordProof(
+      await source.kit.repos.Alice.getRecordCar(LOVE_COLLECTION, source.rkey),
+      {
+        did: DID_A,
+        collection: LOVE_COLLECTION,
+        rkey: source.rkey,
+        signingKey: source.kit.users.Alice.key.didKey,
+      },
+    );
+    expect(presentProof.state).toBe('present');
+    if (presentProof.state !== 'present') throw new Error('expected actual PDS present proof');
+    expect(revokeLink(db, lastfm, 'credential_revoked', world.clock.nowMs())).toBe(true);
+    const listenbrainzLink = getLinkById(db, source.listenbrainzLink)!;
+    expect(
+      patchLink({ db, clock: world.clock }, DID_A, listenbrainzLink.id, { forwardScrobbles: false }),
+    ).not.toBeNull();
+    const deleteCommit = await source.kit.externalDelete('Alice', LOVE_COLLECTION, source.rkey);
+    const absentProof = await verifyRecordProof(
+      await source.kit.repos.Alice.getRecordCar(LOVE_COLLECTION, source.rkey),
+      {
+        did: DID_A,
+        collection: LOVE_COLLECTION,
+        rkey: source.rkey,
+        signingKey: source.kit.users.Alice.key.didKey,
+      },
+    );
+    expect(absentProof.state).toBe('absent');
+    if (absentProof.state !== 'absent') throw new Error('expected PDS absence proof');
+    const absenceRev = absentProof.commit.rev;
+    recordPendingRemovals(db, [
+      {
+        did: DID_A,
+        uri: source.uri,
+        kind: 'love',
+        row: {
+          ...loveRow,
+          listened_at: new Date(world.clock.nowMs()).toISOString(),
+          record_uri: null,
+          listen_id: null,
+        },
+        identityKey: incarnation.incarnation_key,
+        windowLo: presentProof.commit.rev,
+        windowHi: deleteCommit.rev,
+        replacedByCid: null,
+        nowMs: world.clock.nowMs(),
+      },
+    ]);
+    recordLiveEvidence(
+      db,
+      {
+        uri: source.uri,
+        did: DID_A,
+        collection: LOVE_COLLECTION,
+        rkey: source.rkey,
+        rev: absenceRev,
+        action: 'delete',
+      },
+      world.clock.nowMs(),
+    );
+    db.tx(() =>
+      applyRecordProof(db, absentProof, {
+        prefix: PREFIX,
+        nowNs: fromMs(world.clock.nowMs()),
+        receiptNs: fromMs(world.clock.nowMs()),
+        live: authorizedLiveOptions(db, absentProof, seededRandom(0x68)).live,
+      }),
+    );
+    expect(db.one('SELECT count(*) AS n FROM love_api_window_owners WHERE uri=?', source.uri)).toEqual({ n: 2 });
+    const currentDecisions = db.all<{
+      did: string;
+      uri: string;
+      incarnation_key: string;
+      link_id: string;
+      generation: number;
+      authorization_uri: string;
+      authorization_rev: string;
+      fact_action: string;
+      fact_cid: string;
+      payload_json: string;
+      service: string;
+    }>(
+      `SELECT d.did,d.uri,d.incarnation_key,d.link_id,d.generation,d.authorization_uri,d.authorization_rev,
+         d.fact_action,d.fact_cid,d.payload_json,l.service
+       FROM love_api_unlove_decisions d JOIN linked_accounts l ON l.id=d.link_id AND l.did=d.did
+       WHERE d.uri=? ORDER BY l.service`,
+      source.uri,
+    );
+    expect(currentDecisions).toHaveLength(1);
+    expect(currentDecisions[0]).toMatchObject({
+      did: DID_A,
+      uri: source.uri,
+      incarnation_key: currentBinding[0]!.incarnation_key,
+      link_id: lastfm.id,
+      generation: lastfm.generation,
+      authorization_uri: source.uri,
+      authorization_rev: absenceRev,
+      fact_action: 'delete',
+      fact_cid: '',
+      service: 'lastfm',
+    });
+    expect(JSON.parse(currentDecisions[0]!.payload_json)).toEqual({
+      artist: 'Legacy API producer',
+      track: 'Legacy SENT projection',
+      album: 'Legacy producer album',
+      recordingMbid: '12345678-1234-1234-1234-123456789abc',
+      origin: 'lastfm',
+    });
+    expect(db.one('SELECT 1 FROM love_api_bindings WHERE operation_id=?', parent.apiId)).toBeNull();
+    expect(db.one('SELECT 1 FROM love_api_bindings WHERE operation_id=?', parent.reuseId)).toBeNull();
+    expect(
+      materializeLoveApiRecipientDecisions(db, world.clock.nowMs(), seededRandom(0x69), 'schema56-paused'),
+    ).toMatchObject({
+      queued: 0,
+    });
+    const paused = await dispatchRestoreLoveTransports(db, world.clock.nowMs() + 1_000);
+    expect(paused.report.requests).toBe(0);
+    expect(paused.lastfmRequests).toEqual([]);
+    expect(paused.listenbrainzRequests).toEqual([]);
+
+    // Re-enable the same remotes; a second timer pass may create one effect per
+    // current recipient, and the real fake transports must accept it once.
+    expect(
+      saveLink(
+        { db, clock: world.clock, random: seededRandom(0x6a), box: restoreBox },
+        { did: DID_A, service: 'lastfm', remoteUser: lastfm.remote_user, credential: 'schema56-resume-token' },
+      ).link.generation,
+    ).toBe(lastfm.generation);
+    expect(
+      patchLink({ db, clock: world.clock }, DID_A, listenbrainzLink.id, { forwardScrobbles: true }),
+    ).not.toBeNull();
+    db.run("UPDATE users SET indexing_state='current' WHERE did=?", DID_A);
+    db.run(
+      "UPDATE linked_accounts SET backfill_state='running',backfill_discovery_done=1 WHERE did=? AND status='active' AND forward_scrobbles=1",
+      DID_A,
+    );
+    const timer = systemd
+      .server!.server.features.features.flatMap((feature) => feature.extensions ?? [])
+      .find((extension) => extension.name === 'link-backfill')?.timers?.['link-backfill'];
+    expect(timer).toBeTypeOf('function');
+    const scheduled: number[] = [];
+    const timerContext = {
+      schedule: (_name: 'link-backfill', at: number) => scheduled.push(at),
+      kick: () => null,
+    } as unknown as ExtensionContext;
+    const timerNow = world.clock.nowMs() + 30_000;
+    for (let turn = 0; turn < 8; turn++) await timer!(timerNow + turn * 1_000, timerContext);
+    expect(scheduled.length).toBeGreaterThan(0);
+    const unloveRows = db.all<{
+      did: string;
+      service: string;
+      link_id: string;
+      generation: number;
+      dedupe_key: string;
+      state: string;
+    }>(
+      `SELECT o.did,l.service,o.link_id,o.generation,o.dedupe_key,o.state FROM forward_outbox o JOIN linked_accounts l ON l.id=o.link_id
+      WHERE o.kind='unlove' AND o.authorization_uri=? ORDER BY l.service`,
+      source.uri,
+    );
+    expect(unloveRows).toHaveLength(2);
+    expect(unloveRows.map(({ service }) => service)).toEqual(['lastfm', 'listenbrainz']);
+    expect(unloveRows.map(({ link_id }) => link_id).sort()).toEqual([lastfm.id, source.listenbrainzLink].sort());
+    expect(
+      unloveRows.every(
+        (row) =>
+          row.did === DID_A &&
+          row.generation === (row.service === 'lastfm' ? lastfm.generation : listenbrainzLink.generation),
+      ),
+    ).toBe(true);
+    expect(unloveRows.filter((row) => row.dedupe_key.endsWith(':api-recipient'))).toHaveLength(1);
+    const dispatch = await dispatchRestoreLoveTransports(db, timerNow + 10_000);
+    expect(dispatch.lastfmRequests.filter((method) => method === 'track.unlove')).toHaveLength(1);
+    expect(dispatch.listenbrainzRequests.filter((row) => (row as { score?: number }).score === 0)).toHaveLength(1);
+    const rerun = await dispatchRestoreLoveTransports(db, timerNow + 20_000);
+    expect(rerun.report.requests).toBe(0);
+    await stopServer(systemd.server!.server);
+    systemd.server = null;
+    expect(query(world.dbPath, 'PRAGMA foreign_key_check')).toEqual([]);
+  }, 30_000);
+
+  it('restores populated schema-57 API-love proof rows from live after operation and sent-outbox cleanup', async () => {
+    let liveUri: string | null = null;
+    const world = await buildWorld({
+      beforeBackup: ({ db, clock, linkId }) => {
+        populateDeferredLoveState(db, clock, linkId, 'Backup');
+        populateLoveApiProofState(db, clock, linkId, 'Backup');
+      },
+      afterBackup: ({ db, clock, linkId }) => {
+        populateDeferredLoveState(db, clock, linkId, 'Live');
+        liveUri = populateLoveApiProofState(db, clock, linkId, 'Live');
+        db.run('DELETE FROM operations WHERE id=?', 'live-api-put');
+        db.run("DELETE FROM forward_outbox WHERE id='live-api-sent-row'");
+      },
+    });
+    expect(liveUri).not.toBeNull();
+    for (const table of LOVE_API_TABLES) {
+      expect(query(world.backupPath, `SELECT count(*) AS count FROM ${table}`)[0]?.count, `${table} backup`).toBe(1);
+      const expectedLiveRows = table === 'love_api_intent_epochs' || table === 'love_api_proof_state' ? 1 : 2;
+      expect(query(world.dbPath, `SELECT count(*) AS count FROM ${table}`)[0]?.count, `${table} live`).toBe(
+        expectedLiveRows,
+      );
+    }
+    expect(query(world.backupPath, 'SELECT api_origin FROM love_api_bindings')).toEqual([{ api_origin: 'lastfm' }]);
+    expect(query(world.dbPath, 'SELECT api_origin,operation_id FROM love_api_bindings ORDER BY operation_id')).toEqual([
+      { api_origin: 'lastfm', operation_id: 'backup-api-put' },
+      { api_origin: 'lastfm', operation_id: 'live-api-put' },
+    ]);
+    expect(query(world.dbPath, "SELECT 1 AS present FROM operations WHERE id='live-api-put'")).toEqual([]);
+    expect(query(world.dbPath, "SELECT 1 AS present FROM forward_outbox WHERE id='live-api-sent-row'")).toEqual([]);
+
+    const servicePort = await freePort();
+    const systemd = new FakeSystemd(world, { servicePort });
+    await systemd.boot();
+    const result = await restoreCli(world, systemd, [...baseArgs(world), '--listen', `127.0.0.1:${servicePort}`]);
+    expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
+    const db = systemd.server!.server.db;
+    expect(db.one('SELECT max(version) AS version FROM schema_migrations')).toEqual({ version: 57 });
+    for (const table of LOVE_API_TABLES) {
+      const expectedRows = table === 'love_api_intent_epochs' || table === 'love_api_proof_state' ? 1 : 2;
+      expect(db.one(`SELECT count(*) AS count FROM ${table}`), table).toEqual({ count: expectedRows });
+    }
+    expect(
+      db.one('SELECT api_origin,operation_id FROM love_api_bindings WHERE operation_id=?', 'live-api-put'),
+    ).toEqual({
+      api_origin: 'lastfm',
+      operation_id: 'live-api-put',
+    });
+    expect(db.one('SELECT state,sent_operation_id FROM love_api_recipients WHERE uri=?', liveUri)).toEqual({
+      state: 'sealed',
+      sent_operation_id: 'live-api-put',
+    });
+    expect(db.one('SELECT 1 FROM operations WHERE id=?', 'live-api-put')).toBeNull();
+    expect(db.one('SELECT 1 FROM forward_outbox WHERE id=?', 'live-api-sent-row')).toBeNull();
+    expect(
+      materializeLoveApiRecipientDecisions(db, world.clock.nowMs(), seededRandom(77), 'restore-fresh-session'),
+    ).toMatchObject({ visited: 2, awaiting: 2, queued: 0, refused: 0 });
+    const l2Timer = systemd
+      .server!.server.features.features.flatMap((feature) => feature.extensions ?? [])
+      .find((extension) => extension.name === 'link-backfill')?.timers?.['link-backfill'];
+    expect(l2Timer).toBeTypeOf('function');
+    const scheduled: number[] = [];
+    const timerNow = world.clock.nowMs() + 2_000;
+    const timerContext = {
+      schedule: (_name: 'link-backfill', at: number) => {
+        scheduled.push(at);
+        return at;
+      },
+      kick: () => null,
+    } as unknown as ExtensionContext;
+    let finalTimerNow = timerNow;
+    for (let turn = 0; turn < 8; turn++) {
+      finalTimerNow = timerNow + turn * 1_000;
+      await l2Timer!(finalTimerNow, timerContext);
+      const due = db.one<{ due: number }>('SELECT min(due_at_ms) AS due FROM love_api_unlove_decisions')?.due;
+      if (due !== undefined && due > finalTimerNow) break;
+    }
+    expect(scheduled.length).toBeGreaterThan(0);
+    expect(db.one<{ due: number }>('SELECT min(due_at_ms) AS due FROM love_api_unlove_decisions')!.due).toBeGreaterThan(
+      timerNow,
+    );
+    expect(reclaimLoveApiProofRows(db, world.clock.nowMs())).toMatchObject({ visited: 2, bindingsDeleted: 0 });
+    expect(db.one('SELECT api_origin FROM love_api_bindings WHERE operation_id=?', 'live-api-put')).toEqual({
+      api_origin: 'lastfm',
+    });
+    await stopServer(systemd.server!.server);
+    systemd.server = null;
+    expect(query(world.dbPath, 'PRAGMA foreign_key_check')).toEqual([]);
+    expect(query(world.backupPath, 'PRAGMA foreign_key_check')).toEqual([]);
+  }, 30_000);
+
+  it('restores producer-derived API love proof after real PDS SENT, verified absence, and both remote deliveries', async () => {
+    const world = await buildWorld();
+    const db = openSqliteDb(world.dbPath, { busyTimeoutMs: BUSY_MS });
+    let source: Awaited<ReturnType<typeof produceApiLoveWithRealPds>> | null = null;
+    let absenceRev = '';
+    try {
+      source = await produceApiLoveWithRealPds(db, world.clock, 'Live');
+      expect(source.requestRkey).not.toBe(source.rkey);
+      const firstDelivery = await dispatchRestoreLoveTransports(db, world.clock.nowMs());
+      expect(firstDelivery.report.requests).toBe(2);
+      expect(firstDelivery.lastfmRequests).toEqual(['track.love']);
+      expect(firstDelivery.listenbrainzRequests).toEqual([
+        { recording_mbid: '12345678-1234-1234-1234-123456789abc', score: 1 },
+      ]);
+      const apiOperation = db.one<{ state: string; result_uri: string | null; rkey: string }>(
+        'SELECT state,result_uri,rkey FROM operations WHERE id=?',
+        source.operationId,
+      );
+      expect(apiOperation).toMatchObject({ state: 'succeeded', result_uri: source.uri });
+      expect(
+        db.one('SELECT api_origin FROM love_api_bindings WHERE did=? AND operation_id=?', DID_A, source.operationId),
+      ).toEqual({ api_origin: 'lastfm' });
+      const presentProof = await verifyRecordProof(
+        await source.kit.repos.Alice.getRecordCar(LOVE_COLLECTION, source.rkey),
+        {
+          did: DID_A,
+          collection: LOVE_COLLECTION,
+          rkey: source.rkey,
+          signingKey: source.kit.users.Alice.key.didKey,
+        },
+      );
+      expect(presentProof.state).toBe('present');
+      if (presentProof.state !== 'present') throw new Error('expected actual PDS present proof');
+      const proofNow = fromMs(world.clock.nowMs());
+      db.tx(() =>
+        applyRecordProof(db, presentProof, {
+          prefix: PREFIX,
+          nowNs: proofNow,
+          receiptNs: proofNow,
+          live: authorizedLiveOptions(db, presentProof, seededRandom(0x73)).live,
+        }),
+      );
+      const incarnation = db.one<{ incarnation_key: string }>(
+        "SELECT incarnation_key FROM love_incarnations WHERE uri=? AND state='present'",
+        source.uri,
+      )!;
+      const loveRow = db.one<{
+        uri: string;
+        cid: string;
+        artist_key: string;
+        track_key: string;
+        artist: string;
+        track: string;
+        recording_mbid: string | null;
+      }>('SELECT uri,cid,artist_key,track_key,artist,track,recording_mbid FROM loves WHERE uri=?', source.uri)!;
+      const laterLove = await enqueueLove(source.m, {
+        did: DID_A,
+        input: { artist: 'Producer restore pending', track: 'Member survives restore' },
+        origin: 'web',
+      });
+      if (!laterLove.ok) throw new Error(`pending restore API love rejected: ${laterLove.reason.code}`);
+      await runOutbox(source.m, world.clock.nowMs());
+      expect(db.one('SELECT state FROM operations WHERE id=?', laterLove.operation.id)).toEqual({ state: 'succeeded' });
+      expect(db.one('SELECT count(*) AS n FROM love_api_recipient_members')).toEqual({ n: 2 });
+
+      const lastfmLink = getLinkById(db, world.ids.link!);
+      const listenbrainzLink = getLinkById(db, source.listenbrainzLink);
+      if (lastfmLink === null || listenbrainzLink === null) throw new Error('producer recipient link is missing');
+      expect(revokeLink(db, lastfmLink, 'credential_revoked', world.clock.nowMs())).toBe(true);
+      expect(
+        patchLink({ db, clock: world.clock }, DID_A, listenbrainzLink.id, { forwardScrobbles: false }),
+      ).not.toBeNull();
+
+      const deleteCommit = await source.kit.externalDelete('Alice', LOVE_COLLECTION, source.rkey);
+      const absentProof = await verifyRecordProof(
+        await source.kit.repos.Alice.getRecordCar(LOVE_COLLECTION, source.rkey),
+        {
+          did: DID_A,
+          collection: LOVE_COLLECTION,
+          rkey: source.rkey,
+          signingKey: source.kit.users.Alice.key.didKey,
+        },
+      );
+      expect(absentProof.state).toBe('absent');
+      if (absentProof.state !== 'absent') throw new Error('expected actual PDS absence proof');
+      absenceRev = absentProof.commit.rev;
+      recordPendingRemovals(db, [
+        {
+          did: DID_A,
+          uri: source.uri,
+          kind: 'love',
+          row: {
+            uri: loveRow.uri,
+            cid: loveRow.cid,
+            listened_at: new Date(world.clock.nowMs()).toISOString(),
+            artist_key: loveRow.artist_key,
+            track_key: loveRow.track_key,
+            artist: loveRow.artist,
+            track: loveRow.track,
+            recording_mbid: loveRow.recording_mbid,
+            record_uri: null,
+            listen_id: null,
+          },
+          identityKey: incarnation.incarnation_key,
+          windowLo: presentProof.commit.rev,
+          windowHi: deleteCommit.rev,
+          replacedByCid: null,
+          nowMs: world.clock.nowMs(),
+        },
+      ]);
+      recordLiveEvidence(
+        db,
+        {
+          uri: source.uri,
+          did: DID_A,
+          collection: LOVE_COLLECTION,
+          rkey: source.rkey,
+          rev: absenceRev,
+          action: 'delete',
+        },
+        world.clock.nowMs(),
+      );
+      db.tx(() =>
+        applyRecordProof(db, absentProof, {
+          prefix: PREFIX,
+          nowNs: fromMs(world.clock.nowMs()),
+          receiptNs: fromMs(world.clock.nowMs()),
+          live: authorizedLiveOptions(db, absentProof, seededRandom(0x74)).live,
+        }),
+      );
+      expect(db.one('SELECT count(*) AS n FROM love_api_window_owners')).toEqual({ n: 2 });
+      expect(db.one('SELECT count(*) AS n FROM love_api_unlove_decisions')).toEqual({ n: 1 });
+      expect(
+        db.one<{ service: string }>(
+          `SELECT l.service FROM love_api_unlove_decisions d JOIN linked_accounts l ON l.id=d.link_id
+           WHERE d.uri=?`,
+          source.uri,
+        ),
+      ).toEqual({ service: 'lastfm' });
+      expect(
+        db.one('SELECT count(*) AS n FROM love_api_comparison_facts WHERE authorization_rev=?', absenceRev),
+      ).toEqual({
+        n: 1,
+      });
+      const sentRows = db.all<{ id: string }>(
+        "SELECT id FROM forward_outbox WHERE kind='love' AND dedupe_key=? AND state='sent'",
+        source.operationId,
+      );
+      expect(sentRows).toHaveLength(2);
+      db.run('DELETE FROM operations WHERE id=?', source.operationId);
+      for (const row of sentRows) db.run('DELETE FROM forward_outbox WHERE id=?', row.id);
+      expect(db.one('SELECT 1 FROM operations WHERE id=?', source.operationId)).toBeNull();
+      expect(db.one("SELECT 1 FROM forward_outbox WHERE kind='love' AND dedupe_key=?", source.operationId)).toBeNull();
+      expect(db.one('SELECT api_origin FROM love_api_bindings WHERE operation_id=?', source.operationId)).toEqual({
+        api_origin: 'lastfm',
+      });
+    } finally {
+      db.close();
+    }
+
+    const servicePort = await freePort();
+    const systemd = new FakeSystemd(world, { servicePort });
+    await systemd.boot();
+    const priorServer = systemd.server;
+    const result = await restoreCli(world, systemd, [...baseArgs(world), '--listen', `127.0.0.1:${servicePort}`]);
+    expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(systemd.server).not.toBe(priorServer);
+    const restored = systemd.server!.server.db;
+    expect(restored.one('SELECT max(version) AS version FROM schema_migrations')).toEqual({ version: 57 });
+    for (const table of LOVE_API_TABLES) expect(restored.one(`SELECT 1 FROM ${table} LIMIT 1`), table).not.toBeNull();
+    expect(restored.one('SELECT api_origin FROM love_api_bindings WHERE operation_id=?', source!.operationId)).toEqual({
+      api_origin: 'lastfm',
+    });
+    expect(restored.one('SELECT 1 FROM operations WHERE id=?', source!.operationId)).toBeNull();
+    expect(
+      restored.one("SELECT 1 FROM forward_outbox WHERE kind='love' AND dedupe_key=?", source!.operationId),
+    ).toBeNull();
+    expect(restored.one('SELECT count(*) AS n FROM love_api_unlove_decisions')).toEqual({ n: 1 });
+    const restoredProof = restored.all<{
+      did: string;
+      uri: string;
+      incarnation_key: string;
+      link_id: string;
+      generation: number;
+      state: string;
+      sent_operation_id: string | null;
+      service: string;
+      current_generation: number;
+      api_origin: string;
+      authorization_uri: string;
+      authorization_rev: string;
+      decision_action: string;
+      decision_cid: string;
+      payload_json: string;
+      fact_action: string;
+      fact_cid: string;
+      conflicted: number;
+    }>(
+      `SELECT r.did,r.uri,r.incarnation_key,r.link_id,r.generation,r.state,r.sent_operation_id,
+         l.service,l.generation AS current_generation,b.api_origin,d.authorization_uri,d.authorization_rev,
+         d.fact_action AS decision_action,d.fact_cid AS decision_cid,d.payload_json,
+         f.action AS fact_action,f.cid AS fact_cid,f.conflicted
+       FROM love_api_recipients r
+       JOIN linked_accounts l ON l.id=r.link_id AND l.did=r.did
+       JOIN love_api_bindings b ON b.did=r.did AND b.operation_id=r.sent_operation_id
+       LEFT JOIN love_api_unlove_decisions d ON d.did=r.did AND d.uri=r.uri AND d.incarnation_key=r.incarnation_key
+         AND d.link_id=r.link_id AND d.generation=r.generation
+       LEFT JOIN love_api_comparison_facts f ON f.authorization_uri=d.authorization_uri AND f.authorization_rev=d.authorization_rev
+       WHERE r.uri=? ORDER BY l.service`,
+      source!.uri,
+    );
+    expect(restoredProof).toHaveLength(2);
+    expect(restoredProof.map((row) => row.service)).toEqual(['lastfm', 'listenbrainz']);
+    for (const row of restoredProof) {
+      if (row.service === 'listenbrainz') {
+        expect(row.decision_action).toBeNull();
+        expect(row.fact_action).toBeNull();
+        continue;
+      }
+      expect(row).toMatchObject({
+        did: DID_A,
+        uri: source!.uri,
+        state: 'sealed',
+        sent_operation_id: source!.operationId,
+        current_generation: row.generation,
+        api_origin: 'lastfm',
+        authorization_uri: source!.uri,
+        authorization_rev: absenceRev,
+        decision_action: 'delete',
+        decision_cid: '',
+        fact_action: 'delete',
+        fact_cid: '',
+        conflicted: 0,
+      });
+      expect(JSON.parse(row.payload_json)).toEqual({
+        artist: 'Producer restore Live',
+        track: 'SENT love',
+        album: 'Actual producer album',
+        recordingMbid: '12345678-1234-1234-1234-123456789abc',
+        origin: 'lastfm',
+      });
+    }
+    expect(
+      restored.all(
+        'SELECT did,operation_id,uri,incarnation_key,api_origin FROM love_api_bindings WHERE did=? AND operation_id=?',
+        DID_A,
+        source!.operationId,
+      ),
+    ).toEqual([
+      {
+        did: DID_A,
+        operation_id: source!.operationId,
+        uri: source!.uri,
+        incarnation_key: restoredProof[0]!.incarnation_key,
+        api_origin: 'lastfm',
+      },
+    ]);
+    expect(
+      restored.one(
+        'SELECT 1 FROM love_api_recipient_members WHERE did=? AND uri=? AND operation_id=?',
+        DID_A,
+        source!.uri,
+        source!.operationId,
+      ),
+    ).toBeNull();
+    expect(
+      restored.all(
+        'SELECT did,uri,incarnation_key,link_id,generation FROM love_api_window_owners WHERE uri=? ORDER BY link_id',
+        source!.uri,
+      ),
+    ).toEqual(
+      restoredProof
+        .map(({ did, uri, incarnation_key, link_id, generation }) => ({
+          did,
+          uri,
+          incarnation_key,
+          link_id,
+          generation,
+        }))
+        .sort((a, b) => a.link_id.localeCompare(b.link_id)),
+    );
+    const restoredMaintenance = runLoveApiMaintenance(
+      restored,
+      world.clock.nowMs(),
+      seededRandom(0x77),
+      'restore-producer-fresh-session',
+    );
+    expect(restoredMaintenance.decisions).toEqual({
+      queued: 0,
+      deferred: 1,
+      replay: 0,
+      refused: 0,
+      awaiting: 0,
+      expired: 0,
+    });
+    expect(restoredMaintenance.writes).toBeLessThanOrEqual(96);
+    expect(restoredMaintenance.visits).toBeLessThanOrEqual(16);
+    const restoredDecisionPhases = restoredMaintenance.transactions.filter((row) => row.phase === 'l2-decision');
+    // The current transaction trace includes the production pre-unit metadata SELECT in each decision phase.
+    expect(restoredDecisionPhases.map(({ reads, changedRows, visits }) => ({ reads, changedRows, visits }))).toEqual([
+      { reads: 70, changedRows: 12, visits: 1 },
+      { reads: 4, changedRows: 0, visits: 0 },
+    ]);
+    expect(restoredDecisionPhases.every((row) => row.reads <= 128 && row.changedRows <= 28 && row.visits <= 1)).toBe(
+      true,
+    );
+    const timer = systemd
+      .server!.server.features.features.flatMap((feature) => feature.extensions ?? [])
+      .find((extension) => extension.name === 'link-backfill')?.timers?.['link-backfill'];
+    expect(timer).toBeTypeOf('function');
+    const scheduled: number[] = [];
+    const timerNow = world.clock.nowMs() + 2_000;
+    const timerContext = {
+      schedule: (_name: 'link-backfill', at: number) => {
+        scheduled.push(at);
+        return at;
+      },
+      kick: () => null,
+    } as unknown as ExtensionContext;
+    const recipientLinkIds = restored.all<{ id: string; generation: number }>(
+      "SELECT id,generation FROM linked_accounts WHERE did=? AND service IN ('lastfm','listenbrainz') ORDER BY service",
+      DID_A,
+    );
+    expect(recipientLinkIds).toHaveLength(2);
+    const generationByLink = new Map(recipientLinkIds.map((row) => [row.id, row.generation]));
+    const lastfmRow = recipientLinkIds
+      .map(({ id }) => getLinkById(restored, id))
+      .find((row) => row?.service === 'lastfm');
+    const listenbrainzRow = recipientLinkIds
+      .map(({ id }) => getLinkById(restored, id))
+      .find((row) => row?.service === 'listenbrainz');
+    if (lastfmRow === undefined || lastfmRow === null || listenbrainzRow === undefined || listenbrainzRow === null)
+      throw new Error('restored API recipient links are missing');
+    expect(lastfmRow.status).toBe('revoked');
+    expect(listenbrainzRow.forward_scrobbles).toBe(0);
+    for (let turn = 0; turn < 4; turn++) {
+      await timer!(timerNow + turn * 1_000, timerContext);
+      if (restored.one<{ n: number }>('SELECT count(*) AS n FROM love_api_unlove_decisions')?.n === 0) break;
+    }
+    expect(scheduled.length).toBeGreaterThan(0);
+    expect(restored.one('SELECT count(*) AS n FROM love_api_unlove_decisions')).toEqual({ n: 0 });
+    expect(
+      restored.one<{ n: number }>(
+        `SELECT count(*) AS n FROM forward_outbox WHERE kind='unlove' AND authorization_uri=?`,
+        source!.uri,
+      )?.n,
+    ).toBe(0);
+    const pausedDispatch = await dispatchRestoreLoveTransports(restored, timerNow + 1_000);
+    expect(pausedDispatch.report.requests).toBe(0);
+    expect(pausedDispatch.lastfmRequests).toEqual([]);
+    expect(pausedDispatch.listenbrainzRequests).toEqual([]);
+    const restoreBox = createBox(parseSecrets(world.secretsDoc).encryptionKeys, seededRandom(0x75));
+    expect(
+      saveLink(
+        { db: restored, clock: world.clock, random: seededRandom(0x76), box: restoreBox },
+        {
+          did: DID_A,
+          service: 'lastfm',
+          remoteUser: lastfmRow.remote_user,
+          credential: 'resume-fixture-token',
+        },
+      ).link.generation,
+    ).toBe(generationByLink.get(lastfmRow.id));
+    expect(
+      patchLink({ db: restored, clock: world.clock }, DID_A, listenbrainzRow.id, { forwardScrobbles: true })
+        ?.generation,
+    ).toBe(generationByLink.get(listenbrainzRow.id));
+    restored.run("UPDATE users SET indexing_state='current' WHERE did=?", DID_A);
+    // The fixture has already sealed its source-history frontier; resume the real
+    // production coverage lane without asking restore to fetch another history page.
+    restored.run(
+      "UPDATE linked_accounts SET backfill_state='running',backfill_discovery_done=1 WHERE did=? AND status='active' AND forward_scrobbles=1",
+      DID_A,
+    );
+    for (let turn = 0; turn < 4; turn++) await timer!(timerNow + 30_000 + turn * 1_000, timerContext);
+    const queuedUnloves = restored.all<{ service: string; state: string }>(
+      `SELECT l.service,o.state FROM forward_outbox o JOIN linked_accounts l ON l.id=o.link_id
+       WHERE o.kind='unlove' AND o.authorization_uri=?`,
+      source!.uri,
+    );
+    expect(queuedUnloves).toHaveLength(2);
+    expect(queuedUnloves.filter((row) => row.service === 'lastfm')).toHaveLength(1);
+    expect(queuedUnloves.filter((row) => row.service === 'listenbrainz')).toHaveLength(1);
+    expect(
+      restored.one(
+        `SELECT count(*) AS n FROM forward_outbox WHERE kind='unlove' AND authorization_uri=?
+         AND dedupe_key LIKE '%:api-recipient'`,
+        source!.uri,
+      ),
+    ).toEqual({ n: 1 });
+    const dispatchedLastfm: string[] = [];
+    const dispatchedListenbrainz: unknown[] = [];
+    let requestCount = 0;
+    for (let turn = 0; turn < 8; turn++) {
+      const dispatch = await dispatchRestoreLoveTransports(restored, timerNow + 1_000 + turn * 10_000);
+      requestCount += dispatch.report.requests;
+      dispatchedLastfm.push(...dispatch.lastfmRequests);
+      dispatchedListenbrainz.push(...dispatch.listenbrainzRequests);
+      const sent = restored.one<{ n: number }>(
+        `SELECT count(*) AS n FROM forward_outbox WHERE kind='unlove' AND authorization_uri=? AND state='sent'`,
+        source!.uri,
+      )?.n;
+      if (sent === 2) break;
+    }
+    expect(requestCount).toBeGreaterThanOrEqual(2);
+    expect(dispatchedLastfm.filter((method) => method === 'track.unlove')).toHaveLength(1);
+    expect(dispatchedListenbrainz).toContainEqual({
+      recording_mbid: '12345678-1234-1234-1234-123456789abc',
+      score: 0,
+    });
+    expect(dispatchedListenbrainz.filter((request) => (request as { score?: number }).score === 0)).toHaveLength(1);
+    const secondDispatch = await dispatchRestoreLoveTransports(restored, timerNow + 90_000);
+    expect(secondDispatch.report.requests).toBe(0);
+    expect(
+      restored.one('SELECT 1 FROM love_api_bindings WHERE did=? AND operation_id=?', DID_A, source!.operationId),
+    ).toBeNull();
+    await stopServer(systemd.server!.server);
+    systemd.server = null;
+    expect(query(world.dbPath, 'PRAGMA foreign_key_check')).toEqual([]);
+    expect(absenceRev).not.toBe('');
+  }, 30_000);
+
+  it('merges populated schema-56 love state from the readable live DB and reopens it in a fresh server composition', async () => {
+    let backupUnlove: string | null = null;
+    const world = await buildWorld({
+      beforeBackup: ({ db, clock, linkId }) => {
+        backupUnlove = populateDeferredLoveState(db, clock, linkId, 'Backup');
+      },
+      afterBackup: ({ db, clock, linkId }) => {
+        expect(backupUnlove).not.toBeNull();
+        expect(cancelUnsent(db, backupUnlove!, clock.nowMs())).toBe(true);
+        expect(db.one('SELECT 1 FROM forward_deferred_love_intents WHERE operation_id=?', backupUnlove!)).toBeNull();
+        populateDeferredLoveState(db, clock, linkId, 'Live');
+      },
+    });
+    for (const table of [
+      'forward_love_delivery',
+      'forward_deferred_love_heads',
+      'forward_deferred_love_intents',
+      'forward_deferred_love_witnesses',
+      'forward_deferred_love_authorities',
+      'forward_deferred_love_maintenance',
+    ]) {
+      expect(query(world.backupPath, `SELECT count(*) AS n FROM ${table}`)[0]?.n).toBeGreaterThan(0);
+      expect(query(world.dbPath, `SELECT count(*) AS n FROM ${table}`)[0]?.n).toBeGreaterThan(0);
+    }
+    expect(
+      query(
+        world.backupPath,
+        'SELECT count(*) AS n FROM forward_deferred_love_intents WHERE operation_id=?',
+        'backup-deferred-unlove',
+      ),
+    ).toEqual([{ n: 1 }]);
+    expect(
+      query(
+        world.dbPath,
+        'SELECT count(*) AS n FROM forward_deferred_love_intents WHERE operation_id=?',
+        'backup-deferred-unlove',
+      ),
+    ).toEqual([{ n: 0 }]);
+
+    const servicePort = await freePort();
+    const systemd = new FakeSystemd(world, { servicePort });
+    await systemd.boot();
+    const priorComposition = systemd.server;
+    const result = await restoreCli(world, systemd, [...baseArgs(world), '--listen', `127.0.0.1:${servicePort}`]);
+    expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(systemd.server).not.toBe(priorComposition);
+    const db = systemd.server!.server.db;
+    expect(db.one('SELECT max(version) AS version FROM schema_migrations')).toEqual({ version: 57 });
+    expect(
+      db.one("SELECT last_sent_dedupe_key FROM forward_love_delivery WHERE last_sent_dedupe_key='live-delivery-love'"),
+    ).not.toBeNull();
+    expect(
+      db.one("SELECT operation_id FROM forward_deferred_love_intents WHERE operation_id='live-deferred-unlove'"),
+    ).toEqual({
+      operation_id: 'live-deferred-unlove',
+    });
+    expect(
+      db.one("SELECT operation_id FROM forward_deferred_love_witnesses WHERE operation_id='live-deferred-unlove'"),
+    ).toEqual({
+      operation_id: 'live-deferred-unlove',
+    });
+    expect(
+      db.one(
+        "SELECT authorization_uri FROM forward_deferred_love_authorities WHERE authorization_uri LIKE '%live-authorized-unlove'",
+      ),
+    ).not.toBeNull();
+    const allocator = db.one<{ next_head_seq: number; next_group_seq: number; next_authority_seq: number }>(
+      'SELECT next_head_seq,next_group_seq,next_authority_seq FROM forward_deferred_love_maintenance',
+    )!;
+    const frontier = db.one<{
+      head_seq: number;
+      armed_seq: number;
+      group_seq: number;
+      authority_seq: number;
+      due_seq: number;
+      maintenance_seq: number;
+    }>(
+      `SELECT (SELECT coalesce(max(head_seq),0) FROM forward_deferred_love_heads) AS head_seq,
+         (SELECT coalesce(max(armed_seq),0) FROM forward_deferred_love_heads) AS armed_seq,
+         (SELECT coalesce(max(maintenance_seq),0) FROM forward_deferred_love_heads) AS maintenance_seq,
+         (SELECT coalesce(max(group_seq),0) FROM forward_deferred_love_witnesses) AS group_seq,
+         (SELECT coalesce(max(authority_seq),0) FROM forward_deferred_love_authorities) AS authority_seq,
+         (SELECT coalesce(max(due_seq),0) FROM forward_deferred_love_authorities) AS due_seq`,
+    )!;
+    expect(allocator.next_head_seq).toBeGreaterThan(frontier.head_seq);
+    expect(allocator.next_head_seq).toBeGreaterThan(frontier.armed_seq);
+    expect(allocator.next_head_seq).toBeGreaterThan(frontier.maintenance_seq);
+    expect(allocator.next_group_seq).toBeGreaterThan(frontier.group_seq);
+    expect(allocator.next_authority_seq).toBeGreaterThan(frontier.authority_seq);
+    expect(allocator.next_authority_seq).toBeGreaterThan(frontier.due_seq);
+    expect(
+      db.one(
+        `SELECT i.operation_id FROM forward_deferred_love_intents i JOIN forward_deferred_love_authorities a
+           ON a.authorization_uri=i.authorization_uri AND a.authorization_rev=i.authorization_rev
+         WHERE i.operation_id='live-deferred-unlove' AND a.state='active'`,
+      ),
+    ).toEqual({ operation_id: 'live-deferred-unlove' });
+    expect(
+      db.one(
+        `SELECT count(*) AS n FROM forward_deferred_love_heads h
+         JOIN forward_love_delivery d ON d.link_id=h.link_id AND d.generation=h.generation
+           AND d.love_artist_key=h.love_artist_key AND d.love_track_key=h.love_track_key
+         JOIN forward_deferred_love_intents i ON i.link_id=h.link_id AND i.generation=h.generation
+           AND i.love_artist_key=h.love_artist_key AND i.love_track_key=h.love_track_key
+         JOIN forward_deferred_love_witnesses w ON w.link_id=i.link_id AND w.generation=i.generation
+           AND w.operation_id=i.operation_id
+         JOIN forward_deferred_love_authorities a ON a.authorization_uri=i.authorization_uri
+           AND a.authorization_rev=i.authorization_rev
+         WHERE i.operation_id='live-deferred-unlove' AND i.kind='unlove' AND w.kind=i.kind
+           AND w.love_artist_key=i.love_artist_key AND w.love_track_key=i.love_track_key
+           AND w.authorization_uri=i.authorization_uri AND w.authorization_rev=i.authorization_rev
+           AND a.state='active' AND d.last_sent_kind='love' AND d.last_sent_dedupe_key='live-delivery-love'`,
+      ),
+    ).toEqual({ n: 1 });
+    const headSequences = db.one<{ next_seq: number; live_from_seq: number; intent_seq: number }>(
+      `SELECT h.next_seq,h.live_from_seq,max(i.intent_seq) AS intent_seq FROM forward_deferred_love_heads h
+       JOIN forward_deferred_love_intents i USING(link_id,generation,love_artist_key,love_track_key)
+       WHERE i.operation_id='live-deferred-unlove' GROUP BY h.link_id,h.generation,h.love_artist_key,h.love_track_key`,
+    )!;
+    expect(headSequences.next_seq).toBeGreaterThan(headSequences.intent_seq);
+    expect(headSequences.live_from_seq).toBeLessThanOrEqual(headSequences.next_seq);
+    expect(db.one('SELECT 1 FROM forward_deferred_love_intents WHERE operation_id=?', backupUnlove!)).toBeNull();
+    for (const table of [
+      'forward_love_delivery',
+      'forward_deferred_love_heads',
+      'forward_deferred_love_intents',
+      'forward_deferred_love_witnesses',
+      'forward_deferred_love_authorities',
+      'forward_deferred_love_maintenance',
+    ])
+      expect(db.one(`SELECT 1 FROM ${table} LIMIT 1`)).not.toBeNull();
+    patchLink({ db, clock: world.clock }, DID_A, world.ids.link!, { forwardScrobbles: true });
+    db.run("UPDATE users SET indexing_state='current' WHERE did=?", DID_A);
+    const extensions = systemd.server!.server.features.features.flatMap((feature) => feature.extensions ?? []);
+    const backfillTimer = extensions.find((extension) => extension.name === 'link-backfill')?.timers?.['link-backfill'];
+    expect(backfillTimer).toBeTypeOf('function');
+    const scheduled: number[] = [];
+    const timerContext = {
+      schedule: (_name: string, at: number) => {
+        scheduled.push(at);
+        return at;
+      },
+      kick: () => null,
+    } as unknown as ExtensionContext;
+    for (let turn = 0; turn < 8; turn++) {
+      await backfillTimer!(world.clock.nowMs() + turn, timerContext);
+      if (db.one("SELECT 1 FROM forward_outbox WHERE kind='unlove' AND state='queued'") !== null) break;
+    }
+    for (let turn = 8; turn < 16; turn++) {
+      if (
+        db.one<{ backfill_state: string }>('SELECT backfill_state FROM linked_accounts WHERE id=?', world.ids.link!)
+          ?.backfill_state === 'done'
+      )
+        break;
+      await backfillTimer!(world.clock.nowMs() + turn, timerContext);
+    }
+    expect(db.one('SELECT backfill_state FROM linked_accounts WHERE id=?', world.ids.link!)).toEqual({
+      backfill_state: 'done',
+    });
+    expect(scheduled.length).toBeGreaterThan(0);
+    expect(
+      db.one("SELECT state FROM forward_outbox WHERE kind='unlove' AND dedupe_key='live-deferred-unlove'"),
+    ).toEqual({ state: 'queued' });
+    const laterLove = await enqueueLove(systemd.server!.server.app.core.deps, {
+      did: DID_A,
+      input: {
+        artist: 'Restore Matrix Artist',
+        track: 'Live shared track',
+        recordingMbid: '8f3471b5-7e6a-48da-86a9-c1c07a0f47ae',
+      },
+      origin: 'web',
+    });
+    expect(laterLove.ok).toBe(true);
+    if (!laterLove.ok) throw new Error('restore fixture later API love was rejected');
+    expect(db.one('SELECT state FROM operations WHERE id=?', laterLove.operation.id)).toEqual({ state: 'queued' });
+    runDeferredLoveMaintenance(db, world.clock.nowMs() + 20_000);
+    expect(cancelUnsent(db, laterLove.operation.id, world.clock.nowMs() + 21_000)).toBe(true);
+    runDeferredLoveMaintenance(db, world.clock.nowMs() + 22_000);
+    expect(
+      db.one(
+        "SELECT count(*) AS n FROM forward_outbox WHERE kind='unlove' AND dedupe_key='live-deferred-unlove' AND state='queued'",
+      ),
+    ).toEqual({ n: 1 });
+    expect(
+      db.one("SELECT value FROM counters WHERE name='link_coverage' AND label='deferred_coverage_unlove'"),
+    ).toEqual({ value: 1 });
+    const feedbacks: unknown[] = [];
+    for (let turn = 0; turn < 8; turn++) {
+      const delivered = await dispatchListenbrainz(db, world.clock.nowMs() + 10_000 + turn * 10_000);
+      feedbacks.push(...delivered.feedbacks);
+      if (
+        db.one(
+          "SELECT 1 FROM forward_outbox WHERE kind='unlove' AND dedupe_key='live-deferred-unlove' AND state='sent'",
+        ) !== null
+      )
+        break;
+    }
+    expect(feedbacks).toContainEqual({ recording_mbid: '8f3471b5-7e6a-48da-86a9-c1c07a0f47ae', score: 0 });
+    expect(
+      db.one("SELECT state FROM forward_outbox WHERE kind='unlove' AND dedupe_key='live-deferred-unlove'"),
+    ).toEqual({ state: 'sent' });
+    expect(
+      db.one(
+        "SELECT last_sent_kind,last_sent_dedupe_key FROM forward_love_delivery WHERE last_sent_dedupe_key='live-deferred-unlove'",
+      ),
+    ).toEqual({ last_sent_kind: 'unlove', last_sent_dedupe_key: 'live-deferred-unlove' });
+    await stopServer(systemd.server!.server);
+    systemd.server = null;
+    expect(query(world.dbPath, 'PRAGMA foreign_key_check')).toEqual([]);
+  }, 30_000);
+
+  it('keeps populated schema-56 live and backup state intact when the completed merge fails before the file swap', async () => {
+    const world = await buildWorld({
+      beforeBackup: ({ db, clock, linkId }) => {
+        populateDeferredLoveState(db, clock, linkId, 'Backup');
+        populateLoveApiProofState(db, clock, linkId, 'Backup');
+      },
+      afterBackup: ({ db, clock, linkId }) => {
+        populateDeferredLoveState(db, clock, linkId, 'Live');
+        const uri = populateLoveApiProofState(db, clock, linkId, 'Live');
+        db.run('DELETE FROM love_api_recipient_members WHERE uri=?', uri);
+        db.run("DELETE FROM operations WHERE id='live-api-pending-put'");
+        db.run(
+          `UPDATE love_api_unlove_decisions SET recording_mbid=?,payload_json=?,
+             scan_session='old-restore-session',alias_epoch=5,alias_cursor='old-restore-cursor'
+           WHERE uri=?`,
+          '12345678-1234-1234-1234-123456789abc',
+          JSON.stringify({
+            artist: 'Restore Live artist',
+            track: 'Restore Live track',
+            recordingMbid: '12345678-1234-1234-1234-123456789abc',
+            origin: 'lastfm',
+          }),
+          uri,
+        );
+      },
+    });
+    const backupBytes = readFileSync(world.backupPath);
+    const liveBefore = restoreB2Snapshot(world.dbPath);
+    const backupBefore = restoreB2Snapshot(world.backupPath);
+    const liveLoveApiBefore = restoreLoveApiSnapshot(world.dbPath);
+    const backupLoveApiBefore = restoreLoveApiSnapshot(world.backupPath);
+    for (const table of [
+      'forward_love_delivery',
+      'forward_deferred_love_heads',
+      'forward_deferred_love_intents',
+      'forward_deferred_love_witnesses',
+      'forward_deferred_love_authorities',
+      'forward_deferred_love_maintenance',
+    ]) {
+      expect(query(world.dbPath, `SELECT count(*) AS n FROM ${table}`)[0]?.n).toBeGreaterThan(0);
+      expect(query(world.backupPath, `SELECT count(*) AS n FROM ${table}`)[0]?.n).toBeGreaterThan(0);
+    }
+    const servicePort = await freePort();
+    const systemd = new FakeSystemd(world, { servicePort });
+    await systemd.boot();
+    const result = await restoreCli(
+      world,
+      systemd,
+      [...baseArgs(world), '--listen', `127.0.0.1:${servicePort}`],
+      (step) => {
+        if (step === 'merged') throw new Error('injected after complete B2 and L2 merge before file swap');
+      },
+    );
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain('failed (Error)');
+    expect(result.stderr).toContain('both units are left stopped');
+    expect(systemd.server).toBeNull();
+    expect(restoreB2Snapshot(world.dbPath)).toBe(liveBefore);
+    expect(restoreB2Snapshot(world.backupPath)).toBe(backupBefore);
+    expect(restoreLoveApiSnapshot(world.dbPath)).toBe(liveLoveApiBefore);
+    expect(restoreLoveApiSnapshot(world.backupPath)).toBe(backupLoveApiBefore);
+    expect(readFileSync(world.backupPath).equals(backupBytes)).toBe(true);
+    expect(restoreB2Snapshot(`${world.dbPath}.pre-restore`)).toBe(liveBefore);
+    expect(existsSync(`${world.dbPath}.restore.tmp`)).toBe(false);
+    expect(existsSync(`${world.dbPath}.restore.tmp-wal`)).toBe(false);
+    expect(query(world.dbPath, 'PRAGMA foreign_key_check')).toEqual([]);
+    expect(query(`${world.dbPath}.pre-restore`, 'PRAGMA foreign_key_check')).toEqual([]);
+    const reopenedAfterRollback = openSqliteDb(world.dbPath, { busyTimeoutMs: BUSY_MS });
+    try {
+      const candidate = reopenedAfterRollback.one<{
+        did: string;
+        uri: string;
+        incarnation_key: string;
+        link_id: string;
+        generation: number;
+      }>(
+        'SELECT did,uri,incarnation_key,link_id,generation FROM love_api_recipients WHERE uri LIKE ?',
+        '%live-api-origin',
+      );
+      expect(candidate).not.toBeNull();
+      expect(
+        prepareLoveApiRecipientHandoff(
+          reopenedAfterRollback,
+          {
+            did: candidate!.did,
+            uri: candidate!.uri,
+            incarnationKey: candidate!.incarnation_key,
+            linkId: candidate!.link_id,
+            generation: candidate!.generation,
+          },
+          'fresh-after-rollback',
+          world.clock.nowMs(),
+        ).status,
+      ).toBe('ready');
+      expect(
+        reopenedAfterRollback.one<{ scan_session: string; alias_cursor: string }>(
+          'SELECT scan_session,alias_cursor FROM love_api_unlove_decisions WHERE uri=?',
+          candidate!.uri,
+        ),
+      ).toEqual({ scan_session: 'fresh-after-rollback', alias_cursor: '' });
+    } finally {
+      reopenedAfterRollback.close();
+    }
+  }, 30_000);
+
+  it('keeps the newest live evidence, candidate, and pending removal when a readable restore merges an older backup', async () => {
+    const uri = `at://${DID_A}/${PREFIX}.scrobble/evidence-restore`;
+    const identity = 'listen:restore-candidate';
+    const world = await buildWorld({
+      backupSql: [
+        `INSERT INTO live_record_evidence(uri,did,collection,rkey,up_rev,up_action,up_cid,del_rev,conflict_rev,received_ms,expires_at_ms)
+         VALUES('${uri}','${DID_A}','${PREFIX}.scrobble','evidence-restore','2222222222222','create','bafyold',NULL,NULL,1,9999999999999)`,
+        `INSERT INTO live_acceptance_candidates(uri,identity_key,kind,member_uri,cid,created_at_ms,expires_at_ms)
+         VALUES('${uri}','${identity}','scrobble','${uri}','bafyold',1,9999999999999)`,
+        `INSERT INTO live_pending_removals
+         (uri,member_uri,removed_cid,kind,window_lo,window_hi,replaced_by_cid,identity_key,artist_key,track_key,artist,track,
+          authorized_rev,created_at_ms,expires_at_ms)
+         VALUES('${uri}','${uri}','bafyold','scrobble','1111111111111','2222222222222','','${identity}',
+          'artist-key','track-key','Artist','Track',NULL,1,9999999999999)`,
+        `INSERT INTO live_pending_removal_events(uri,rev,action,cid,created_at_ms,expires_at_ms)
+         VALUES('${uri}','2222222222222','delete','',1,9999999999999)`,
+        `INSERT INTO live_pending_removal_reconcile(uri,window_lo,window_hi,replaced_by_cid,cursor_rev,next_due_ms,created_at_ms)
+         VALUES('${uri}','1111111111111','2222222222222','','1111111111111',1,1)`,
+      ],
+      liveSql: [
+        `UPDATE live_record_evidence SET up_rev='3333333333333',up_action='update',up_cid='bafynew' WHERE uri='${uri}'`,
+        `UPDATE live_acceptance_candidates SET cid='bafynew',created_at_ms=2 WHERE uri='${uri}' AND identity_key='${identity}'`,
+        `UPDATE live_pending_removals SET authorized_rev='2222222222222',expires_at_ms=9999999999998 WHERE uri='${uri}'`,
+        `UPDATE live_pending_removals SET conflict_invalidated=1 WHERE uri='${uri}'`,
+        `UPDATE live_pending_removal_events SET conflicted=1,cursor_window_hi='2222222222222',scan_complete=0 WHERE uri='${uri}'`,
+        `UPDATE live_pending_removal_reconcile SET cursor_rev='2222222222222',next_due_ms=2 WHERE uri='${uri}'`,
+      ],
+    });
+    expect(TABLE_CLASS.live_record_evidence).toBe('non-derived');
+    expect(TABLE_CLASS.live_acceptance_candidates).toBe('non-derived');
+    expect(TABLE_CLASS.live_pending_removals).toBe('non-derived');
+    expect(TABLE_CLASS.live_pending_removal_events).toBe('non-derived');
+    expect(TABLE_CLASS.live_pending_removal_reconcile).toBe('non-derived');
+    expect(TABLE_CLASS.forward_receipts).toBe('non-derived');
+    expect(TABLE_CLASS.forward_link_gaps).toBe('non-derived');
+    expect(TABLE_CLASS.forward_love_delivery).toBe('non-derived');
+    expect(TABLE_CLASS.forward_deferred_love_heads).toBe('non-derived');
+    expect(TABLE_CLASS.forward_deferred_love_intents).toBe('non-derived');
+    expect(TABLE_CLASS.forward_deferred_love_witnesses).toBe('non-derived');
+    expect(TABLE_CLASS.forward_deferred_love_authorities).toBe('non-derived');
+    expect(TABLE_CLASS.forward_deferred_love_maintenance).toBe('non-derived');
+    const systemd = new FakeSystemd(world, { servicePort: null });
+    await systemd.boot();
+    const result = await restoreCli(world, systemd, [...baseArgs(world), '--no-ready-check']);
+    expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
+    const db = openSqliteDb(world.dbPath, { busyTimeoutMs: BUSY_MS });
+    try {
+      expect(db.one('SELECT up_rev,up_action,up_cid FROM live_record_evidence WHERE uri=?', uri)).toEqual({
+        up_rev: '3333333333333',
+        up_action: 'update',
+        up_cid: 'bafynew',
+      });
+      expect(
+        db.one(
+          'SELECT cid,created_at_ms FROM live_acceptance_candidates WHERE uri=? AND identity_key=?',
+          uri,
+          identity,
+        ),
+      ).toEqual({
+        cid: 'bafynew',
+        created_at_ms: 2,
+      });
+      expect(
+        db.one('SELECT window_lo,window_hi,authorized_rev,expires_at_ms FROM live_pending_removals WHERE uri=?', uri),
+      ).toEqual({
+        window_lo: '1111111111111',
+        window_hi: '2222222222222',
+        authorized_rev: '2222222222222',
+        expires_at_ms: 9999999999998,
+      });
+      expect(
+        db.one('SELECT conflicted,cursor_window_hi,scan_complete FROM live_pending_removal_events WHERE uri=?', uri),
+      ).toEqual({
+        conflicted: 1,
+        cursor_window_hi: '2222222222222',
+        scan_complete: 0,
+      });
+      expect(db.one('SELECT cursor_rev,next_due_ms FROM live_pending_removal_reconcile WHERE uri=?', uri)).toEqual({
+        cursor_rev: '2222222222222',
+        next_due_ms: 2,
+      });
+      expect(
+        executeAuthorizedRemovals(db, { nowMs: world.clock.nowMs(), random: seededRandom(0xa2), limit: 1 }),
+      ).toMatchObject({
+        groups: 1,
+        effects: 0,
+      });
+      const retainedObservation = {
+        window_lo: '1111111111111',
+        window_hi: '2222222222222',
+        authorized_rev: null,
+        expires_at_ms: 9999999999998,
+      };
+      const pendingObservation = () =>
+        db.all('SELECT window_lo,window_hi,authorized_rev,expires_at_ms FROM live_pending_removals WHERE uri=?', uri);
+      expect(pendingObservation()).toEqual([retainedObservation]);
+      expect(db.one('SELECT cursor_rev,next_due_ms FROM live_pending_removal_reconcile WHERE uri=?', uri)).toEqual({
+        cursor_rev: '1111111111111',
+        next_due_ms: world.clock.nowMs(),
+      });
+      expect(nextPendingRemovalDue(db, world.clock.nowMs())).toBe(world.clock.nowMs());
+      expect(
+        executeAuthorizedRemovals(db, { nowMs: world.clock.nowMs(), random: seededRandom(0xa3), limit: 1 }),
+      ).toMatchObject({ groups: 0, effects: 0 });
+      expect(pendingObservation()).toEqual([retainedObservation]);
+      expect(db.all('SELECT * FROM live_pending_removal_reconcile WHERE uri=?', uri)).toHaveLength(0);
+      expect(db.one('SELECT conflicted FROM live_pending_removal_events WHERE uri=?', uri)).toEqual({ conflicted: 1 });
+      expect(db.all('SELECT * FROM listenbrainz_deletes')).toHaveLength(0);
+      expect(db.all("SELECT * FROM forward_outbox WHERE kind='unlove'")).toHaveLength(0);
+      expect(nextPendingRemovalDue(db, world.clock.nowMs())).toBeGreaterThan(world.clock.nowMs());
+    } finally {
+      db.close();
+    }
+  }, 60_000);
+
   it('preserves live non-derived MusicBrainz and cover-art state while rebuilding derived projections from backup', async () => {
     expect(TABLE_CLASS.mb_tracks).toBe('non-derived');
     expect(TABLE_CLASS.mb_cover_art).toBe('non-derived');
@@ -682,7 +3022,7 @@ describe('restore.ts', () => {
           prefix: PREFIX,
           nowNs,
           receiptNs: nowNs,
-          forwarding: { random: seededRandom(0x51) },
+          live: authorizedLiveOptions(db, recordProof, seededRandom(0x51)).live,
         }),
       );
     };
@@ -808,7 +3148,7 @@ describe('restore.ts', () => {
             prefix: PREFIX,
             nowNs,
             receiptNs: nowNs,
-            forwarding: { random: projectionRandom },
+            live: authorizedLiveOptions(restoredDb, recordProof, projectionRandom).live,
           }),
         );
       expect(apply(await proof()).outcome).toBe('applied');
@@ -1007,7 +3347,25 @@ describe('restore.ts', () => {
   }, 60_000);
 
   it('with an unreadable live database restore prints what will be lost and refuses without --accept-loss', async () => {
-    const world = await buildWorld();
+    let backupLossCounts: number[] = [];
+    const world = await buildWorld({
+      beforeBackup: ({ db, clock, linkId }) => {
+        populateLoveApiProofState(db, clock, linkId, 'Backup');
+        const survivor = saveLink(
+          {
+            db,
+            clock,
+            random: seededRandom(91),
+            box: createBox(parseSecrets(testSecretsDocument()).encryptionKeys, seededRandom(92)),
+          },
+          { did: DID_B, service: 'listenbrainz', remoteUser: 'survivor', credential: 'fake-survivor-token' },
+        ).link;
+        populateLoveApiProofState(db, clock, survivor.id, 'Survivor');
+        backupLossCounts = ['love_api_unlove_decisions', 'love_api_window_owners', 'love_api_recipient_members'].map(
+          (table) => db.one<{ n: number }>(`SELECT count(*) AS n FROM ${table}`)!.n,
+        );
+      },
+    });
     const garbage = corruptLive(world);
     const systemd = new FakeSystemd(world, { servicePort: null });
     await systemd.boot();
@@ -1023,7 +3381,11 @@ describe('restore.ts', () => {
     // What the backup carries, per non-derived table.
     expect(result.stderr).toContain('accounts=2');
     expect(result.stderr).toContain('web_sessions=1');
-    expect(result.stderr).toContain('operations=1');
+    expect(result.stderr).toContain('operations=5');
+    expect(result.stderr).toContain(`pending unlove decisions: ${backupLossCounts[0]}`);
+    expect(result.stderr).toContain(`window owners: ${backupLossCounts[1]}`);
+    expect(result.stderr).toContain(`pending recipient members: ${backupLossCounts[2]}`);
+    expect(result.stderr).not.toContain('did:');
     // revocations.log: the logout and the app-password revocation after the backup.
     expect(result.stderr).toContain(`from revocations.log (2 entries, 2 after the backup)`);
     expect(result.stderr).toContain('refusing without --accept-loss; nothing was changed');
@@ -1284,7 +3646,26 @@ describe('restore.ts', () => {
   }, 30_000);
 
   it('with --accept-loss on an unreadable live db, every web session is gone and each credential, link and OAuth session in revocations.log is deleted from the restored copy', async () => {
-    const world = await buildWorld({ journalLinkAndOauth: true });
+    let backupLossCounts: number[] = [];
+    const world = await buildWorld({
+      journalLinkAndOauth: true,
+      beforeBackup: ({ db, clock, linkId }) => {
+        populateLoveApiProofState(db, clock, linkId, 'Backup');
+        const survivor = saveLink(
+          {
+            db,
+            clock,
+            random: seededRandom(91),
+            box: createBox(parseSecrets(testSecretsDocument()).encryptionKeys, seededRandom(92)),
+          },
+          { did: DID_B, service: 'listenbrainz', remoteUser: 'survivor', credential: 'fake-survivor-token' },
+        ).link;
+        populateLoveApiProofState(db, clock, survivor.id, 'Survivor');
+        backupLossCounts = ['love_api_unlove_decisions', 'love_api_window_owners', 'love_api_recipient_members'].map(
+          (table) => db.one<{ n: number }>(`SELECT count(*) AS n FROM ${table}`)!.n,
+        );
+      },
+    });
     const journal = readFileSync(revocationLogPath(world.state), 'utf8')
       .split('\n')
       .filter((l) => l !== '')
@@ -1292,7 +3673,7 @@ describe('restore.ts', () => {
     expect(journal.map((e) => e.kind)).toEqual(['web_session', 'app_password', 'linked_account', 'oauth_session']);
     // The backup still has all of them.
     expect(query(world.backupPath, 'SELECT count(*) AS n FROM web_sessions')).toEqual([{ n: 1 }]);
-    expect(query(world.backupPath, 'SELECT count(*) AS n FROM linked_accounts')).toEqual([{ n: 1 }]);
+    expect(query(world.backupPath, 'SELECT count(*) AS n FROM linked_accounts')).toEqual([{ n: 2 }]);
     expect(query(world.backupPath, 'SELECT did FROM oauth_sessions ORDER BY did')).toEqual([
       { did: DID_A },
       { did: DID_B },
@@ -1304,9 +3685,36 @@ describe('restore.ts', () => {
         SELECT 100,'restore-cached-love',id,did,'love','restore-cached-love','{}','sent',1,1,1 FROM linked_accounts LIMIT 1;
         INSERT INTO forward_outbox(rowid,id,link_id,did,kind,dedupe_key,payload_json,state,due_at,created_at_ms,updated_at_ms)
         SELECT 101,'restore-cached-unlove',id,did,'unlove','restore-cached-unlove','{}','queued',1,1,1 FROM linked_accounts LIMIT 1;
+        INSERT INTO forward_receipts(link_id,generation,kind,dedupe_key,created_at_ms)
+        SELECT id,1,'scrobble','revoked-link-receipt',1 FROM linked_accounts LIMIT 1;
+        INSERT INTO forward_link_gaps(link_id,generation,from_seq,to_seq,reason,opened_at_ms,closed_at_ms)
+        SELECT id,1,0,1,'disabled',1,2 FROM linked_accounts LIMIT 1;
         INSERT INTO forward_love_recording_targets(forward_rowid,link_id,generation,artist_key,track_key,created_at_ms,recording_mbid)
         SELECT 100,id,1,'band','song',1,'8f3471b5-7e6a-48da-86a9-c1c07a0f47ae' FROM linked_accounts LIMIT 1;
         INSERT INTO forward_unlove_lookup_progress VALUES(101,1,200);
+        INSERT INTO forward_love_delivery(link_id,generation,love_artist_key,love_track_key,last_sent_kind,
+          last_sent_dedupe_key,row_created_at_ms,sent_at_ms)
+          SELECT id,1,'restore-artist','restore-track','love','restore-b2-delivery',1,2 FROM linked_accounts LIMIT 1;
+        INSERT INTO forward_deferred_love_heads(link_id,generation,love_artist_key,love_track_key,head_seq,next_seq,
+          live_from_seq,armed_seq,created_at_ms)
+          SELECT id,1,'restore-artist','restore-track',1,2,1,2,1 FROM linked_accounts LIMIT 1;
+        INSERT INTO forward_deferred_love_intents(link_id,generation,love_artist_key,love_track_key,intent_seq,kind,
+          operation_id,origin_class,payload_json,authorization_uri,authorization_rev,intent_at_ms)
+          SELECT id,1,'restore-artist','restore-track',1,'unlove','restore-b2-intent','authorized','{}',
+            'at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.love/restore','3lbcdefghijkm',1
+          FROM linked_accounts LIMIT 1;
+        INSERT INTO forward_deferred_love_witnesses(link_id,generation,operation_id,group_seq,kind,love_artist_key,
+          love_track_key,authorization_uri,authorization_rev,created_at_ms)
+          SELECT id,1,'restore-b2-intent',1,'unlove','restore-artist','restore-track',
+            'at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.love/restore','3lbcdefghijkm',1
+          FROM linked_accounts LIMIT 1;
+        INSERT INTO forward_deferred_love_authorities(authorization_uri,authorization_rev,authority_seq,action,cid,
+          state,due_seq,created_at_ms)
+          VALUES('at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.love/restore','3lbcdefghijkm',1,
+            'delete','','conflicted',2,1);
+        INSERT INTO forward_deferred_love_maintenance(singleton,next_head_seq,next_group_seq,next_authority_seq,
+          auth_cursor,auth_frontier)
+          VALUES(1,3,2,3,0,2);
       `);
     } finally {
       backup.close();
@@ -1325,14 +3733,97 @@ describe('restore.ts', () => {
     expect(rows('SELECT count(*) AS n FROM web_sessions')).toEqual([{ n: 0 }]);
     expect(rows('SELECT count(*) AS n FROM app_passwords WHERE id = ?', world.ids.p1Id as string)).toEqual([{ n: 0 }]);
     expect(rows('SELECT count(*) AS n FROM app_passwords')).toEqual([{ n: 1 }]); // bob's P3, never revoked
-    expect(rows('SELECT count(*) AS n FROM linked_accounts')).toEqual([{ n: 0 }]);
-    expect(rows('SELECT count(*) AS n FROM forward_outbox')).toEqual([{ n: 0 }]);
-    expect(rows('SELECT count(*) AS n FROM forward_love_recording_targets')).toEqual([{ n: 0 }]);
+    expect(rows('SELECT count(*) AS n FROM linked_accounts')).toEqual([{ n: 1 }]);
+    expect(rows('SELECT id FROM linked_accounts WHERE did=? AND service=?', DID_B, 'listenbrainz')).toHaveLength(1);
+    expect(rows('SELECT count(*) AS n FROM forward_outbox WHERE kind=?', 'unlove')).toEqual([{ n: 0 }]);
+    expect(rows('SELECT count(*) AS n FROM forward_receipts')).toEqual([{ n: 1 }]);
+    expect(rows('SELECT count(*) AS n FROM forward_link_gaps')).toEqual([{ n: 1 }]);
+    expect(rows('SELECT count(*) AS n FROM forward_love_recording_targets')).toEqual([{ n: 1 }]);
     expect(rows('SELECT count(*) AS n FROM forward_unlove_lookup_progress')).toEqual([{ n: 0 }]);
+    expect(rows('SELECT count(*) AS n FROM forward_love_delivery')).toEqual([{ n: 1 }]);
+    expect(rows('SELECT count(*) AS n FROM forward_deferred_love_heads')).toEqual([{ n: 1 }]);
+    expect(rows('SELECT count(*) AS n FROM forward_deferred_love_intents')).toEqual([{ n: 1 }]);
+    expect(rows('SELECT count(*) AS n FROM forward_deferred_love_witnesses')).toEqual([{ n: 1 }]);
+    expect(rows('SELECT count(*) AS n FROM forward_deferred_love_authorities')).toEqual([{ n: 1 }]);
+    expect(
+      rows('SELECT next_head_seq,next_group_seq,next_authority_seq FROM forward_deferred_love_maintenance'),
+    ).toEqual([{ next_head_seq: 3, next_group_seq: 2, next_authority_seq: 3 }]);
+    expect(rows('SELECT count(*) AS n FROM love_api_recipients')).toEqual([{ n: 0 }]);
+    expect(rows('SELECT count(*) AS n FROM love_api_recipient_members')).toEqual([{ n: 0 }]);
+    expect(rows('SELECT count(*) AS n FROM love_api_window_owners')).toEqual([{ n: 0 }]);
+    expect(rows('SELECT count(*) AS n FROM love_api_unlove_decisions')).toEqual([{ n: 0 }]);
+    for (const table of LOVE_API_TABLES) expect(rows(`SELECT count(*) AS n FROM ${table}`), table).toEqual([{ n: 0 }]);
+    expect(rows('SELECT id FROM linked_accounts WHERE did=? AND service=?', DID_B, 'listenbrainz')).toHaveLength(1);
+    expect(rows('SELECT 1 FROM love_api_recipients WHERE did=?', DID_B)).toEqual([]);
+    expect(result.stdout).toContain('Planned loss of L2 pending unlove proof state from the backup');
+    expect(result.stdout).toContain('Discarded L2 pending unlove proof state from the backup');
+    expect(result.stdout).toContain(`pending unlove decisions: ${backupLossCounts[0]}`);
+    expect(result.stdout).toContain(`window owners: ${backupLossCounts[1]}`);
+    expect(result.stdout).toContain(`pending recipient members: ${backupLossCounts[2]}`);
+    expect(result.stdout).not.toContain('did:');
+    const acceptedDb = openSqliteDb(world.dbPath, { busyTimeoutMs: BUSY_MS });
+    try {
+      for (const table of LOVE_API_TABLES)
+        expect(acceptedDb.one(`SELECT count(*) AS n FROM ${table}`), table).toEqual({ n: 0 });
+    } finally {
+      acceptedDb.close();
+    }
     expect(rows('SELECT did FROM oauth_sessions ORDER BY did')).toEqual([{ did: DID_A }]);
+    const restoredDb = openSqliteDb(world.dbPath, { busyTimeoutMs: BUSY_MS });
+    try {
+      runDeferredLoveMaintenance(restoredDb, world.clock.nowMs());
+      runDeferredLoveMaintenance(restoredDb, world.clock.nowMs() + 1);
+      expect(restoredDb.one('SELECT count(*) AS n FROM forward_deferred_love_authorities')).toEqual({ n: 0 });
+      expect(
+        restoredDb.one('SELECT next_head_seq,next_group_seq,next_authority_seq FROM forward_deferred_love_maintenance'),
+      ).toEqual({ next_head_seq: 3, next_group_seq: 2, next_authority_seq: 3 });
+      const unloveRowsBefore = restoredDb.one<{ n: number }>(
+        "SELECT count(*) AS n FROM forward_outbox WHERE kind='unlove'",
+      )?.n;
+      runLoveApiMaintenance(restoredDb, world.clock.nowMs(), seededRandom(0x98), 'post-accept-loss-quiet');
+      expect(restoredDb.one("SELECT count(*) AS n FROM forward_outbox WHERE kind='unlove'")).toEqual({
+        n: unloveRowsBefore,
+      });
+      for (const table of LOVE_API_TABLES.filter((name) => name !== 'love_api_proof_state'))
+        expect(restoredDb.one(`SELECT count(*) AS n FROM ${table}`), table).toEqual({ n: 0 });
+    } finally {
+      restoredDb.close();
+    }
     // The raw unreadable files are kept aside.
     expect(readFileSync(`${world.dbPath}.pre-restore`).equals(Buffer.alloc(8192, 0x5a))).toBe(true);
     expect(rows('PRAGMA integrity_check')).toEqual([{ integrity_check: 'ok' }]);
+  }, 30_000);
+
+  it('a failure after clearing L2 child rows leaves the unreadable live and pre-restore pair untouched', async () => {
+    const world = await buildWorld({
+      beforeBackup: ({ db, clock, linkId }) => {
+        populateLoveApiProofState(db, clock, linkId, 'Rollback');
+      },
+    });
+    const backup = new sqlite.DatabaseSync(world.backupPath);
+    try {
+      backup.exec(`
+        CREATE TRIGGER restore_fail_between_l2_child_and_parent
+        BEFORE DELETE ON love_api_recipients
+        WHEN (SELECT count(*) FROM love_api_recipient_members m
+          WHERE m.did=OLD.did AND m.uri=OLD.uri AND m.incarnation_key=OLD.incarnation_key
+            AND m.link_id=OLD.link_id AND m.generation=OLD.generation)=0
+        BEGIN SELECT RAISE(ABORT, 'injected between L2 child and parent clear'); END;
+      `);
+    } finally {
+      backup.close();
+    }
+    const garbage = corruptLive(world);
+    const systemd = new FakeSystemd(world, { servicePort: null });
+    await systemd.boot();
+    const result = await restoreCli(world, systemd, [...baseArgs(world), '--accept-loss', '--no-ready-check']);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain('failed');
+    expect(readFileSync(world.dbPath).equals(garbage)).toBe(true);
+    expect(readFileSync(`${world.dbPath}.pre-restore`).equals(garbage)).toBe(true);
+    expect(existsSync(`${world.dbPath}.restore.tmp`)).toBe(false);
+    expect(query(world.backupPath, 'SELECT count(*) AS n FROM love_api_recipient_members')).toEqual([{ n: 1 }]);
+    expect(query(world.backupPath, 'SELECT count(*) AS n FROM love_api_recipients')).toEqual([{ n: 1 }]);
   }, 30_000);
 
   it('a live database that opens but fails integrity_check in a non-derived table, with commits only in its WAL, is left byte-identical by the refusal, and --accept-loss keeps that original db and -wal as the pre-restore pair', async () => {

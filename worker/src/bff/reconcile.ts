@@ -23,6 +23,7 @@ import type { Clock } from '@atmusic/core/deps';
 import type { Revocations } from '../app/revocations';
 import type { Logger } from '../do/contracts';
 import type { Db } from '../do/db';
+import { openGapAfterEligibleTransition } from '../forward/coverage';
 import type { NodeConfig } from '../node/config';
 import type { OAuthService } from './oauth-client';
 
@@ -76,11 +77,18 @@ function signOutLocally(deps: ReconcileDeps, did: string, changed: Record<string
       add(table, db.run(`DELETE FROM ${table} WHERE did = ?`, did).rowsWritten);
     }
     add('lastfm_tokens', db.run('DELETE FROM lastfm_tokens WHERE did = ?', did).rowsWritten);
-    for (const r of db.all<{ id: string }>(
-      "SELECT id FROM linked_accounts WHERE did = ? AND status != 'revoked'",
+    for (const r of db.all<{
+      id: string;
+      generation: number;
+      generation_start_seq: number;
+      status: string;
+      forward_scrobbles: number;
+    }>(
+      "SELECT id,generation,generation_start_seq,status,forward_scrobbles FROM linked_accounts WHERE did = ? AND status != 'revoked'",
       did,
     )) {
       revocations.record({ kind: 'linked_account', id: r.id, did });
+      if (r.status === 'active' && r.forward_scrobbles === 1) openGapAfterEligibleTransition(db, r, 'revoked', now);
     }
     add(
       'linked_accounts',

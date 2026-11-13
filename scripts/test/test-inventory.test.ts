@@ -7,8 +7,8 @@
 // - every kept id's describe and test titles are still declared, byte-identical,
 //   in its file, and every replacement id is declared in its file;
 // - every test title declared at 3d953a9 under worker/test/{harness, storage,
-//   ingest, read, write, http} (read from git) is in the inventory, and the
-//   kept ones are still declared in the same file.
+//   ingest, read, write, http} (from the checked-in pinned source fixture) is
+//   in the inventory, and the kept ones are still declared in the same file.
 //
 // "Declared" means the first argument of a `describe(`, `it(` or `test(` call
 // (with any `.skip`/`.only`/`.each(...)` chain) is a string literal with that
@@ -16,7 +16,7 @@
 // comment never counts. Each check also runs against a corrupted inventory or
 // source, so it is not vacuous.
 
-import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -24,7 +24,7 @@ import { describe, expect, it } from 'vitest';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const INVENTORY = 'docs/verification/node-port-inventory.json';
-const BASELINE = '3d953a9';
+const BASELINE = '3d953a91d771a6003472161a5b18329a8ebe2d9c';
 const SEP = ' › ';
 /** The worker-modules suites the shim runs (ADR 0005 §15.1). */
 const MODULE_DIRS = ['harness', 'storage', 'ingest', 'read', 'write', 'http'].map((d) => `worker/test/${d}/`);
@@ -291,18 +291,6 @@ function loadInventory(): Inventory {
   return JSON.parse(readFileSync(join(ROOT, INVENTORY), 'utf8')) as Inventory;
 }
 
-function git(...args: string[]): { ok: boolean; out: string } {
-  const r = spawnSync('git', args, { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
-  return { ok: r.status === 0, out: r.stdout ?? '' };
-}
-
-/** Test titles (file › describes are not needed: titles are unique per file here) declared at a commit. */
-function declaredAt(commit: string, file: string): Declaration[] {
-  const r = git('show', `${commit}:${file}`);
-  if (!r.ok) throw new Error(`git show ${commit}:${file} failed`);
-  return declarations(r.out);
-}
-
 // ---------------------------------------------------------------------------
 
 describe('node-port test inventory', () => {
@@ -405,32 +393,32 @@ describe('node-port test inventory', () => {
     const inModules = doc.tests.filter((e) => MODULE_DIRS.some((d) => e.file.startsWith(d)));
     expect(inModules.length).toBeGreaterThan(150);
 
-    // The baseline declarations, from git when the history holds 3d953a9 (a
-    // shallow clone does not; the inventory, recorded from the executed run at
-    // 3d953a9, is then the baseline).
-    const history = git('cat-file', '-e', `${BASELINE}^{commit}`).ok;
-    let baseline: Array<{ file: string; title: string }>;
-    if (history) {
-      const files = git('ls-tree', '-r', '--name-only', BASELINE, '--', ...MODULE_DIRS)
-        .out.split('\n')
-        .filter((f) => f.endsWith('.test.ts'));
-      expect(files.length).toBeGreaterThan(40);
-      baseline = files.flatMap((file) =>
-        declaredAt(BASELINE, file)
-          .filter((d) => d.kind === 'test')
-          .map((d) => {
-            // Every baseline title under these directories is a fixed string.
-            expect([file, d.title, d.dynamic]).toEqual([file, d.title, false]);
-            return { file, title: d.title };
-          }),
-      );
-      // Every declared title is in the inventory, and the inventory has no other entry there.
-      const listed = (file: string, title: string) => inModules.filter((e) => e.file === file && e.title === title);
-      expect(baseline.filter((b) => listed(b.file, b.title).length !== 1)).toEqual([]);
-      expect(inModules.length).toBe(baseline.length);
-    } else {
-      baseline = inModules.map((e) => ({ file: e.file, title: e.title }));
-    }
+    const fixtureText = readFileSync(join(ROOT, 'scripts/test/fixtures/node-history-sources.json'), 'utf8');
+    const fixture = JSON.parse(fixtureText) as {
+      baselineCommit: string;
+      baselineSources: Record<string, string>;
+    };
+    const manifest = JSON.parse(
+      readFileSync(join(ROOT, 'scripts/test/fixtures/node-history-sources.manifest.json'), 'utf8'),
+    ) as { fixtureSha256: string; baselineCommit: string };
+    expect(createHash('sha256').update(fixtureText).digest('hex')).toBe(manifest.fixtureSha256);
+    expect(fixture.baselineCommit).toBe(BASELINE);
+    expect(manifest.baselineCommit).toBe(BASELINE);
+    const files = Object.keys(fixture.baselineSources).sort();
+    expect(files.length).toBeGreaterThan(40);
+    const baseline = files.flatMap((file) =>
+      declarations(fixture.baselineSources[file] as string)
+        .filter((d) => d.kind === 'test')
+        .map((d) => {
+          // Every baseline title under these directories is a fixed string.
+          expect([file, d.title, d.dynamic]).toEqual([file, d.title, false]);
+          return { file, title: d.title };
+        }),
+    );
+    // Every declared title is in the inventory, and the inventory has no other entry there.
+    const listed = (file: string, title: string) => inModules.filter((e) => e.file === file && e.title === title);
+    expect(baseline.filter((b) => listed(b.file, b.title).length !== 1)).toEqual([]);
+    expect(inModules.length).toBe(baseline.length);
 
     // Each kept one is declared, byte-identical, in the same file today.
     const current = new Map<string, Declaration[]>();

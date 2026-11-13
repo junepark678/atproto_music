@@ -94,6 +94,20 @@ interface QueuedDeleteRow extends QueuedDeleteHead {
   lookup_candidates: string | null;
   lookup_last_earliest: number | null;
   lookup_last_max: number | null;
+  authorization_uri: string | null;
+  authorization_rev: string | null;
+}
+
+function authorizationConflicted(db: Db, row: QueuedDeleteRow): boolean {
+  return (
+    row.authorization_uri !== null &&
+    row.authorization_rev !== null &&
+    db.one(
+      `SELECT 1 FROM live_pending_removal_events WHERE uri=? AND rev=? AND conflicted=1 LIMIT 1`,
+      row.authorization_uri,
+      row.authorization_rev,
+    ) !== null
+  );
 }
 
 /**
@@ -218,6 +232,14 @@ export async function runDeleteSlice(
     );
     return { requests: 0, state: 'survivor_present', nextDueMs: nextDeleteWakeAt(deps, now) };
   }
+  if (authorizationConflicted(deps.db, row)) {
+    deps.db.run(
+      "UPDATE listenbrainz_deletes SET state='ignored',last_error='authorization_conflicted',updated_at_ms=? WHERE id=? AND state='queued'",
+      now,
+      row.id,
+    );
+    return { requests: 0, state: 'authorization_conflicted', nextDueMs: nextDeleteWakeAt(deps, now) };
+  }
   if (row.deadline_at <= now) {
     deps.db.run(
       "UPDATE listenbrainz_deletes SET state='expired',last_error='retry_deadline',updated_at_ms=? WHERE id=? AND state='queued'",
@@ -266,6 +288,14 @@ export async function runDeleteSlice(
     );
   };
   if (row.target_msid !== null && row.target_listened_at !== null) {
+    if (authorizationConflicted(deps.db, row)) {
+      deps.db.run(
+        "UPDATE listenbrainz_deletes SET state='ignored',last_error='authorization_conflicted',updated_at_ms=? WHERE id=? AND state='queued'",
+        deps.clock.nowMs(),
+        row.id,
+      );
+      return { requests: 0, state: 'authorization_conflicted', nextDueMs: nextDeleteWakeAt(deps, now) };
+    }
     const out = await deps.client.deleteListen(token, {
       listened_at: row.target_listened_at,
       recording_msid: row.target_msid,
@@ -289,7 +319,8 @@ export async function runDeleteSlice(
       // a new event key and remains eligible.
       deps.db.run(
         `UPDATE listenbrainz_deletes SET state='ignored',last_error='canonical_delete_sent',updated_at_ms=?
-         WHERE link_id=? AND generation=? AND did=? AND state='queued' AND listened_at=? AND artist_key=? AND track_key=?`,
+         WHERE link_id=? AND generation=? AND did=? AND state='queued' AND listened_at=? AND artist_key=? AND track_key=?
+           AND target_msid=? AND target_listened_at=?`,
         deps.clock.nowMs(),
         row.link_id,
         row.generation,
@@ -297,6 +328,8 @@ export async function runDeleteSlice(
         row.listened_at,
         row.artist_key,
         row.track_key,
+        row.target_msid,
+        row.target_listened_at,
       );
       return { requests: 1, state: 'sent', nextDueMs: null };
     }

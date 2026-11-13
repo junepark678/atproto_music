@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { Db } from '../do/db';
+import { cancelLoveApiRecipientDecisionsForDid } from './love-api-recipients';
 
 export interface ForwardProvenance {
   path: 'api' | 'import' | 'live' | 'snapshot';
@@ -40,6 +41,10 @@ export function retainedForwardProvenance(db: Db, did: string, identityKey: stri
   return null;
 }
 
+export const RETAINED_RECORD_PROVENANCE_SQL = `SELECT op.origin,jobs.source FROM operations AS op
+     LEFT JOIN import_jobs AS jobs ON jobs.id=op.import_job_id
+     WHERE op.did=? AND op.collection=? AND op.rkey=? ORDER BY op.created_at_ms DESC LIMIT 1`;
+
 /** Trusted path from a retained operation at one exact repository record. */
 export function retainedRecordProvenance(
   db: Db,
@@ -48,9 +53,7 @@ export function retainedRecordProvenance(
   rkey: string,
 ): ForwardProvenance | null {
   const operation = db.one<{ origin: string; source: string | null }>(
-    `SELECT op.origin,jobs.source FROM operations AS op
-     LEFT JOIN import_jobs AS jobs ON jobs.id=op.import_job_id
-     WHERE op.did=? AND op.collection=? AND op.rkey=? ORDER BY op.created_at_ms DESC LIMIT 1`,
+    RETAINED_RECORD_PROVENANCE_SQL,
     did,
     collection,
     rkey,
@@ -188,6 +191,21 @@ export function releaseForwardAdmission(db: Db, did: string, identityKey: string
 
 /** Drop projection-only admission state during a DID opt-out, keeping local acceptance receipts. */
 export function cleanupForwardAdmissionsForSuppression(db: Db, did: string): void {
+  db.tx(() => {
+    cancelLoveApiRecipientDecisionsForDid(db, did);
+    cleanupForwardAdmissionsForSuppressionInTransaction(db, did);
+  });
+}
+
+function cleanupForwardAdmissionsForSuppressionInTransaction(db: Db, did: string): void {
+  const uriLo = `at://${did}/`;
+  const uriHi = `at://${did}0`;
+  db.run('DELETE FROM live_record_evidence WHERE uri>=? AND uri<?', uriLo, uriHi);
+  db.run('DELETE FROM live_acceptance_candidates WHERE uri>=? AND uri<?', uriLo, uriHi);
+  db.run('DELETE FROM live_pending_removals WHERE uri>=? AND uri<?', uriLo, uriHi);
+  db.run('DELETE FROM live_pending_removal_events WHERE uri>=? AND uri<?', uriLo, uriHi);
+  db.run('DELETE FROM live_pending_removal_reconcile WHERE uri>=? AND uri<?', uriLo, uriHi);
+  db.run('DELETE FROM live_pending_removal_retention_epoch WHERE uri>=? AND uri<?', uriLo, uriHi);
   db.run(
     `DELETE FROM forward_admissions AS admission
      WHERE did=? AND NOT EXISTS (

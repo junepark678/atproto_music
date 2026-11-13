@@ -8,14 +8,26 @@ import { hasCanonicalListenSurvivor } from '../../../src/forward/delete-enqueue'
 import { projectionListenKey } from '../../../src/forward/projection';
 import { enqueueForwards } from '../../../src/outbox/forward-enqueue';
 import { tombstoneListen } from '../../../src/sync/tombstones';
-import { ALICE, deleteProof, NOW_MS, OPTS, putProof, repoFor, SCROBBLE, scrobble, seedUser } from '../../write/support';
+import {
+  ALICE,
+  authorizedLiveOptions,
+  deleteProof,
+  NOW_MS,
+  OPTS,
+  putProof,
+  repoFor,
+  SCROBBLE,
+  scrobble,
+  seedUser,
+} from '../../write/support';
 import { withMigratedDb } from '../support/node-db';
 
 const record = scrobble({ artist: 'Björk', track: 'Jóga' });
 const second = Date.parse(record.listenedAt as string) / 1000;
 const [artistKey, musicTrackKey] = trackKey('Björk', 'Jóga');
 const identity = projectionListenKey(ALICE, record.listenedAt as string, artistKey, musicTrackKey);
-const live = { ...OPTS, forwarding: { random: seededRandom(619) } };
+const live = (db: Db, proof: Awaited<ReturnType<typeof putProof>>) =>
+  authorizedLiveOptions(db, proof, seededRandom(619));
 function seedLink(db: Db) {
   seedUser(db, ALICE);
   ensureAccount({ db, clock: { nowMs: () => NOW_MS } } as any, { did: ALICE, verifiedHandle: null });
@@ -119,7 +131,12 @@ it.each(['single', 'member', 'full', 'live-single', 'live-batch'])(
       delivered(db);
       if (mode === 'single') apiSingle(db, 'a');
       else if (mode === 'member' || mode === 'full') apiBatch(db, 'b', mode === 'full' ? ['*'] : ['2222222222222']);
-      else expect(db.tx(() => applyRecordProof(db, mode === 'live-single' ? ga : gb, live)).outcome).toBe('absent');
+      else
+        expect(
+          db.tx(() =>
+            applyRecordProof(db, mode === 'live-single' ? ga : gb, live(db, mode === 'live-single' ? ga : gb)),
+          ).outcome,
+        ).toBe('absent');
       expect(db.all('SELECT id FROM listenbrainz_deletes')).toHaveLength(0);
       if (mode === 'single' || mode === 'live-single') apiBatch(db, 'b', ['*']);
       else apiSingle(db, 'a');
@@ -149,7 +166,7 @@ it('batch replacement removes all duplicate canonical members', async () => {
     seedLink(db);
     expect(db.tx(() => applyRecordProof(db, a, OPTS)).outcome).toBe('applied');
     delivered(db);
-    expect(db.tx(() => applyRecordProof(db, b, live)).outcome).toBe('applied');
+    expect(db.tx(() => applyRecordProof(db, b, live(db, b))).outcome).toBe('applied');
     expect(db.all('SELECT id FROM listenbrainz_deletes')).toHaveLength(1);
     expect(await drain(db)).toMatchObject({ deletes: 1 });
   });
@@ -161,7 +178,7 @@ it('new replacement identity remains a survivor despite old-identity tombstone w
   await withMigratedDb((db) => {
     seedLink(db);
     db.tx(() => applyRecordProof(db, a, OPTS));
-    db.tx(() => applyRecordProof(db, b, live));
+    db.tx(() => applyRecordProof(db, b, live(db, b)));
     expect(hasCanonicalListenSurvivor(db, deletion)).toBe(true);
   });
 });
@@ -177,7 +194,7 @@ it('replacing the last active copy after an outstanding API removal enqueues its
     delivered(db);
     apiSingle(db, 'a');
     expect(db.all('SELECT id FROM listenbrainz_deletes')).toHaveLength(0);
-    db.tx(() => applyRecordProof(db, c, live));
+    db.tx(() => applyRecordProof(db, c, live(db, c)));
     expect(db.all('SELECT id FROM listenbrainz_deletes')).toHaveLength(1);
     expect(await drain(db)).toMatchObject({ deletes: 1 });
   });
@@ -191,7 +208,7 @@ it('same-byte recreation at same URI is a current survivor', async () => {
     seedLink(db);
     db.tx(() => applyRecordProof(db, a, OPTS));
     delivered(db);
-    expect(db.tx(() => applyRecordProof(db, gone, live)).outcome).toBe('absent');
+    expect(db.tx(() => applyRecordProof(db, gone, live(db, gone))).outcome).toBe('absent');
     expect(db.tx(() => applyRecordProof(db, again, OPTS)).outcome).toBe('applied');
     expect(await drain(db)).toEqual({ deletes: 0, lookups: 0 });
   });
@@ -222,7 +239,7 @@ it.each(['api-full', 'live-full'])(
       expect(db.tx(() => applyRecordProof(db, a, OPTS)).outcome).toBe('applied');
       delivered(db);
       if (mode === 'api-full') apiBatch(db, 'a', ['*']);
-      else expect(db.tx(() => applyRecordProof(db, gone, live)).outcome).toBe('absent');
+      else expect(db.tx(() => applyRecordProof(db, gone, live(db, gone))).outcome).toBe('absent');
       expect(db.all('SELECT id FROM listenbrainz_deletes')).toHaveLength(1);
       expect(await drain(db)).toMatchObject({ deletes: 1 });
     });
@@ -307,7 +324,7 @@ it('old-identity replacement tombstone must not allow deleting another copy whil
   await withMigratedDb(async (db) => {
     seedLink(db);
     db.tx(() => applyRecordProof(db, a, OPTS));
-    db.tx(() => applyRecordProof(db, b, live));
+    db.tx(() => applyRecordProof(db, b, live(db, b)));
     db.tx(() => applyRecordProof(db, c, OPTS));
     delivered(db);
     apiSingle(db, 'c');

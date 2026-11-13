@@ -1,21 +1,12 @@
 import type { ForwardKind } from '../app/rows';
 import type { Db } from '../do/db';
+import { countLinkCoverage } from '../forward/coverage';
+import { withdrawDeferredLoveIntents } from '../forward/love-deferral-storage';
 import { touchLoveLane } from '../forward/love-lanes';
+import { storedForwardDedupeKey } from './forward-identity';
+import { releaseUnsentReceipts } from './forward-receipts';
 
-/** Stores generation 1 unchanged and namespaces later generations in the legacy unique key. */
-export function storedForwardDedupeKey(generation: number, canonicalKey: string): string {
-  if (!Number.isSafeInteger(generation) || generation < 1)
-    throw new RangeError('generation must be a positive integer');
-  return generation === 1 ? canonicalKey : `g${generation}:${canonicalKey}`;
-}
-
-/** Returns the canonical key only when the stored namespace matches this row's trusted generation. */
-export function canonicalForwardDedupeKey(generation: number, storedKey: string): string | null {
-  if (!Number.isSafeInteger(generation) || generation < 1) return null;
-  if (generation === 1) return storedKey;
-  const prefix = `g${generation}:`;
-  return storedKey.startsWith(prefix) ? storedKey.slice(prefix.length) : null;
-}
+export { canonicalForwardDedupeKey, storedForwardDedupeKey } from './forward-identity';
 
 /** Removes an explicitly unsent identity from every current destination generation. */
 export function deleteQueuedForwardIdentity(
@@ -31,6 +22,10 @@ export function deleteQueuedForwardIdentity(
   );
   const kindSlots = kinds.map(() => '?').join(',');
   for (const link of links) {
+    withdrawDeferredLoveIntents(db, link, kinds, canonicalKey);
+    const receiptKinds = kinds.filter((kind): kind is Exclude<ForwardKind, 'nowplaying'> => kind !== 'nowplaying');
+    const releasedReceipts = releaseUnsentReceipts(db, link, receiptKinds, canonicalKey);
+    if (releasedReceipts > 0) countLinkCoverage(db, 'receipt_released', releasedReceipts);
     if (kinds.includes('love'))
       db.run(
         `DELETE FROM forward_love_recording_targets WHERE forward_rowid IN (

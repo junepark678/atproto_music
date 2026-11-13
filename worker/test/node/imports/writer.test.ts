@@ -17,6 +17,7 @@ import { MAX_CREATE_BODY_BYTES, MAX_WRITE_BODY_BYTES } from '@atmusic/core/scrob
 import { NS_PER_SECOND, toStorage } from '@atmusic/core/timestamp';
 import { describe, expect, it } from 'vitest';
 import type { ImportItemRow, ImportJobRow, OperationRow } from '../../../src/app/rows';
+import type { SqlParam } from '../../../src/do/db';
 import { admitForwardIdentity } from '../../../src/forward/projection';
 import {
   cancelJob,
@@ -37,6 +38,7 @@ import {
   prepareUnsentBatchListenRemoval,
 } from '../../../src/outbox/batch-delete-ops';
 import { enqueueForwards } from '../../../src/outbox/forward-enqueue';
+import { FORWARD_RECEIPT_LOOKUP_SQL } from '../../../src/outbox/forward-receipts';
 import { newOperationId, unblockOperations } from '../../../src/outbox/operations';
 import { insertScrobbleCreate, prepareScrobble } from '../../../src/outbox/scrobble-ops';
 import { stagePullPage } from '../../../src/sync/pull-staging';
@@ -1609,6 +1611,51 @@ describe('import writer', () => {
           origin: 'import',
           listen: { recordingMbid: '3c4f9c1e-5a2b-4d8e-9f10-2a7c3b9d0e45' },
         });
+        const forwarded = h.db.one<{ link_id: string; dedupe_key: string }>(
+          'SELECT link_id,dedupe_key FROM forward_outbox WHERE dedupe_key=?',
+          staged.dedupe_key,
+        );
+        expect(forwarded).not.toBeNull();
+        h.db.run(
+          'UPDATE forward_receipts SET retired_at_ms=? WHERE link_id=? AND dedupe_key=?',
+          h.kit.clock.nowMs(),
+          forwarded!.link_id,
+          forwarded!.dedupe_key,
+        );
+        h.db.run(
+          'DELETE FROM forward_outbox WHERE link_id=? AND dedupe_key=?',
+          forwarded!.link_id,
+          forwarded!.dedupe_key,
+        );
+        const originalOne = h.m.db.one.bind(h.m.db);
+        let receiptLookups = 0;
+        h.m.db.one = <T>(sql: string, ...params: SqlParam[]): T | null => {
+          if (sql === FORWARD_RECEIPT_LOOKUP_SQL) receiptLookups++;
+          return originalOne<T>(sql, ...params);
+        };
+        try {
+          expect(await writeSlice(h.m, { id: 'job-source-listen', did: h.alice }, h.kit.clock.nowMs())).toMatchObject({
+            created: 0,
+          });
+          // The already-consumed import job is stopped upstream; this does not exercise receipt coverage.
+          expect(receiptLookups).toBe(0);
+        } finally {
+          h.m.db.one = originalOne;
+        }
+        expect(
+          h.db.one(
+            'SELECT 1 FROM forward_outbox WHERE link_id=? AND dedupe_key=?',
+            forwarded!.link_id,
+            forwarded!.dedupe_key,
+          ),
+        ).toBeNull();
+        expect(
+          h.db.one(
+            'SELECT retired_at_ms FROM forward_receipts WHERE link_id=? AND dedupe_key=?',
+            forwarded!.link_id,
+            forwarded!.dedupe_key,
+          ),
+        ).toEqual({ retired_at_ms: h.kit.clock.nowMs() });
       }
       expect([lastfm, listenbrainz]).toHaveLength(2);
     });

@@ -4,8 +4,10 @@
 // compatibility cases use synthetic migration lists, so they do not depend on
 // migration 2 (N1-10).
 
-import { rmSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it } from 'vitest';
 import { MigrationLedgerError, type MigrationTarget, migrate } from '../../src/do/migrate';
 import { MIGRATIONS, type Migration, SCHEMA_VERSION, TABLE_CLASS, TABLES } from '../../src/do/schema';
@@ -72,11 +74,62 @@ function recordingTarget(db: SqliteDb) {
 }
 
 describe('migrate over node:sqlite', () => {
+  it('applies the exact allocated schema-57 proposal from schema 56 through the Node authorizer', () => {
+    const db = freshDb();
+    const ddl = readFileSync(
+      new URL('../../../docs/planning/finding32-source-origin-revised57-proposal.sql', import.meta.url),
+      'utf8',
+    );
+    const statements = ddl
+      .split(';')
+      .map((statement) => statement.trim())
+      .filter(Boolean);
+    const migration = MIGRATIONS.at(-1)!;
+    expect(migration).toMatchObject({ version: 57, name: 'api_love_recipient_proof' });
+    expect(createHash('sha256').update(ddl).digest('hex')).toBe(
+      '54dc2d344097763e055b0f8f7f10d8f85993ccdaf0e31620b699726c35256a96',
+    );
+    expect(statements).toHaveLength(17);
+    expect(migration.statements).toEqual(statements);
+    expect(migrate(db, MIGRATIONS.slice(0, 56))).toEqual({ status: 'ready', version: 56 });
+    expect(db.exec('SELECT max(version) AS version FROM schema_migrations')).toEqual([{ version: 56 }]);
+    expect(migrate(db)).toEqual({ status: 'ready', version: 57 });
+
+    const tables = db.all<{ name: string }>(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'love_api_%' ORDER BY name",
+    );
+    expect(tables).toHaveLength(8);
+    const indexes = db.all<{ name: string }>(
+      "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'love_api_%' ORDER BY name",
+    );
+    expect(indexes).toHaveLength(9);
+    expect(db.exec('SELECT max(version) AS version FROM schema_migrations')).toEqual([{ version: 57 }]);
+    const verify = new DatabaseSync(':memory:');
+    try {
+      verify.exec('PRAGMA foreign_keys=ON');
+      for (const { sql } of db.all<{ sql: string }>(
+        "SELECT sql FROM sqlite_master WHERE type IN ('table','index') AND sql IS NOT NULL ORDER BY rowid",
+      ))
+        verify.exec(sql);
+      expect(verify.prepare('PRAGMA table_info(love_api_bindings)').all()).toContainEqual(
+        expect.objectContaining({ name: 'api_origin', notnull: 1, dflt_value: null }),
+      );
+      expect(verify.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+    } finally {
+      verify.close();
+    }
+  });
+
   it('migration 30 creates durable per-generation pull state, staging and tombstone tables', () => {
     const db = freshDb();
     migrate(db);
-    expect(SCHEMA_VERSION).toBe(46);
-    for (const table of ['linked_pull_state', 'linked_pull_items'] as const) {
+    expect(SCHEMA_VERSION).toBe(57);
+    for (const table of [
+      'linked_pull_state',
+      'linked_pull_items',
+      'live_pending_removal_events',
+      'live_pending_removal_reconcile',
+    ] as const) {
       expect(TABLES).toContain(table);
       expect(db.one<{ name: string }>("SELECT name FROM sqlite_master WHERE type='table' AND name=?", table)).toEqual({
         name: table,
@@ -87,15 +140,108 @@ describe('migrate over node:sqlite', () => {
     ).toContain('love_boundary_ms');
     expect(TABLE_CLASS.linked_pull_state).toBe('non-derived');
     expect(TABLE_CLASS.linked_pull_items).toBe('non-derived');
+    expect(
+      db.one<{ name: string }>("SELECT name FROM sqlite_master WHERE type='index' AND name='operations_record_target'"),
+    ).toEqual({
+      name: 'operations_record_target',
+    });
+    expect(
+      db.one<{ sql: string }>(
+        "SELECT sql FROM sqlite_master WHERE type='index' AND name='love_import_bridges_source_class'",
+      ),
+    ).toEqual({
+      sql: "CREATE INDEX love_import_bridges_source_class ON love_import_bridges(did,uri,incarnation_key,state,(CASE WHEN source_service IN ('lastfm','lastfm_api','lastfm_json') THEN 1 WHEN source_service IN ('listenbrainz','listenbrainz_api','listenbrainz_zip') THEN 2 ELSE 0 END))",
+    });
     expect(TABLE_CLASS.linked_pull_receipt_seed).toBe('non-derived');
     expect(TABLE_CLASS.linked_pull_projection_scan).toBe('non-derived');
     expect(TABLES).toContain('listenbrainz_deletes');
     expect(TABLE_CLASS.listenbrainz_deletes).toBe('non-derived');
+    expect(TABLE_CLASS.live_record_evidence).toBe('non-derived');
+    expect(TABLE_CLASS.live_acceptance_candidates).toBe('non-derived');
+    expect(TABLE_CLASS.live_pending_removals).toBe('non-derived');
+    expect(TABLE_CLASS.live_pending_removal_events).toBe('non-derived');
+    expect(TABLE_CLASS.live_pending_removal_reconcile).toBe('non-derived');
     expect(
       db.one<{ name: string }>(
         "SELECT name FROM sqlite_master WHERE type='index' AND name='forward_outbox_love_heads'",
       ),
     ).toEqual({ name: 'forward_outbox_love_heads' });
+  });
+
+  it('migration 54 adds the source-class index to a populated v53 database without rewriting bridges', () => {
+    const db = freshDb();
+    expect(migrate(db, MIGRATIONS.slice(0, 53))).toEqual({ status: 'ready', version: 53 });
+    for (const [operation, source, state] of [
+      ['bound-null', null, 'bound'],
+      ['bound-junk', 'spotify', 'bound'],
+      ['consumed-lb', 'listenbrainz_zip', 'consumed'],
+    ] as const) {
+      db.run(
+        `INSERT INTO love_import_bridges(did,operation_id,uri,incarnation_key,source_service,state,created_at_ms)
+         VALUES('did:plc:alice',?,?,?, ?,?,1)`,
+        operation,
+        `at://did:plc:alice/com.example.atmusic.love/${operation}`,
+        `inc-${operation}`,
+        source,
+        state,
+      );
+    }
+    const before = db.all('SELECT * FROM love_import_bridges ORDER BY operation_id');
+    expect(migrate(db, MIGRATIONS.slice(0, 54))).toEqual({ status: 'ready', version: 54 });
+    expect(db.all('SELECT * FROM love_import_bridges ORDER BY operation_id')).toEqual(before);
+    const plan = db
+      .all<{ detail: string }>(
+        `EXPLAIN QUERY PLAN SELECT 1 FROM love_import_bridges INDEXED BY love_import_bridges_source_class
+       WHERE did=? AND uri=? AND incarnation_key=? AND state='bound'
+         AND (CASE WHEN source_service IN ('lastfm','lastfm_api','lastfm_json') THEN 1
+                   WHEN source_service IN ('listenbrainz','listenbrainz_api','listenbrainz_zip') THEN 2 ELSE 0 END) IN (0,?) LIMIT 1`,
+        'did:plc:alice',
+        'at://did:plc:alice/com.example.atmusic.love/bound-null',
+        'inc-bound-null',
+        2,
+      )
+      .map((row) => row.detail)
+      .join(' | ');
+    expect(plan).toContain('COVERING INDEX love_import_bridges_source_class');
+    expect(plan).toContain('<expr>=?');
+  });
+
+  it('migration 55 upgrades populated v54 links and outbox without seeding coverage state', () => {
+    const db = freshDb();
+    expect(migrate(db, MIGRATIONS.slice(0, 54))).toEqual({ status: 'ready', version: 54 });
+    db.run(
+      `INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,created_at_ms,updated_at_ms)
+       VALUES('active','did:plc:alice','lastfm','alice',X'00','key',1,1),
+             ('disabled','did:plc:bob','listenbrainz','bob',X'00','key',2,2),
+             ('revoked','did:plc:carol','lastfm','carol',X'00','key',3,3)`,
+    );
+    db.run("UPDATE linked_accounts SET forward_scrobbles=0 WHERE id='disabled'");
+    db.run("UPDATE linked_accounts SET status='revoked' WHERE id='revoked'");
+    for (const [id, linkId] of [
+      ['f-active', 'active'],
+      ['f-disabled', 'disabled'],
+      ['f-revoked', 'revoked'],
+    ] as const) {
+      db.run(
+        `INSERT INTO forward_outbox(id,link_id,did,kind,dedupe_key,payload_json,state,attempts,due_at,created_at_ms,updated_at_ms)
+         VALUES(?,?,?,'scrobble',?,'{}','sent',0,1,1,1)`,
+        id,
+        linkId,
+        `did:plc:${linkId}`,
+        id,
+      );
+    }
+    const before = db.all(
+      'SELECT id,link_id,generation,kind,dedupe_key,payload_json,state,created_at_ms FROM forward_outbox ORDER BY id',
+    );
+    expect(migrate(db, MIGRATIONS.slice(0, 55))).toEqual({ status: 'ready', version: 55 });
+    expect(
+      db.all(
+        'SELECT id,link_id,generation,kind,dedupe_key,payload_json,state,created_at_ms FROM forward_outbox ORDER BY id',
+      ),
+    ).toEqual(before);
+    expect(db.all('SELECT * FROM forward_receipts')).toEqual([]);
+    expect(db.all('SELECT * FROM forward_link_gaps')).toEqual([]);
   });
 
   it('all MIGRATIONS apply in one transaction on a fresh file and schema_migrations lists every version', () => {

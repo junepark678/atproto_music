@@ -17,6 +17,8 @@ Owner request:
 - Imports are one-shot and user-started. Their origin `import` is never forwarded.
 - Nothing calls `noteLinkError` (`worker/src/forward/links.ts:296`). The UI shows only `link.status`.
 - The outbox has no maximum attempt count; a row leaves only when it ages out.
+- A verified love-record update that changes its canonical artist/track identity currently does not queue a replacement love or remove the old remote love. The old remote love may remain as an acceptable best-effort sync limitation. Manual-enqueue update tests model a future producer and do not establish current caller coverage.
+- Inherited live-delete survivor behavior is unchanged by B2: an event-caused unlove can be sent while another same-track love is locally present. It is not counted as fixed. The approved [separate P1 LIVE-DELETE-SURVIVOR slice](https://github.com/junepark678/atproto_music/pull/209) follows B2 and precedes finding 32 code.
 
 **Now playing** (`worker/src/do/read/now-playing.ts`, `now_playing` at `schema.ts:491-503`)
 - There is one row per DID, holding `started_at_ms` (the server's receive time), duration, album, album artist, recording MBID, client and source.
@@ -276,7 +278,8 @@ The owner's word is "synced". Our definition: canonical MusicBrainz data is reso
   - **The marker lives as long as the identity.** It lasts exactly as long as the indexer keeps that record identity or its tombstone. Forwarding suppression therefore matches the indexer's own resurrection suppression. If the indexer would re-project an identity as new, forwarding treats it as new too.
   - **No cutoff by age.** There is no TTL, no "echo horizon" and no listen-age exclusion used for dedupe. A replay suppressed beyond the identity's lifetime is out of contract and must not be promised. No new ListenBrainz age limit; Last.fm keeps its 13-day limit when sending.
   - **Link generations.** Each link has a generation that changes when the remote account changes, and forward rows carry it. For each link generation, every indexed identity is forwarded at most once, either by live admission or by S2 backfill, and the admission marker decides which. Backfill covers what live admission did not enqueue for that generation: identities admitted before the generation started, and `snapshot`-path identities admitted after it.
-  - **Outbox cleanup.** Per-link send state stays in `forward_outbox`. Because re-admission is blocked by the marker, not by outbox rows, terminal outbox rows may be removed by a periodic, bounded, indexed sweep after their terminal age. There is never a global scan on each success. This sweep is optional for S1.
+  - **Outbox cleanup prerequisite (not implemented).** Any future sweep must be bounded, indexed and outside request paths. In the same transaction it must retire the `(link,generation,kind,canonical key)` receipt before deleting its terminal row, and never delete `queued` or `held` rows. Keep `scrobble`/`sent` rows until listen-delete delivery evidence replaces their current lookup. Re-key or delete rowid-keyed recording targets, unlove lookup progress and derived love-current pointers in that transaction; preserve the latest retained recording MBID and unresolved-love revival sources. Remove old-generation rows and their inert receipts together in bounded pages, using a cursor that does not retain a deletable rowid. Verify cleanup-on and cleanup-off enqueue equivalence.
+  - B2's love delivery ledger, deferred heads/intents, operation witnesses, producer authorities and maintenance singleton are durable non-derived state. Any future cleanup must preserve their ordering, authorization and replay semantics; link deletion relies on the schema's foreign-key cascade. Schema-55 live databases upgraded to 56 start with these B2 tables empty, so older-state restore does not recreate deferred history.
   - **Storage reporting.** Report marker and outbox row counts and bytes in the operator metrics and admin socket. There is no hard quota beyond existing disk checks.
 - **Imported listens.** Still never forwarded to the service they came from.
   - Forward them to other services only where the per-listen import source is known. Otherwise keep today's exclusion.
@@ -385,3 +388,23 @@ The copy stays short, and no DIDs are shown.
   - Each stays a draft until its scoped acceptance evidence is recorded in the PR body, then is marked ready.
   - Commit small and push often. Stage only the slice's files. Run the secret scan (`scripts/test/secret-scan.test.ts`) before each push.
   - Never force-push to master or to someone else's branch.
+
+## LIVE-DELETE-SURVIVOR (P1)
+
+Separate implementation and red reproduction: [PR #209](https://github.com/junepark678/atproto_music/pull/209), stacked on B2.
+
+Planner ruling, 2026-11-10: this is a separate safety slice, next after B2 and
+ahead of finding 32 implementation. B2 discloses the inherited limitation and
+does not ship its expected-red reproduction or count it as repaired. The
+reproduction belongs to this separate slice and must start red and end green.
+
+- For an event-caused unlove (verified live/other-client deletion or any non-API absence), enqueue only when no other locally present love maps to that canonical artist/track key. Recheck at dispatch; a newly present survivor settles the row as `ignored` with a distinct `local_survivor` reason, not a failure.
+- Explicit API unlove always forwards as user intent. No automatic love-update producer is added; LOVE-UPDATE-CALLER remains a later separate slice.
+- Survivor checks must use indexed point lookups. Reuse an existing index if sufficient; otherwise coordinate the next free additive migration after B2’s 56 with finding 32’s still-unallocated number. No new migration is allocated here.
+- Prove the inherited reproduction red on B1 and B2, then green; two-link behavior, enqueue and dispatch races, an API-unlove positive control, and a load-bearing negative control are required.
+- Stack on the ready branch with the fewest real dependencies: B1 for enqueue-only work, B2 if the dispatch path is needed. Readiness requires exact-head local gate, fresh Astra acceptance and green hosted checks.
+
+
+## Relay trust
+
+Jetstream is a latency hint, not authority for upstream effects. A live claim may accelerate a forward only when per-link history backfill would also admit that record from verified PDS state. Promotion therefore applies the history payload eligibility rules, source-service/import provenance exclusions, Last.fm 13-day cutoff, generation and gap rules, and the identical forward identity key used by backfill for scrobbles and loves. It may bypass only backfill’s skip for records already admitted through the live path since generation start, preserving the genuine snapshot/live race recovery. Historical ineligible records produce no row; eligible records dedupe with their history row. Snapshot transition admission does not rely on a scalar race floor. Removal hints remain bounded by verified prior-presence and proof-absence revisions; signed Jetstream transition verification remains a follow-up architectural limitation.

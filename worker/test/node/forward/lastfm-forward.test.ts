@@ -15,12 +15,14 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { routerTransport } from '@atmusic/atproto/test-support/router-transport';
+import { trackKey } from '@atmusic/core/music-key';
 import { type FixedClock, fixedClock } from '@atmusic/core/test-support/clock';
 import { seededRandom } from '@atmusic/core/test-support/random';
 import { afterEach, describe, expect, it } from 'vitest';
 import { MemoryRevocations } from '../../../src/app/revocations';
 import type { ForwardOutboxRow } from '../../../src/app/rows';
 import { ensureAccount } from '../../../src/credentials/accounts';
+import { runLinkBackfill } from '../../../src/forward/backfill';
 import {
   BACKOFF_BASE_MS,
   holdLinkRows,
@@ -32,13 +34,13 @@ import {
 } from '../../../src/forward/forward-outbox';
 import { type ForwardRuntime, KEY_REJECTED_PROBE_MS, runForward } from '../../../src/forward/forwarder';
 import { LASTFM_CAPS, LastfmClient } from '../../../src/forward/lastfm-client';
-import { saveLink } from '../../../src/forward/links';
-import { admitForwardIdentity } from '../../../src/forward/projection';
+import { patchLink, saveLink } from '../../../src/forward/links';
+import { admitForwardIdentity, projectionListenKey } from '../../../src/forward/projection';
 import { UpstreamPacing } from '../../../src/forward/upstream-pacing';
 import { type LinksService, linksFeature } from '../../../src/http/links';
 import { bindPolicyFetch, createPolicyFetch } from '../../../src/node/policy-fetch';
 import { parseSecrets } from '../../../src/node/secrets';
-import { enqueueForwards, type ForwardItem } from '../../../src/outbox/forward-enqueue';
+import { enqueueApiRecipientUnlove, enqueueForwards, type ForwardItem } from '../../../src/outbox/forward-enqueue';
 import {
   canonicalForwardDedupeKey,
   deleteQueuedForwardIdentity,
@@ -224,6 +226,7 @@ describe('Last.fm forwarding', () => {
     });
     expect(accepted.accepted).toBe(1);
     expect(w.rows(ALICE)).toHaveLength(1);
+    expect(w.rows(ALICE).some((row) => row.link_id === sourceLinkId)).toBe(false);
     await w.run();
     expect(w.lastfm.loveCalls.map(({ method, artist, track }) => [method, artist, track])).toEqual([
       ['track.love', 'Band', 'Song'],
@@ -1013,6 +1016,30 @@ describe('Last.fm forwarding', () => {
     // A revoked link gets no new rows and sends nothing.
     w.scrobbles(ALICE, 1, 'after');
     expect(w.rows(ALICE)).toHaveLength(2);
+    const listenedAt = '2026-01-14T01:00:00.000000000Z';
+    const [artistKey, trackValue] = trackKey('Revoked period', 'Covered listen');
+    w.app.db.run('INSERT OR IGNORE INTO users(did,joined_at) VALUES(?,?)', ALICE, listenedAt);
+    w.app.db.run("UPDATE users SET indexing_state='current' WHERE did=?", ALICE);
+    w.app.db.run(
+      `INSERT INTO scrobbles(uri,cid,did,rkey,revision,artist,track,listened_at,created_at,indexed_at,artist_key,track_key)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+      `at://${ALICE}/com.example.atmusic.scrobble/revoked-period`,
+      'cid-revoked-period',
+      ALICE,
+      'revoked-period',
+      'rev-1',
+      'Revoked period',
+      'Covered listen',
+      listenedAt,
+      listenedAt,
+      listenedAt,
+      artistKey,
+      trackValue,
+    );
+    const coveredKey = projectionListenKey(ALICE, listenedAt, artistKey, trackValue);
+    expect(
+      admitForwardIdentity(w.app.db, { did: ALICE, identityKey: coveredKey, path: 'live', now: w.clock.nowMs() }),
+    ).toBe(true);
     w.clock.advance(MINUTE);
     await w.run();
     expect(w.lastfm.calls.count({ nsid: 'track.scrobble' })).toBe(1);
@@ -1025,13 +1052,26 @@ describe('Last.fm forwarding', () => {
     );
     expect(relinked).toMatchObject({ created: false, resumed: 2 });
     expect(relinked.link).toMatchObject({ id: alice.id, status: 'active', last_error: null });
+    let backfilled = 0;
+    for (let i = 0; i < 5; i++) backfilled += await runLinkBackfill(w.app.db, seededRandom(2100 + i), w.clock.nowMs());
+    expect(backfilled).toBeGreaterThanOrEqual(1);
+    expect(
+      w.app.db.one('SELECT count(*) AS n FROM forward_link_gaps WHERE link_id=? AND to_seq IS NOT NULL', alice.id),
+    ).toEqual({
+      n: 1,
+    });
+    expect(
+      w.app.db.one('SELECT count(*) AS n FROM forward_outbox WHERE link_id=? AND dedupe_key=?', alice.id, coveredKey),
+    ).toEqual({
+      n: 1,
+    });
     await w.run();
     expect(w.lastfm.scrobbles.at(-1)).toMatchObject({ sk: sk2 });
-    expect(w.lastfm.scrobbles.at(-1)?.items).toHaveLength(2);
-    expect(statesOf(w.rows(ALICE))).toEqual(['sent', 'sent']);
+    expect(w.lastfm.scrobbles.at(-1)?.items).toHaveLength(3);
+    expect(statesOf(w.rows(ALICE))).toEqual(['sent', 'sent', 'sent']);
 
     // Code 26: our key is suspended. Every Last.fm link pauses; ListenBrainz does not.
-    w.linkLastfm(BOB, 'bob_fm');
+    const bob = w.linkLastfm(BOB, 'bob_fm');
     w.lb.addToken('bob_lb', 'bob-lb-token');
     saveLink(
       { db: w.app.db, clock: w.clock, random: w.rt.random, box: w.rt.box },
@@ -1046,11 +1086,16 @@ describe('Last.fm forwarding', () => {
     const status = await w.app.composed.core.adminStatus();
     expect(status.counters).toContainEqual({ name: LASTFM_KEY_REJECTED, label: '', value: rejectedAt });
     expect(w.lb.submissions.map((s) => s.user)).toEqual(['bob_lb']);
+    const rejectedRequests = w.lastfm.calls.filter({ nsid: 'track.scrobble' }).filter((c) => c.fault === 'code:26');
+    expect(rejectedRequests).toHaveLength(1);
+    const rejectedSession = rejectedRequests[0]!.params.sk?.[0];
+    expect([sk2, bob.sk]).toContain(rejectedSession);
+    // The pause is global; the link error belongs to the request that received it.
+    const rejectedLinkId = rejectedSession === sk2 ? alice.id : bob.id;
     expect(
       w.app.db.one(
-        'SELECT last_error,last_failure_ms,consecutive_failures FROM linked_accounts WHERE did=? AND service=?',
-        ALICE,
-        'lastfm',
+        'SELECT last_error,last_failure_ms,consecutive_failures FROM linked_accounts WHERE id=?',
+        rejectedLinkId,
       ),
     ).toEqual({ last_error: 'lastfm_key_rejected', last_failure_ms: rejectedAt, consecutive_failures: 1 });
 
@@ -1067,8 +1112,8 @@ describe('Last.fm forwarding', () => {
     expect(pausedRows.map((r) => r.did).sort()).toEqual([ALICE, BOB].sort());
     expect(statesOf(pausedRows)).toEqual(['queued', 'queued']);
     expect(pausedRows.map((r) => [r.did, r.attempts]).sort()).toEqual([
-      [ALICE, 1],
-      [BOB, 0],
+      [ALICE, rejectedLinkId === alice.id ? 1 : 0],
+      [BOB, rejectedLinkId === bob.id ? 1 : 0],
     ]);
 
     // One probe an hour after the rejection; its success lifts the pause.
@@ -1264,6 +1309,108 @@ describe('Last.fm forwarding', () => {
         .filter((r) => r.kind === 'nowplaying')
         .map((r) => r.state),
     ).toEqual(['sent', 'sent']);
+  });
+
+  it('keeps a Last.fm API recipient handoff at zero egress while paused and sends once after same-remote resume', async () => {
+    const w = await world();
+    const link = w.linkLastfm(ALICE, 'recipient-lastfm');
+    const now = w.clock.nowMs();
+    expect(
+      enqueueForwards(w.app.db, {
+        did: ALICE,
+        items: [
+          {
+            kind: 'love',
+            operationId: 'recipient-lastfm-existing-love',
+            payload: { artist: 'Paused Artist', track: 'Paused Track', origin: 'web' },
+          },
+        ],
+        now,
+        random: w.rt.random,
+      }),
+    ).toBe(1);
+    await w.run();
+    expect(w.lastfm.loveCalls.map(({ method }) => method)).toEqual(['track.love']);
+    const projectionRkey = '3kreusedlove1';
+    const uri = `at://${ALICE}/com.example.atmusic.love/${projectionRkey}`;
+    const revision = '3lbcdefghijmu';
+    const incarnationKey = `love:${uri}:api:recipient-lastfm-put`;
+    w.app.db.run(
+      `INSERT INTO operations(id,did,kind,origin,priority,collection,rkey,state,due_at,created_at_ms,updated_at_ms)
+       VALUES('recipient-lastfm-put',?,'love.put','lastfm',0,'com.example.atmusic.love','recipient-lastfm-api','succeeded',?,?,?)`,
+      ALICE,
+      now,
+      now,
+      now,
+    );
+    w.app.db.run(
+      `INSERT INTO love_incarnations(uri,incarnation_key,state,path,source_service,updated_at_ms)
+       VALUES(?,?,'absent','import','lastfm',?)`,
+      uri,
+      incarnationKey,
+      now,
+    );
+    w.app.db.run(
+      `INSERT INTO love_import_bridges(did,operation_id,uri,incarnation_key,source_service,state,created_at_ms)
+       VALUES(?,?,?,?,'lastfm','consumed',?)`,
+      ALICE,
+      'accepted-lastfm-import-origin',
+      uri,
+      incarnationKey,
+      now,
+    );
+    w.app.db.run(
+      `INSERT INTO live_pending_removal_events(uri,rev,action,cid,created_at_ms,expires_at_ms)
+       VALUES(?,?,'delete','',?,?)`,
+      uri,
+      revision,
+      now,
+      now + 24 * 60 * MINUTE,
+    );
+    expect(patchLink({ db: w.app.db, clock: w.clock }, ALICE, link.id, { forwardScrobbles: false })).not.toBeNull();
+    const broadOperationId = `love-delete:${incarnationKey}:rev:${revision}`;
+    expect(
+      enqueueApiRecipientUnlove(w.app.db, {
+        did: ALICE,
+        linkId: link.id,
+        generation: link.generation,
+        broadOperationId,
+        operationId: `${broadOperationId}:api-recipient`,
+        envelope: {
+          did: ALICE,
+          recordUri: uri,
+          incarnationKey,
+          apiOperationId: 'recipient-lastfm-put',
+          projectionRkey,
+          source: 'lastfm',
+          sourceExclusions: [],
+          projection: { artist: 'Paused Artist', track: 'Paused Track' },
+          authorization: { uri, rev: revision },
+        },
+        now,
+        random: w.rt.random,
+      }),
+    ).toEqual({ status: 'deferred' });
+
+    const pausedRequests = w.seen.length;
+    await w.run();
+    expect(w.seen).toHaveLength(pausedRequests);
+    expect(w.lastfm.loveCalls.map(({ method }) => method)).toEqual(['track.love']);
+
+    expect(patchLink({ db: w.app.db, clock: w.clock }, ALICE, link.id, { forwardScrobbles: true })).not.toBeNull();
+    w.app.db.run("INSERT INTO users(did,joined_at,indexing_state) VALUES(?,'2026-01-15T00:00:00Z','current')", ALICE);
+    for (let i = 0; i < 8; i++) await runLinkBackfill(w.app.db, w.rt.random, w.clock.nowMs());
+    w.clock.advance(SECOND);
+    await w.run();
+    expect(w.lastfm.loveCalls.map(({ method, artist, track }) => [method, artist, track])).toEqual([
+      ['track.love', 'Paused Artist', 'Paused Track'],
+      ['track.unlove', 'Paused Artist', 'Paused Track'],
+    ]);
+    const completedRequests = w.seen.length;
+    w.clock.advance(SECOND);
+    await w.run();
+    expect(w.seen).toHaveLength(completedRequests);
+    expect(w.lastfm.loveCalls.map(({ method }) => method)).toEqual(['track.love', 'track.unlove']);
   });
 
   it('removes a backed-off love head and immediately exposes the queued unlove behind it', async () => {

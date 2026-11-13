@@ -359,21 +359,20 @@ export function noteBatchEntries(
     );
     inherited = bounds.length === 0 ? null : bounds.reduce((a, b) => (a > b ? a : b));
   }
-  for (const entry of entries) {
+  // Db caps statements at 100 parameters. Chunk multi-row UPSERTs so a signed
+  // 10k member record does not compile and dispatch 10k identical statements.
+  const chunkSize = 12;
+  for (let offset = 0; offset < entries.length; offset += chunkSize) {
+    const chunk = entries.slice(offset, offset + chunkSize);
+    const values = chunk.map(() => '(?, ?, ?, ?, ?, ?, ?, ?)').join(',');
+    const params = chunk.flatMap((entry) => [uri, entry.id, did, entry.state, rev, cid, entry.reason, inherited]);
     db.run(
       `INSERT INTO verified_membership(record_uri, listen_id, did, state, revision, cid, reason, last_absent_revision)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       VALUES ${values}
        ON CONFLICT(record_uri, listen_id) DO UPDATE SET state = excluded.state, revision = excluded.revision,
          cid = excluded.cid, reason = excluded.reason
        WHERE verified_membership.revision <= excluded.revision`,
-      uri,
-      entry.id,
-      did,
-      entry.state,
-      rev,
-      cid,
-      entry.reason,
-      inherited,
+      ...params,
     );
   }
   const listed = new Set(entries.map((entry) => entry.id));

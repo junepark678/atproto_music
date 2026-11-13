@@ -1,15 +1,16 @@
 import { verifyRecordProof } from '@atmusic/atproto/verify/record-proof';
 import { listenKey } from '@atmusic/core/listen-key';
 import { trackKey } from '@atmusic/core/music-key';
-import { seededRandom } from '@atmusic/core/test-support/random';
 import { fromMs, NS_PER_SECOND } from '@atmusic/core/timestamp';
 import { describe, expect, it } from 'vitest';
 import type { LinkedAccountRow } from '../../../src/app/rows';
+import type { SqlParam } from '../../../src/do/db';
 import { applyRecordProof } from '../../../src/do/write/apply-record';
 import { linkDto } from '../../../src/forward/links';
 import { cleanupForwardAdmissionsForSuppression, retainedForwardProvenance } from '../../../src/forward/projection';
 import { removeScrobble } from '../../../src/lastfm/write-methods';
 import { removeScrobbleCreate } from '../../../src/outbox/delete-ops';
+import { FORWARD_RECEIPT_LOOKUP_SQL } from '../../../src/outbox/forward-receipts';
 import { seedLegacyListenSecondSlice } from '../../../src/outbox/listen-second-receipts';
 import { enqueueLove, enqueueUnlove } from '../../../src/outbox/love-ops';
 import {
@@ -175,9 +176,21 @@ describe('linked pull staged writer', () => {
           ],
         });
         expect(echo).toEqual(['duplicate', 'duplicate']);
-        expect(
-          await writePullSlice(h.m, { linkId, generation: 1, available: async () => ({ available: true }) }),
-        ).toMatchObject({ accepted: 0 });
+        const originalOne = h.db.one.bind(h.db);
+        let receiptLookups = 0;
+        h.db.one = <T>(sql: string, ...params: SqlParam[]): T | null => {
+          if (sql === FORWARD_RECEIPT_LOOKUP_SQL) receiptLookups++;
+          return originalOne<T>(sql, ...params);
+        };
+        try {
+          expect(
+            await writePullSlice(h.m, { linkId, generation: 1, available: async () => ({ available: true }) }),
+          ).toMatchObject({ accepted: 0 });
+          // Source staging rejects the duplicate page before the writer consults receipts.
+          expect(receiptLookups).toBe(0);
+        } finally {
+          h.db.one = originalOne;
+        }
 
         const remoteLove = (await remoteRecords(h.kit, 'Alice', LOVE))[0]!;
         const proof = await verifyRecordProof(await h.kit.repos.Alice.getRecordCar(LOVE, remoteLove.rkey), {
@@ -192,7 +205,6 @@ describe('linked pull staged writer', () => {
             prefix: h.m.config.prefix!,
             nowNs,
             receiptNs: nowNs,
-            forwarding: { random: seededRandom(0x61) },
           }),
         );
         expect(
@@ -209,6 +221,62 @@ describe('linked pull staged writer', () => {
         expect(h.db.all("SELECT link_id FROM forward_outbox WHERE did=? AND kind='love'", did)).toEqual([
           { link_id: targetLink },
         ]);
+
+        const retiredReplay = h.db.one<{ link_id: string; dedupe_key: string }>(
+          "SELECT link_id,dedupe_key FROM forward_outbox WHERE did=? AND kind='love' AND link_id=?",
+          did,
+          targetLink,
+        );
+        expect(retiredReplay).not.toBeNull();
+        h.db.run(
+          'UPDATE forward_receipts SET retired_at_ms=? WHERE link_id=? AND dedupe_key=?',
+          h.kit.clock.nowMs(),
+          retiredReplay!.link_id,
+          retiredReplay!.dedupe_key,
+        );
+        h.db.run(
+          'DELETE FROM forward_outbox WHERE link_id=? AND dedupe_key=?',
+          retiredReplay!.link_id,
+          retiredReplay!.dedupe_key,
+        );
+        expect(
+          stageLovePage(h.db, {
+            linkId,
+            generation: 1,
+            sourceService: 'listenbrainz',
+            sourceAccount: 'remote',
+            did,
+            proposedCursor: null,
+            proposedBoundaryMs: 100,
+            proposedBoundaryKey: null,
+            nowMs: 7,
+            items: [
+              {
+                itemKey: 'normalized-key-echo',
+                artist: ' artist ',
+                track: 'ORIGINAL TITLE ',
+                payload: { artist: ' artist ', track: 'ORIGINAL TITLE ' },
+              },
+            ],
+          }),
+        ).toEqual(['duplicate']);
+        expect(
+          await writePullSlice(h.m, { linkId, generation: 1, available: async () => ({ available: true }) }),
+        ).toMatchObject({ accepted: 0 });
+        expect(
+          h.db.one(
+            'SELECT 1 FROM forward_outbox WHERE link_id=? AND dedupe_key=?',
+            retiredReplay!.link_id,
+            retiredReplay!.dedupe_key,
+          ),
+        ).toBeNull();
+        expect(
+          h.db.one(
+            'SELECT retired_at_ms FROM forward_receipts WHERE link_id=? AND dedupe_key=?',
+            retiredReplay!.link_id,
+            retiredReplay!.dedupe_key,
+          ),
+        ).toEqual({ retired_at_ms: h.kit.clock.nowMs() });
       });
     },
   );
@@ -247,7 +315,6 @@ describe('linked pull staged writer', () => {
               prefix: h.m.config.prefix!,
               nowNs,
               receiptNs: nowNs,
-              forwarding: { random: seededRandom(0x71) },
             }),
           );
         };
@@ -356,7 +423,6 @@ describe('linked pull staged writer', () => {
               prefix: h.m.config.prefix!,
               nowNs: oldNow,
               receiptNs: oldNow,
-              forwarding: { random: seededRandom(0x72) },
             }),
           ).outcome,
         ).toBe('noop_older');
@@ -383,7 +449,6 @@ describe('linked pull staged writer', () => {
               prefix: h.m.config.prefix!,
               nowNs: freshNow,
               receiptNs: freshNow,
-              forwarding: { random: seededRandom(0x73) },
             }),
           ).outcome,
         ).toBe('applied');
@@ -398,13 +463,13 @@ describe('linked pull staged writer', () => {
             'SELECT path,incarnation_key FROM love_incarnations WHERE uri=?',
             oldUri,
           ),
-        ).toEqual({ path: 'live', incarnation_key: `love:${oldUri}:${newProof.commit.rev}` });
+        ).toEqual({ path: 'snapshot', incarnation_key: `love:${oldUri}:${newProof.commit.rev}` });
         const forwardedAfterReplacement = h.db.one<{ n: number }>(
           "SELECT count(*) AS n FROM forward_outbox WHERE did=? AND link_id=? AND kind='love'",
           did,
           targetLink,
         )?.n;
-        expect(forwardedAfterReplacement).toBe(2);
+        expect(forwardedAfterReplacement).toBe(1);
 
         h.restart();
         const relove = await enqueueLove(h.m, { did, input: { artist: 'artist', track: 'TRACK' }, origin: 'web' });
@@ -419,7 +484,7 @@ describe('linked pull staged writer', () => {
             did,
             targetLink,
           )?.n,
-        ).toBe(3);
+        ).toBe(2);
       });
     },
   );

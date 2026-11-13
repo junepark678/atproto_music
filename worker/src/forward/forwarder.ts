@@ -79,6 +79,7 @@ import type { Logger } from '../do/contracts';
 import type { Db } from '../do/db';
 import { enqueueTrack, matchedRecordingMbid } from '../musicbrainz/store';
 import { canonicalForwardDedupeKey } from '../outbox/forward-key';
+import { hasPresentTrackLove } from '../outbox/live-track-survivor';
 import { nextDeleteWakeAt, runDeleteSlice } from './delete-forwarder';
 import {
   backoffRows,
@@ -91,6 +92,7 @@ import {
   holdLinkRows,
   lastfmKeyRejectedAt,
   lovePayload,
+  loveRowOrigin,
   markLastfmKeyRejected,
   nextUtcMidnight,
   nowPlayingPayload,
@@ -110,6 +112,7 @@ import {
   type ListenType,
   type TrackMetadata,
 } from './listenbrainz-client';
+import { deferredAuthorityStatus } from './love-coverage-authority';
 import {
   HEAD_SQL,
   hasUnkeyedLoves,
@@ -124,6 +127,7 @@ import {
   UNFRAMED_SQL,
   UNKEYED_SQL,
 } from './love-lanes';
+import { loveFallbackKey, lovePrimaryKey, resolveLoveRecording } from './love-recording';
 import { indexForwardLoveTarget, indexLoveOperationTarget, normalizeForwardLoveKeys } from './love-recording-targets';
 import { refreshForwardStorageStats } from './storage-stats';
 import { LASTFM_MIN_INTERVAL_MS, listenbrainzPacingKey, type UpstreamPacing } from './upstream-pacing';
@@ -422,6 +426,19 @@ function loveJob(rt: ForwardRuntime, link: LinkRow, now: number, budget: { remai
           refreshLoveLane(rt.db, link.id, link.generation, lane.love_artist_key, lane.love_track_key);
           continue;
         }
+        const job: Job = {
+          link,
+          kind: head.kind as 'love' | 'unlove',
+          rows: [head],
+          track: entry[1],
+          lane: { artistKey: lane.love_artist_key, trackKey: lane.love_track_key },
+        };
+        // Local settlement must not wait for MBID resolution or hold this key's later love.
+        // execute repeats the check immediately before transport.
+        if (job.kind === 'unlove' && !allowAuthorizedUnlove(rt, job, now)) {
+          refreshLoveLane(rt.db, link.id, link.generation, lane.love_artist_key, lane.love_track_key);
+          continue;
+        }
         if (link.service === 'listenbrainz' && entry[1].recordingMbid === undefined) {
           // An unlove names only the track; the MBID its love was sent with is known locally.
           const known =
@@ -442,20 +459,34 @@ function loveJob(rt: ForwardRuntime, link: LinkRow, now: number, budget: { remai
             rt.db.run('UPDATE forward_love_lanes SET due_at=? WHERE rowid=?', next, lane.rowid);
             continue;
           }
-          const local = known.mbid ?? matchedRecordingMbid(rt.db, key);
+          const isBackfillLove = head.kind === 'love' && loveRowOrigin(head) === 'backfill';
+          const backfillResolution = isBackfillLove ? resolveLoveRecording(rt.db, entry[1]) : null;
+          const local =
+            known.mbid ??
+            (backfillResolution && 'mbid' in backfillResolution
+              ? backfillResolution.mbid
+              : matchedRecordingMbid(rt.db, key));
           if (local === null) {
+            const primaryKey = isBackfillLove ? lovePrimaryKey(entry[1]) : key;
             const resolved = rt.db.one<{ status: string }>(
               'SELECT status FROM mb_tracks WHERE artist_key=? AND track_key=? AND album_key=?',
-              key.artistKey,
-              key.trackKey,
-              key.albumKey ?? '',
+              primaryKey.artistKey,
+              primaryKey.trackKey,
+              primaryKey.albumKey ?? '',
             );
-            if (resolved?.status === 'unmatched') {
+            if (
+              (isBackfillLove && backfillResolution && 'terminal' in backfillResolution) ||
+              (!isBackfillLove && resolved?.status === 'unmatched')
+            ) {
               settleRows(rt.db, [head.id], 'ignored', now, 'no_recording_mbid', false);
               refreshLoveLane(rt.db, link.id, link.generation, lane.love_artist_key, lane.love_track_key);
               continue;
             }
-            enqueueTrack(rt.db, key, now);
+            enqueueTrack(rt.db, primaryKey, now);
+            if (isBackfillLove && resolved?.status === 'unmatched') {
+              const fallback = loveFallbackKey(entry[1]);
+              if (fallback !== null) enqueueTrack(rt.db, fallback, now);
+            }
             const deadline = head.created_at_ms + 24 * 60 * 60 * 1000;
             if (now >= deadline) {
               settleRows(rt.db, [head.id], 'ignored', now, 'mbid_unresolved', false);
@@ -478,13 +509,7 @@ function loveJob(rt: ForwardRuntime, link: LinkRow, now: number, budget: { remai
           entry[1].recordingMbid = local;
           withRecordingMbid(rt.db, head, local);
         }
-        return {
-          link,
-          kind: head.kind as 'love' | 'unlove',
-          rows: [head],
-          track: entry[1],
-          lane: { artistKey: lane.love_artist_key, trackKey: lane.love_track_key },
-        };
+        return job;
       }
     }
   }
@@ -987,6 +1012,7 @@ async function sendListenbrainz(rt: ForwardRuntime, job: Job, token: string): Pr
 // The run
 
 async function execute(rt: ForwardRuntime, job: Job, now: number): Promise<boolean> {
+  if (job.kind === 'unlove' && !allowAuthorizedUnlove(rt, job, now)) return false;
   let credential: string;
   try {
     credential = openLinkCredential(rt.box, job.link);
@@ -1004,6 +1030,74 @@ async function execute(rt: ForwardRuntime, job: Job, now: number): Promise<boole
     await sendListenbrainz(rt, job, credential);
   }
   return true;
+}
+
+/** Re-read the durable authorization at the last synchronous point before either remote effect. */
+function allowAuthorizedUnlove(rt: ForwardRuntime, job: Job, now: number): boolean {
+  if (job.kind !== 'unlove') return true;
+  const row = job.rows[0]!;
+  const current = rt.db.one<{
+    authorization_uri: string | null;
+    authorization_rev: string | null;
+  }>("SELECT authorization_uri,authorization_rev FROM forward_outbox WHERE id=? AND state='queued'", row.id);
+  if (current === null) return true;
+  const operationId = canonicalForwardDedupeKey(row.generation, row.dedupe_key);
+  if (operationId === null) return false;
+  const witness = rt.db.one<{
+    kind: string;
+    authorization_uri: string | null;
+    authorization_rev: string | null;
+  }>(
+    `SELECT kind,authorization_uri,authorization_rev FROM forward_deferred_love_witnesses
+     WHERE link_id=? AND generation=? AND operation_id=?`,
+    row.link_id,
+    row.generation,
+    operationId,
+  );
+  const owned = witness !== null;
+  const witnessMatches =
+    witness === null ||
+    (witness.kind === 'unlove' &&
+      witness.authorization_uri === current.authorization_uri &&
+      witness.authorization_rev === current.authorization_rev);
+  if (!witnessMatches) {
+    settleRows(rt.db, [row.id], 'ignored', now, 'authorization_conflicted', false, job.link.generation);
+    return false;
+  }
+  if (current.authorization_uri === null || current.authorization_rev === null) return true;
+  const conflict =
+    rt.db.one(
+      'SELECT 1 FROM live_pending_removal_events WHERE uri=? AND rev=? AND conflicted=1 LIMIT 1',
+      current.authorization_uri,
+      current.authorization_rev,
+    ) !== null ||
+    rt.db.one(
+      'SELECT 1 FROM live_record_evidence WHERE uri=? AND conflict_rev=? LIMIT 1',
+      current.authorization_uri,
+      current.authorization_rev,
+    ) !== null;
+  if (conflict) {
+    settleRows(rt.db, [row.id], 'ignored', now, 'authorization_conflicted', false, job.link.generation);
+    return false;
+  }
+  if (hasPresentTrackLove(rt.db, job.link.did, job.lane.artistKey, job.lane.trackKey)) {
+    settleRows(rt.db, [row.id], 'ignored', now, 'local_survivor', false, job.link.generation);
+    return false;
+  }
+  const authority = deferredAuthorityStatus(rt.db, { uri: current.authorization_uri, rev: current.authorization_rev });
+  // Legacy acceptance retains its A2 contract, but never overrides a known sticky negative.
+  if (!owned && authority !== 'conflicted') return true;
+  if (authority === 'active') return true;
+  settleRows(
+    rt.db,
+    [row.id],
+    'ignored',
+    now,
+    authority === 'conflicted' ? 'authorization_conflicted' : 'authorization_unavailable',
+    false,
+    job.link.generation,
+  );
+  return false;
 }
 
 export const KIND_MIN_DUE_SQL = `SELECT min(due_at) AS due FROM forward_outbox INDEXED BY forward_outbox_kind_due

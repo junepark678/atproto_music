@@ -67,6 +67,11 @@ export function onMessage(m: ModuleDeps, text: string, receiptMs: number): Messa
               rkey: parsed.rkey,
               source: 'jetstream',
               hintRev: parsed.rev,
+              ...(parsed.collection === m.config.collections?.scrobble ||
+              parsed.collection === m.config.collections?.love ||
+              parsed.collection === `${m.config.prefix}.scrobbleBatch`
+                ? { live: { operation: parsed.operation, ...(parsed.cid ? { cid: parsed.cid } : {}) } }
+                : {}),
               receiptMs,
             },
           ],
