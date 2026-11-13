@@ -23,6 +23,7 @@ import { MemoryRevocations } from '../../../src/app/revocations';
 import type { ForwardOutboxRow } from '../../../src/app/rows';
 import { ensureAccount } from '../../../src/credentials/accounts';
 import { runLinkBackfill } from '../../../src/forward/backfill';
+import { FORWARD_KICK_DEBOUNCE_MS, kickForwardDebounced } from '../../../src/forward/forward-kick';
 import {
   BACKOFF_BASE_MS,
   holdLinkRows,
@@ -32,7 +33,12 @@ import {
   resumeHeldRows,
   rowStates,
 } from '../../../src/forward/forward-outbox';
-import { type ForwardRuntime, KEY_REJECTED_PROBE_MS, runForward } from '../../../src/forward/forwarder';
+import {
+  type ForwardRuntime,
+  forwardExtension,
+  KEY_REJECTED_PROBE_MS,
+  runForward,
+} from '../../../src/forward/forwarder';
 import { LASTFM_CAPS, LastfmClient } from '../../../src/forward/lastfm-client';
 import { patchLink, saveLink } from '../../../src/forward/links';
 import { admitForwardIdentity, projectionListenKey } from '../../../src/forward/projection';
@@ -1491,6 +1497,75 @@ describe('Last.fm forwarding', () => {
     const victim = w.rows(BOB).filter((row) => row.kind === 'scrobble');
     expect(victim).toHaveLength(victimQueued);
     expect(victim.map((row) => row.state)).toEqual(Array(victimQueued).fill('sent'));
+  });
+
+  it('now playing queued and kicked while a forward pass awaits a delete keeps its prompt deadline', async () => {
+    const w = await world();
+    const link = w.linkLastfm(ALICE, 'race');
+    const ctx = w.app.composed.core.extensionTimers;
+    const start = w.clock.nowMs();
+    kickForwardDebounced(ctx);
+    // The timer is consumed before its handler runs.
+    w.app.db.run("DELETE FROM timers WHERE name='forward'");
+    const lbLink = saveLink(
+      { db: w.app.db, clock: w.clock, random: w.rt.random, box: w.rt.box },
+      { did: BOB, service: 'listenbrainz', remoteUser: 'delete-user', credential: 'delete-token' },
+    ).link;
+    w.app.db.run(
+      `INSERT INTO listenbrainz_deletes
+         (id,event_key,link_id,generation,did,identity_key,listened_at,artist_key,track_key,artist,track,source_path,
+          due_at,deadline_at,target_msid,target_listened_at,created_at_ms,updated_at_ms)
+       VALUES ('race-delete','race-event',?,?,?,'race-identity',100,'a','t','A','T','audit',?,?,'race-msid',100,?,?)`,
+      lbLink.id,
+      lbLink.generation,
+      BOB,
+      start,
+      start + 60_000,
+      start,
+      start,
+    );
+    let entered!: () => void;
+    const enteredDelete = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    (w.rt.listenbrainz as { deleteListen: unknown }).deleteListen = async () => {
+      entered();
+      await gate;
+      return { ok: true, rate: { remaining: null, resetInS: null } };
+    };
+    const running = forwardExtension(() => w.rt).timers!.forward!(start, ctx);
+    await enteredDelete;
+
+    // Mid-pass: a now-playing update is queued and kicked.
+    w.clock.advance(100);
+    const now = w.clock.nowMs();
+    enqueueForwards(w.app.db, {
+      did: ALICE,
+      linkId: link.id,
+      items: [
+        {
+          kind: 'nowplaying',
+          startedAtMs: now,
+          artist: 'Artist',
+          track: 'Queued during the pass',
+          payload: { track: { artist: 'Artist', track: 'Queued during the pass' }, startedAtMs: now, origin: 'lastfm' },
+        },
+      ],
+      now,
+      random: enqueueRandom,
+    });
+    expect(kickForwardDebounced(ctx)).toBe(start + FORWARD_KICK_DEBOUNCE_MS);
+
+    release();
+    await running;
+    expect(w.rows(ALICE).some((row) => row.kind === 'nowplaying' && row.state === 'queued')).toBe(true);
+    // The pass's forced reschedule must not push it to the idle poll.
+    const due = w.app.db.one<{ due_at: number }>("SELECT due_at FROM timers WHERE name='forward'")!.due_at;
+    expect(due).toBeLessThanOrEqual(start + FORWARD_KICK_DEBOUNCE_MS);
   });
 
   it('love, unlove, love for one track forwards track.love, track.unlove, track.love in order, and the same track played as now playing twice 10 minutes apart is forwarded twice', async () => {

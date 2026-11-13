@@ -1328,8 +1328,14 @@ export function forwardExtension(runtime: () => ForwardRuntime | null): CoreExte
         }
         refreshForwardStorageStats(rt.db, rt.clock.nowMs());
         if (report.skipped) return;
-        const deleteDue = nextDeleteWakeAt({ db: rt.db, pacing: rt.pacing }, rt.clock.nowMs());
-        const due = [report.nextDueMs, deleteDue]
+        const after = rt.clock.nowMs();
+        const deleteDue = nextDeleteWakeAt({ db: rt.db, pacing: rt.pacing }, after);
+        // The report predates the delete and pull awaits above, and this
+        // schedule is forced: rows queued meanwhile (a now-playing update and
+        // its kick, mid-pass) must set the next deadline too, or the forced
+        // schedule would postpone them to the idle poll.
+        const forwardDue = nextForwardDue(rt, after);
+        const due = [report.nextDueMs, forwardDue, deleteDue]
           .filter((v): v is number => v !== null)
           .reduce<number | null>((a, v) => (a === null ? v : Math.min(a, v)), null);
         const poll = now + FORWARD_IDLE_POLL_MS;
