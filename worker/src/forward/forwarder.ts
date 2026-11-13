@@ -820,7 +820,8 @@ function pickJob(rt: ForwardRuntime, now: number, localWork: Map<string, { remai
   }
   // A live now-playing update is useful only while current (60 s). Let it
   // take the next Last.fm token before historical/live listen backlog, at most
-  // once per NOW_PLAYING_PRIORITY_INTERVAL_MS per link.
+  // once per NOW_PLAYING_PRIORITY_INTERVAL_MS per link; between boosts a link
+  // competes, and sends, by the age of its oldest due job.
   candidates.sort(
     (a, b) =>
       Number(b.nowPlaying) - Number(a.nowPlaying) ||
@@ -835,9 +836,13 @@ function pickJob(rt: ForwardRuntime, now: number, localWork: Map<string, { remai
       budget = { remaining: MAX_LOCAL_WORK_PER_RUN };
       localWork.set(link.id, budget);
     }
-    const job = rt.db.tx(
-      () => nowPlayingJob(rt, link, now) ?? older(scrobbleJob(rt, link, now), loveJob(rt, link, now, budget!)),
-    );
+    const job = rt.db.tx(() => {
+      const backlog = () => older(scrobbleJob(rt, link, now), loveJob(rt, link, now, budget!));
+      // Boosted: now playing goes first. Otherwise this link sends its oldest due
+      // job, so the backlog row whose age won the link this turn is what spends
+      // the token; it cannot keep lending that age to fresh now-playing updates.
+      return nowPlaying ? (nowPlayingJob(rt, link, now) ?? backlog()) : older(nowPlayingJob(rt, link, now), backlog());
+    });
     if (job !== null) {
       if (nowPlaying && job.kind === 'nowplaying') boostedAt.set(link.id, now);
       return job;

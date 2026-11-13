@@ -1293,7 +1293,7 @@ describe('Last.fm forwarding', () => {
     expect(w.rows().find((row) => row.kind === 'scrobble')).toMatchObject({ state: 'queued' });
   });
 
-  it("boosts one link's now playing ahead of other links at most once per NOW_PLAYING_PRIORITY_INTERVAL_MS", async () => {
+  it("a second now-playing update inside NOW_PLAYING_PRIORITY_INTERVAL_MS waits behind another link's older scrobble", async () => {
     const w = await world();
     const backlogLink = w.linkLastfm(BOB, 'older_backlog');
     const playerLink = w.linkLastfm(ALICE, 'current_player');
@@ -1348,6 +1348,44 @@ describe('Last.fm forwarding', () => {
     w.clock.advance(SECOND);
     await w.run();
     expect(w.lastfm.nowPlayingCalls.map((call) => call.track)).toEqual(['First', 'Second']);
+  });
+
+  it('a link with an old scrobble cannot keep sending fresh now playing ahead of it and starve other links', async () => {
+    const w = await world();
+    const player = w.linkLastfm(ALICE, 'player');
+    w.linkLastfm(BOB, 'victim');
+    w.scrobbles(ALICE, 1, 'anchor');
+    w.clock.advance(SECOND);
+    w.scrobbles(BOB, 1, 'victim');
+    for (let i = 0; i < 65; i++) {
+      w.clock.advance(SECOND);
+      const startedAtMs = w.clock.nowMs();
+      enqueueForwards(w.app.db, {
+        did: ALICE,
+        linkId: player.id,
+        items: [
+          {
+            kind: 'nowplaying',
+            startedAtMs,
+            artist: 'Artist',
+            track: `Track ${i}`,
+            payload: { track: { artist: 'Artist', track: `Track ${i}` }, startedAtMs, origin: 'lastfm' },
+          },
+        ],
+        now: startedAtMs,
+        random: enqueueRandom,
+      });
+      await w.run();
+    }
+    // Both links' scrobbles went out; now playing kept being forwarded, boosted at most every 30 s.
+    expect(w.lastfm.calls.count({ nsid: 'track.scrobble' })).toBe(2);
+    expect(
+      w
+        .rows()
+        .filter((row) => row.kind === 'scrobble')
+        .map((row) => row.state),
+    ).toEqual(['sent', 'sent']);
+    expect(w.lastfm.nowPlayingCalls.length).toBeGreaterThanOrEqual(60);
   });
 
   it('love, unlove, love for one track forwards track.love, track.unlove, track.love in order, and the same track played as now playing twice 10 minutes apart is forwarded twice', async () => {
