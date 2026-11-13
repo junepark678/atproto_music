@@ -143,6 +143,23 @@ function retry(db: Db, link: PullLink, state: PullState, reason: string, now: nu
   return due;
 }
 
+function retryCredentialAvailability(db: Db, link: PullLink, random: Random, now: number): number {
+  // Local key/configuration recovery is independent of the shared upstream
+  // failure budget. Keep checking forever at a bounded cadence so restoring
+  // an old encryption key can resume the link without relinking it.
+  const due = now + dueJitter(random, LINKED_PULL_RETRY_BASE_MS);
+  db.run(
+    `UPDATE linked_pull_state SET retry_at_ms=?,poll_next_at_ms=?,hold_reason='credential_unavailable',
+      updated_at_ms=? WHERE link_id=? AND generation=?`,
+    due,
+    due,
+    now,
+    link.id,
+    link.generation,
+  );
+  return due;
+}
+
 export interface LinkedPullPollerDeps {
   moduleDeps: ModuleDeps;
   db: Db;
@@ -954,7 +971,8 @@ export async function runLinkedLastfmPull(
       credential = openLinkCredential(linkDeps.box, link);
     } catch (error) {
       held = safeReason(error);
-      setHold(deps.db, link, held, now, null);
+      if (held === 'credential_unavailable') nextDueMs = retryCredentialAvailability(deps.db, link, deps.random, now);
+      else setHold(deps.db, link, held, now, null);
       continue;
     }
     if (!current(deps.db, link)) continue;
