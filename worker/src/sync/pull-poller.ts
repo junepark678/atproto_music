@@ -532,9 +532,10 @@ async function runListenbrainzListenPage(
   );
   if (!current(deps.db, link)) return { requested: 1, staged: 0, held: null, nextDueMs: null };
   if (response.kind === 'rate_limited') {
-    if (response.untilMs !== null) pacer.holdUntil(response.untilMs);
+    const upstreamDue = response.untilMs === null ? null : Math.min(response.untilMs, now + LINKED_PULL_RETRY_CAP_MS);
+    if (upstreamDue !== null) pacer.holdUntil(upstreamDue);
     const retryDue = retry(deps.db, link, state, 'upstream_retry', now);
-    const due = Math.max(retryDue, response.untilMs ?? now + 60_000);
+    const due = Math.max(retryDue, upstreamDue ?? now + 60_000);
     deps.db.run(
       'UPDATE linked_pull_state SET poll_next_at_ms=?,retry_at_ms=? WHERE link_id=? AND generation=?',
       due,
@@ -696,9 +697,10 @@ async function runListenbrainzFeedbackPage(
   );
   if (!current(deps.db, link)) return { requested: 1, staged: 0, held: null, nextDueMs: null };
   if (response.kind === 'rate_limited') {
-    if (response.untilMs !== null) pacer.holdUntil(response.untilMs);
+    const upstreamDue = response.untilMs === null ? null : Math.min(response.untilMs, now + LINKED_PULL_RETRY_CAP_MS);
+    if (upstreamDue !== null) pacer.holdUntil(upstreamDue);
     const retryDue = retry(deps.db, link, state, 'upstream_retry', now);
-    const due = Math.max(retryDue, response.untilMs ?? now + 60_000);
+    const due = Math.max(retryDue, upstreamDue ?? now + 60_000);
     deps.db.run(
       'UPDATE linked_pull_state SET poll_next_at_ms=?,retry_at_ms=? WHERE link_id=? AND generation=?',
       due,

@@ -37,6 +37,7 @@ async function setup(h: Parameters<Parameters<typeof withHarness>[0]>[0]) {
   remote.addToken('remote-lb', TOKEN);
   const fetch = async (url: string | URL | Request, init?: RequestInit) =>
     remote.fetch(url instanceof Request ? url : new Request(url, init));
+  const pacerDeadlines: number[] = [];
   const writerAvailability = async (): Promise<PullWriterAvailability> => ({
     available: false,
     reason: 'session_missing',
@@ -53,11 +54,11 @@ async function setup(h: Parameters<Parameters<typeof withHarness>[0]>[0]) {
     apiKey: null,
     sharedSecret: null,
     intervalMs: 600_000,
-    pacer: { take: () => null, holdUntil: () => undefined },
-    listenbrainzPacer: () => ({ take: () => null, holdUntil: () => undefined }),
+    pacer: { take: () => null, holdUntil: (untilMs: number) => pacerDeadlines.push(untilMs) },
+    listenbrainzPacer: () => ({ take: () => null, holdUntil: (untilMs: number) => pacerDeadlines.push(untilMs) }),
     writerAvailability,
   });
-  return { linkId, remote, deps };
+  return { linkId, remote, deps, pacerDeadlines };
 }
 
 describe('linked ListenBrainz timer poller', () => {
@@ -405,5 +406,31 @@ it.each(['listen', 'love'])('429 retries beyond eight attempts with capped delay
     );
     expect.soft(row).toMatchObject({ failures: 10, hold_reason: 'upstream_retry' });
     expect.soft(row?.poll_next_at_ms).not.toBeNull();
+  }),
+);
+
+it.each(['listen', 'love'])('caps oversized upstream reset and resumes polling at one hour (%s)', async (phase) =>
+  withHarness(async (h) => {
+    const { linkId, remote, deps, pacerDeadlines } = await setup(h);
+    h.db.run('UPDATE linked_pull_state SET poll_phase=? WHERE link_id=?', phase, linkId);
+    const path = phase === 'listen' ? '/1/user/remote-lb/listens' : '/1/feedback/user/remote-lb/get-feedback';
+    remote.fail({ status: 429, resetIn: 7200, path });
+
+    const now = h.m.clock.nowMs();
+    const first = await runLinkedLastfmPull(deps());
+    const deadline = now + 3_600_000;
+    expect(first.nextDueMs).toBe(deadline);
+    expect(pacerDeadlines).toEqual([deadline]);
+    expect(
+      h.db.one<{ poll_next_at_ms: number; retry_at_ms: number }>(
+        'SELECT poll_next_at_ms,retry_at_ms FROM linked_pull_state WHERE link_id=?',
+        linkId,
+      ),
+    ).toEqual({ poll_next_at_ms: deadline, retry_at_ms: deadline });
+
+    h.kit.clock.advance(3_600_000);
+    await runLinkedLastfmPull(deps());
+    expect(remote.calls.entries).toHaveLength(2);
+    expect(remote.calls.entries[1]?.status).toBe(200);
   }),
 );
