@@ -1057,6 +1057,28 @@ it('keeps repeated same-CID removal windows distinct and only authorizes the mat
   });
 });
 
+it('expired unfinished authorization replay cannot authorize later windows', async () => {
+  await withMigratedDb((db) => {
+    setup(db);
+    const rev = '2222222222222';
+    for (let i = 0; i < 128; i++)
+      recordPendingRemoval(db, pending(String(i).padStart(13, '0'), '3333333333333', `cid-${i}`));
+    expect(authorizePendingRemovals(db, { uri: URI, rev, action: 'delete' }, NOW)).toBeGreaterThan(0);
+    expect(db.one('SELECT scan_complete FROM live_pending_removal_events WHERE uri=? AND rev=?', URI, rev)).toEqual({
+      scan_complete: 0,
+    });
+    db.run('UPDATE live_pending_removal_events SET expires_at_ms=? WHERE uri=? AND rev=?', NOW - 1, URI, rev);
+    recordPendingRemoval(db, pending('0000000000128', '3333333333333', 'after-expiry'));
+    authorizePendingRemovals(db, { uri: URI, rev, action: 'delete' }, NOW);
+    expect(
+      db.one(
+        'SELECT authorized_rev FROM live_pending_removals WHERE window_lo=?',
+        '0000000000128',
+      ),
+    ).toEqual({ authorized_rev: null });
+  });
+});
+
 it('requires the matching replacement CID or an in-window real delete, and rechecks conflicts before effects', async () => {
   await withMigratedDb((db) => {
     setup(db);

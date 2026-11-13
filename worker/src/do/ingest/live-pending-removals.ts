@@ -391,6 +391,7 @@ function processAuthorizationPage(db: Db, event: AuthorizationEvent, nowMs: numb
     const eligible =
       row.window_lo < event.rev &&
       event.rev <= row.window_hi &&
+      (event.conflicted !== 0 || event.expires_at_ms > nowMs) &&
       (event.conflicted !== 0 || eventMatchesPending(event, row.replaced_by_cid));
     if (!eligible) continue;
     if (
