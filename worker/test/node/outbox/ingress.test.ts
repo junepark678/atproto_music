@@ -4,10 +4,10 @@
 
 import { listenKey } from '@atmusic/core/listen-key';
 import { parseRfc3339 } from '@atmusic/core/timestamp';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { Db } from '../../../src/do/db';
 import { upsertNowPlaying } from '../../../src/do/read/now-playing';
-import { enqueueForwards, nowPlayingKey } from '../../../src/outbox/forward-enqueue';
+import { enqueueForwards, nowPlayingKey, rewriteNowPlayingForwardStart } from '../../../src/outbox/forward-enqueue';
 import { storedForwardDedupeKey } from '../../../src/outbox/forward-key';
 import { acceptListens } from '../../../src/outbox/ingress';
 import { enqueueLove, enqueueUnlove } from '../../../src/outbox/love-ops';
@@ -147,6 +147,57 @@ describe('acceptListens', () => {
       });
     },
   );
+
+  it('reads forward_outbox only by link, kind and exact key when it rewrites a now-playing start', async () => {
+    await withHarness(async (h) => {
+      h.account(h.alice);
+      h.link(h.alice, 'lastfm');
+      h.link(h.alice, 'listenbrainz');
+      const { row } = upsertNowPlaying(h.m, { did: h.alice, artist: 'Radiohead', track: 'Reckoner', source: 'web' });
+      enqueueForwards(h.db, {
+        did: h.alice,
+        items: [
+          {
+            kind: 'nowplaying',
+            startedAtMs: row.started_at_ms,
+            artist: 'Radiohead',
+            track: 'Reckoner',
+            payload: { track: { artist: 'Radiohead', track: 'Reckoner' }, startedAtMs: row.started_at_ms },
+          },
+        ],
+        now: h.kit.clock.nowMs(),
+        random: h.m.random,
+      });
+      const reads: string[] = [];
+      const one = h.db.one.bind(h.db);
+      const all = h.db.all.bind(h.db);
+      const spyOne = vi.spyOn(h.db, 'one').mockImplementation(((sql: string, ...p: never[]) => {
+        reads.push(sql);
+        return one(sql, ...p);
+      }) as typeof h.db.one);
+      const spyAll = vi.spyOn(h.db, 'all').mockImplementation(((sql: string, ...p: never[]) => {
+        reads.push(sql);
+        return all(sql, ...p);
+      }) as typeof h.db.all);
+      rewriteNowPlayingForwardStart(
+        h.db,
+        h.alice,
+        'Radiohead',
+        'Reckoner',
+        row.started_at_ms,
+        row.started_at_ms - 60_000,
+      );
+      spyOne.mockRestore();
+      spyAll.mockRestore();
+      const outboxReads = reads.filter((sql) => /FROM forward_outbox/.test(sql));
+      expect(outboxReads).toHaveLength(2);
+      for (const sql of outboxReads) expect(sql).toMatch(/WHERE link_id=\? AND kind='nowplaying' AND dedupe_key=\?/);
+      const payloads = h.db
+        .all<{ payload_json: string }>("SELECT payload_json FROM forward_outbox WHERE kind='nowplaying'")
+        .map((r) => (JSON.parse(r.payload_json) as { startedAtMs: number }).startedAtMs);
+      expect(payloads).toEqual([row.started_at_ms - 60_000, row.started_at_ms - 60_000]);
+    });
+  });
 
   it('marks matching current tracks scrobbled and corrects start only inside duration or 600 second fallback bounds', async () => {
     await withHarness(async (h) => {

@@ -45,7 +45,7 @@ import { deferredAuthorityValid, materializeLoveAuthority } from '../forward/lov
 import { recordDeferredLoveIntents } from '../forward/love-deferral-storage';
 import { noteForwardLoveCurrent, touchLoveLane } from '../forward/love-lanes';
 import { indexForwardLoveTarget } from '../forward/love-recording-targets';
-import { canonicalForwardDedupeKey, storedForwardDedupeKey } from './forward-key';
+import { storedForwardDedupeKey } from './forward-key';
 import { dropStaleReceipt, forwardCoverage, noteForwardReceipt } from './forward-receipts';
 import { hasPresentTrackLove } from './live-track-survivor';
 import { newOperationId } from './operations';
@@ -73,7 +73,12 @@ export function nowPlayingKey(did: string, startedAtMs: number, artist: string, 
     .digest('hex');
 }
 
-/** Keep the current delivery's dedupe identity aligned when scrobble proof corrects its start time. */
+/**
+ * Keep the current delivery's dedupe identity aligned when scrobble proof corrects its start time.
+ * Runs inside the synchronous acceptance transaction, so it reads forward_outbox only through
+ * UNIQUE(link_id,kind,dedupe_key): one exact lookup per link of the DID at its current generation,
+ * never a scan of the shared outbox by DID.
+ */
 export function rewriteNowPlayingForwardStart(
   db: Db,
   did: string,
@@ -84,13 +89,18 @@ export function rewriteNowPlayingForwardStart(
 ): void {
   const oldKey = nowPlayingKey(did, oldStartedAtMs, artist, track);
   const nextKey = nowPlayingKey(did, startedAtMs, artist, track);
-  const rows = db.all<{ id: string; generation: number; dedupe_key: string; payload_json: string }>(
-    `SELECT id,generation,dedupe_key,payload_json FROM forward_outbox
-     WHERE did=? AND kind='nowplaying'`,
+  const links = db.all<{ id: string; generation: number }>(
+    'SELECT id,generation FROM linked_accounts WHERE did=? ORDER BY id',
     did,
   );
-  for (const row of rows) {
-    if (canonicalForwardDedupeKey(row.generation, row.dedupe_key) !== oldKey) continue;
+  for (const link of links) {
+    const row = db.one<{ id: string; generation: number; payload_json: string }>(
+      `SELECT id,generation,payload_json FROM forward_outbox
+       WHERE link_id=? AND kind='nowplaying' AND dedupe_key=?`,
+      link.id,
+      storedForwardDedupeKey(link.generation, oldKey),
+    );
+    if (row === null) continue;
     let payload: Record<string, unknown>;
     try {
       payload = JSON.parse(row.payload_json) as Record<string, unknown>;
