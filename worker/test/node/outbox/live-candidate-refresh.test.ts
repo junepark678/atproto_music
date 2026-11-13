@@ -4,7 +4,7 @@ import type { Db } from '../../../src/do/db';
 import { recordLiveEvidence } from '../../../src/do/ingest/live-evidence';
 import { applyRecordProof } from '../../../src/do/write/apply-record';
 import { applySnapshotChunk } from '../../../src/do/write/apply-snapshot';
-import { runLinkBackfill } from '../../../src/forward/backfill';
+import { payloadForHistoryRow, runLinkBackfill } from '../../../src/forward/backfill';
 import { lateAccept } from '../../../src/forward/live-acceptance';
 import {
   ALICE,
@@ -121,6 +121,31 @@ async function refresh(
       created_at_ms: before.created_at_ms,
       expires_at_ms: before.expires_at_ms,
     });
+    if (!love) {
+      const projected = db.one<{ artist_key: string; track_key: string; album_key: string | null }>(
+        'SELECT artist_key,track_key,album_key FROM scrobbles LIMIT 1',
+      )!;
+      // Distinct matches prove promotion uses the same album-specific
+      // recording selection as indexed history.
+      db.run(
+        `INSERT OR REPLACE INTO mb_tracks(artist_key,track_key,album_key,status,recording_mbid,created_at_ms)
+         VALUES(?,?,?,'matched',?,?)`,
+        projected.artist_key,
+        projected.track_key,
+        projected.album_key ?? '',
+        '11111111-1111-4111-8111-111111111111',
+        NOW_MS,
+      );
+      db.run(
+        `INSERT OR REPLACE INTO mb_tracks(artist_key,track_key,album_key,status,recording_mbid,created_at_ms)
+         VALUES(?,?,?,'matched',?,?)`,
+        projected.artist_key,
+        projected.track_key,
+        '',
+        '22222222-2222-4222-8222-222222222222',
+        NOW_MS,
+      );
+    }
     expect(
       db.tx(() =>
         lateAccept(db, {
@@ -134,9 +159,57 @@ async function refresh(
         }),
       ),
     ).toBe(1);
+    if (!love) {
+      const row = db.one<{
+        kind: 'scrobble';
+        uri: string;
+        cid: string;
+        event_at: string;
+        artist: string;
+        track: string;
+        album: string | null;
+        recording_mbid: string | null;
+        artist_key: string;
+        track_key: string;
+        album_key: string | null;
+        listened_at: string;
+      }>(
+        "SELECT 'scrobble' AS kind,uri,cid,listened_at AS event_at,artist,track,album,recording_mbid,artist_key,track_key,album_key,listened_at FROM scrobbles LIMIT 1",
+      )!;
+      const identity = db.one<{ identity_key: string }>('SELECT identity_key FROM forward_admissions LIMIT 1')!;
+      const link = db.one<{
+        id: string;
+        did: string;
+        generation: number;
+        service: 'lastfm' | 'listenbrainz';
+        generation_start_seq: number;
+      }>("SELECT * FROM linked_accounts WHERE id='candidate-link'")!;
+      const expected = payloadForHistoryRow(db, link, row, identity.identity_key)!;
+      const queued = JSON.parse(
+        db.one<{ payload_json: string }>('SELECT payload_json FROM forward_outbox')!.payload_json,
+      );
+      expect(queued).toEqual(expected.payload);
+      expect(queued).toEqual({
+        listen: {
+          artist: row.artist,
+          track: row.track,
+          listenedAt: row.listened_at,
+          album: row.album,
+          recordingMbid: '11111111-1111-4111-8111-111111111111',
+        },
+        origin: 'backfill',
+      });
+    }
     const queuedBeforeHistory = db.all('SELECT link_id,kind,dedupe_key FROM forward_outbox');
     for (let turn = 0; turn < 5; turn++) await runLinkBackfill(db, random, NOW_MS + 1000);
     expect(db.all('SELECT link_id,kind,dedupe_key FROM forward_outbox')).toEqual(queuedBeforeHistory);
+    if (!love) {
+      const queued = JSON.parse(
+        db.one<{ payload_json: string }>('SELECT payload_json FROM forward_outbox')!.payload_json,
+      );
+      expect(queued.listen.album).toBe(db.one<{ album: string | null }>('SELECT album FROM scrobbles LIMIT 1')!.album);
+      expect(queued.listen.recordingMbid).toBe('11111111-1111-4111-8111-111111111111');
+    }
     expect(db.all('SELECT * FROM forward_outbox')).toHaveLength(1);
     expect(
       db.tx(() =>

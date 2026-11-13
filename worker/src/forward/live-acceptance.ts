@@ -3,7 +3,7 @@ import type { Db } from '../do/db';
 import { countLiveAdmission, type LiveEvidence } from '../do/ingest/live-evidence';
 import { projectedListensOfRecord } from '../do/write/apply-record';
 import { enqueueForwards } from '../outbox/forward-enqueue';
-import { type HistoryRow, payloadForHistoryRow } from './backfill';
+import { type HistoryRow, payloadForHistoryRow, scrobbleHistoryRow } from './backfill';
 import { cancelLoveApiRecipientDecisionsForUri } from './love-api-recipients';
 import { projectionListenKey } from './projection';
 
@@ -92,20 +92,8 @@ export function lateAccept(
           generation_start_seq: number;
         }>(`SELECT * FROM linked_accounts WHERE did=? AND status='active' AND forward_scrobbles=1`, input.did);
         const acceptedBeforeLinks = accepted;
-        const historyRow: HistoryRow = {
-          kind: 'scrobble',
-          uri: input.uri,
-          cid: row.cid,
-          event_at: row.listened_at,
-          artist: row.artist,
-          track: row.track,
-          album: null,
-          recording_mbid: row.recording_mbid,
-          artist_key: row.artist_key,
-          track_key: row.track_key,
-          album_key: null,
-          listened_at: row.listened_at,
-        };
+        const historyRow = scrobbleHistoryRow(db, input.did, row.uri);
+        if (!historyRow || historyRow.cid !== row.cid) continue;
         for (const link of links) {
           if (link.service === 'lastfm' && Date.parse(row.listened_at) < input.nowMs - 13 * 86_400_000) continue;
           const admitted = payloadForHistoryRow(db, link, historyRow, candidate.identity_key, {

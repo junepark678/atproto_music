@@ -103,6 +103,20 @@ export type HistoryRow = {
   listened_at: string | null;
 };
 
+// Keep live promotion and history backfill on the same canonical scrobble
+// projection. The album fields are payload inputs: omitting them can select a
+// different album-specific MusicBrainz recording for the same listen.
+const SCROBBLE_HISTORY_PROJECTION = `s.uri,s.cid,s.listened_at AS event_at,s.artist,s.track,s.album,
+  s.recording_mbid,s.artist_key,s.track_key,s.album_key,s.listened_at`;
+
+export function scrobbleHistoryRow(db: Db, did: string, uri: string): HistoryRow | null {
+  return db.one<HistoryRow>(
+    `SELECT 'scrobble' AS kind,${SCROBBLE_HISTORY_PROJECTION} FROM scrobbles s WHERE s.did=? AND s.uri=?`,
+    did,
+    uri,
+  );
+}
+
 function cursorOf(raw: string | null): Cursor | null {
   if (raw === null) return null;
   try {
@@ -128,8 +142,7 @@ function candidates(
   const scrobbleKeyset = cursor === null ? '' : ' AND (s.listened_at,s.uri) < (?,?)';
   const loveKeyset = cursor === null ? '' : ' AND (l.created_at,l.uri) < (?,?)';
   const scrobbles = db.all<HistoryRow>(
-    `SELECT 'scrobble' AS kind,s.uri,s.cid,s.listened_at AS event_at,s.artist,s.track,s.album,
-            s.recording_mbid,s.artist_key,s.track_key,s.album_key,s.listened_at
+    `SELECT 'scrobble' AS kind,${SCROBBLE_HISTORY_PROJECTION}
      FROM scrobbles s WHERE s.did=?${cutoffFilter}${scrobbleKeyset}
      ORDER BY s.listened_at DESC,s.uri DESC LIMIT ?`,
     link.did,
