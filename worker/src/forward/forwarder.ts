@@ -771,18 +771,19 @@ export const LANE_FIRST_DUE_SQL = `SELECT priority,head_created_at_ms FROM forwa
  * every token and starve other links' scrobbles, loves and imports.
  */
 export const NOW_PLAYING_PRIORITY_INTERVAL_MS = 30_000;
-/**
- * Server-wide bound on boosted Last.fm now playing: at most one boost per this
- * interval across all Last.fm links, which share one 1 request/second token.
- * Many links taking turns therefore cannot fill every token with boosts; at
- * least half of the Last.fm tokens stay with ordinary work (scrobbles, loves,
- * imports). ListenBrainz paces each link separately and needs no global bound.
- */
-export const NOW_PLAYING_LASTFM_BOOST_INTERVAL_MS = 2_000;
 /** When each link's now playing last took the cross-link boost, per Db handle (in memory). */
 const nowPlayingBoostedAt = new WeakMap<Db, Map<string, number>>();
-/** When any Last.fm link last took the boost, per Db handle (in memory). */
-const lastfmBoostedAt = new WeakMap<Db, number>();
+/**
+ * Server-wide bound on boosted Last.fm now playing, counted in turns rather
+ * than time: whether the last Last.fm selection was a boost, per Db handle (in
+ * memory). All Last.fm links share one 1 request/second token, so after a
+ * boost the next Last.fm turn goes to ordinary work (scrobbles, loves,
+ * imports, or unboosted now playing in age order). Boosts therefore never take
+ * more than every other Last.fm token, however many links take turns and
+ * however slowly Last.fm answers. ListenBrainz paces each link separately and
+ * needs no global bound.
+ */
+const lastfmLastTurnBoosted = new WeakMap<Db, boolean>();
 
 function pickJob(rt: ForwardRuntime, now: number, localWork: Map<string, { remaining: number }>): Job | null {
   const links = rt.db.all<LinkRow>("SELECT * FROM linked_accounts WHERE status='active' ORDER BY id");
@@ -817,11 +818,7 @@ function pickJob(rt: ForwardRuntime, now: number, localWork: Map<string, { remai
     const oldest = Math.min(...due.filter((hint) => hint.priority === priority).map((hint) => hint.created_at_ms));
     const nowPlayingHint = hints[0];
     const lastBoost = boostedAt.get(link.id);
-    const lastLastfmBoost = lastfmBoostedAt.get(rt.db);
-    const globalBoostFree =
-      link.service !== 'lastfm' ||
-      lastLastfmBoost === undefined ||
-      now - lastLastfmBoost >= NOW_PLAYING_LASTFM_BOOST_INTERVAL_MS;
+    const globalBoostFree = link.service !== 'lastfm' || lastfmLastTurnBoosted.get(rt.db) !== true;
     candidates.push({
       link,
       priority,
@@ -860,10 +857,9 @@ function pickJob(rt: ForwardRuntime, now: number, localWork: Map<string, { remai
       return nowPlaying ? (nowPlayingJob(rt, link, now) ?? backlog()) : older(nowPlayingJob(rt, link, now), backlog());
     });
     if (job !== null) {
-      if (nowPlaying && job.kind === 'nowplaying') {
-        boostedAt.set(link.id, now);
-        if (link.service === 'lastfm') lastfmBoostedAt.set(rt.db, now);
-      }
+      const boosted = nowPlaying && job.kind === 'nowplaying';
+      if (boosted) boostedAt.set(link.id, now);
+      if (link.service === 'lastfm') lastfmLastTurnBoosted.set(rt.db, boosted);
       return job;
     }
   }
