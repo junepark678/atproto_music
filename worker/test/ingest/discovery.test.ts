@@ -254,6 +254,7 @@ describe('relay discovery', () => {
           reports.push(await discover(m, at, { pageLimit: 5, pages: 1 }));
         },
         gc: noop,
+        'owner-resnapshot': noop,
       };
       k.resetCalls();
 

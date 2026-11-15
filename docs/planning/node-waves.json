@@ -148,7 +148,7 @@
      "worker/test/storage/timers-extensions.test.ts › a kicked outbox handler runs while a core snapshot handler is blocked, and the core watchdog runs while an outbox handler is blocked",
      "worker/test/storage/timers-extensions.test.ts › runDue with a names subset claims only those timers, and two lanes over two AlarmStorage objects never hit TimerReentryError",
      "worker/test/storage/timers-extensions.test.ts › a core runDue started while outbox is claimed leaves ~running:outbox untouched and records no failure",
-     "worker/test/storage/timers-extensions.test.ts › TIMER_NAMES is the seven core names, EXTENSION_TIMER_NAMES the ten extension names, and nextDue for one lane ignores the other lane's due rows",
+     "worker/test/storage/timers-extensions.test.ts › TIMER_NAMES is the eight core names, EXTENSION_TIMER_NAMES the ten extension names, and nextDue for one lane ignores the other lane's due rows",
      "worker/test/composition/index-core.test.ts › app/index-core.ts and its host seams import no Workers modules or runtime environment values"
     ]
    },

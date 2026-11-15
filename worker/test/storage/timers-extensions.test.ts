@@ -176,7 +176,7 @@ function extension(
   return { name, timers };
 }
 
-it("TIMER_NAMES is the seven core names, EXTENSION_TIMER_NAMES the ten extension names, and nextDue for one lane ignores the other lane's due rows", async () => {
+it("TIMER_NAMES is the eight core names, EXTENSION_TIMER_NAMES the ten extension names, and nextDue for one lane ignores the other lane's due rows", async () => {
   expect([...TIMER_NAMES]).toEqual([
     'drain',
     'snapshot',
@@ -185,6 +185,7 @@ it("TIMER_NAMES is the seven core names, EXTENSION_TIMER_NAMES the ten extension
     'identity-sweep',
     'discovery',
     'gc',
+    'owner-resnapshot',
   ]);
   expect([...EXTENSION_TIMER_NAMES]).toEqual([
     'outbox',
@@ -268,6 +269,7 @@ it('runDue with a names subset claims only those timers, and two lanes over two 
       'musicbrainz',
       'oauth-keepalive',
       'outbox',
+      'owner-resnapshot',
       'snapshot',
       'status-sweep',
     ]);
@@ -276,7 +278,14 @@ it('runDue with a names subset claims only those timers, and two lanes over two 
     // The default lane is the core lane: no extension timer runs.
     calls.length = 0;
     const coreRun = await runDue(storage, db, NOW, handlers, UNLIMITED);
-    expect(coreRun.ran).toEqual(['snapshot', 'jetstream-watchdog', 'status-sweep', 'identity-sweep', 'discovery']);
+    expect(coreRun.ran).toEqual([
+      'snapshot',
+      'jetstream-watchdog',
+      'status-sweep',
+      'identity-sweep',
+      'discovery',
+      'owner-resnapshot',
+    ]);
     expect(timerRows(db).map((r) => r.name)).toEqual([
       'backup',
       'cover-art',

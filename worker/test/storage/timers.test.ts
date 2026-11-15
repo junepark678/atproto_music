@@ -276,8 +276,14 @@ describe('timers', () => {
       expect(calls.map((c) => c.name)).toEqual(['drain', 'snapshot']);
       expect(first.ran).toEqual(['drain', 'snapshot']);
       // jetstream-watchdog was cancelled by snapshot, so it is not deferred.
-      expect(first.deferred).toEqual(['status-sweep', 'identity-sweep', 'discovery', 'gc']);
-      expect(timerRows(db).map((r) => r.name)).toEqual(['discovery', 'gc', 'identity-sweep', 'status-sweep']);
+      expect(first.deferred).toEqual(['status-sweep', 'identity-sweep', 'discovery', 'gc', 'owner-resnapshot']);
+      expect(timerRows(db).map((r) => r.name)).toEqual([
+        'discovery',
+        'gc',
+        'identity-sweep',
+        'owner-resnapshot',
+        'status-sweep',
+      ]);
 
       const second = await runDue(storage, db, NOW, handlers, {
         maxRuns: 100,
@@ -288,14 +294,14 @@ describe('timers', () => {
       expect(second).toEqual({
         ran: ['status-sweep'],
         failed: [],
-        deferred: ['identity-sweep', 'discovery', 'gc'],
+        deferred: ['identity-sweep', 'discovery', 'gc', 'owner-resnapshot'],
         recovered: [],
         superseded: false,
       });
 
       const third = await runDue(storage, db, NOW, handlers, { maxRuns: 0 });
       expect(third.ran).toEqual([]);
-      expect(third.deferred).toEqual(['identity-sweep', 'discovery', 'gc']);
+      expect(third.deferred).toEqual(['identity-sweep', 'discovery', 'gc', 'owner-resnapshot']);
       expect(calls).toHaveLength(3);
 
       // Not due yet at an earlier now: nothing runs, nothing deferred.
@@ -311,6 +317,7 @@ describe('timers', () => {
         'identity-sweep',
         'discovery',
         'gc',
+        'owner-resnapshot',
       ]);
       expect(timerRows(db)).toEqual([]);
 
@@ -324,7 +331,7 @@ describe('timers', () => {
       });
       expect((await runDue(storage, db, NOW, reentrant.handlers, UNLIMITED)).ran).toEqual(['gc']);
       expect(inner).toBeInstanceOf(TimerReentryError);
-      expect(calls).toHaveLength(6);
+      expect(calls).toHaveLength(7);
     });
   });
 
