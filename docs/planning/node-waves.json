@@ -1986,7 +1986,7 @@
      "worker/test/node/outbox/batch.test.ts › a classified 403 $error denial of $nsid holds the batch lane for re-consent and keeps the intent",
      "worker/test/node/imports/writer.test.ts › finishes an attempted legacy single at its original rkey and never rebatches it",
      "worker/test/node/imports/writer.test.ts › only reads an interrupted tenth legacy attempt: present settles, absent fails without an eleventh send or a batch",
-     "worker/test/node/imports/writer.test.ts › preserves 833 written items, finishes the uncertain legacy singles at their original rkeys and batches the staged rest",
+     "worker/test/bench/import-writer-legacy.test.ts › preserves 833 written items, finishes the uncertain legacy singles at their original rkeys and batches the staged rest",
      "worker/test/node/imports/writer.test.ts › an accepted pre-upgrade request that outlives its client abort and any delay, landing $landing, leaves one record at the original rkey",
      "worker/test/node/outbox/send-certainty.test.ts › an uncertain legacy import single ($name) with a chained Last.fm removal converges at its original rkey",
      "worker/test/node/outbox/send-certainty.test.ts › a schema-4 zero-attempt create whose send committed is removed through Last.fm, never falsely cancelled",
@@ -2140,7 +2140,7 @@
      "worker/test/node/imports/writer.test.ts › a scan that ends at BATCH_SCAN_LIMIT settles what it read and leaves an unfilled container staged until the job end",
      "worker/test/node/imports/writer.test.ts › love-heavy and duplicate-heavy windows progress every slice and never create a short container early",
      "worker/test/node/imports/writer.test.ts › while diskLow reports true the writer creates no operations and the job reports paused with low_disk, and it continues from the same item when space returns",
-     "worker/test/node/imports/writer.test.ts › preserves 833 written items, finishes the uncertain legacy singles at their original rkeys and batches the staged rest",
+     "worker/test/bench/import-writer-legacy.test.ts › preserves 833 written items, finishes the uncertain legacy singles at their original rkeys and batches the staged rest",
      "worker/test/write/apply-batch.test.ts › excludes a container when no entries validate or safe byte limits fail, removing old listens",
      "worker/test/node/journey/import-journey.test.ts › a Last.fm API import of 1,050 listens and an overlapping ListenBrainz ZIP write each unique listen once within the budget and reach done after advancing the clock",
      "worker/test/node/journey/import-journey.test.ts › closing and reopening the database and recomposing the app mid-journey loses and duplicates nothing"
