@@ -180,6 +180,7 @@ describe('parseNodeConfig', () => {
     const cfg = parse({ ...env, LISTENBRAINZ_API_ROOT: 'https://api.listenbrainz.org:443/' });
     expect(cfg.lastfmApiRoot).toBe('https://ws.audioscrobbler.com/2.0/');
     expect(cfg.linkedPullIntervalMs).toBe(600_000);
+    expect(parse({ ...baseEnv(), LINKED_PULL_INTERVAL_MS: '3600000' }).linkedPullIntervalMs).toBe(3_600_000);
     expect(cfg.lastfmAuthUrl).toBe('https://www.last.fm/api/auth/');
     expect(cfg.fixtureOrigins).toBe(false);
     expect(
@@ -190,7 +191,7 @@ describe('parseNodeConfig', () => {
       }),
     ).toMatchObject({ musicbrainzApiRoot: 'https://musicbrainz.example.org/ws/2/', musicbrainzEnabled: false });
     expect(fields(issuesOf(() => parse({ ...baseEnv(), MUSICBRAINZ_ENABLED: '0' })))).toEqual(['MUSICBRAINZ_ENABLED']);
-    for (const value of ['0', '59999', '86400001', '1.5', '9007199254740992'])
+    for (const value of ['0', '59999', '3600001', '1.5', '9007199254740992'])
       expect(fields(issuesOf(() => parse({ ...baseEnv(), LINKED_PULL_INTERVAL_MS: value })))).toContain(
         'LINKED_PULL_INTERVAL_MS',
       );

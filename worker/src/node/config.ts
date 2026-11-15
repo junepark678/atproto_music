@@ -59,7 +59,7 @@ export const DEFAULT_COVER_ART_CACHE_MB = 200;
 export const DEFAULT_MUSICBRAINZ_API_ROOT = 'https://musicbrainz.org/ws/2/';
 export const DEFAULT_LINKED_PULL_INTERVAL_MS = 600_000;
 export const MIN_LINKED_PULL_INTERVAL_MS = 60_000;
-export const MAX_LINKED_PULL_INTERVAL_MS = 86_400_000;
+export const MAX_LINKED_PULL_INTERVAL_MS = 3_600_000;
 export const DEFAULT_LASTFM_KNOWN_CLIENTS = 'panoScrobbler:panoScrobbler:Pano Scrobbler';
 
 /**
@@ -405,7 +405,7 @@ export function parseNodeConfig(env: NodeEnv, opts: ParseNodeConfigOptions = {})
     linkedPullIntervalMs < MIN_LINKED_PULL_INTERVAL_MS ||
     linkedPullIntervalMs > MAX_LINKED_PULL_INTERVAL_MS
   )
-    issue('LINKED_PULL_INTERVAL_MS', 'must be a safe integer from 60000 through 86400000');
+    issue('LINKED_PULL_INTERVAL_MS', 'must be a safe integer from 60000 through 3600000');
 
   // --- Last.fm known public clients (ADR §7.4) --------------------------------
   const lastfmKnownClients: LastfmKnownClient[] = [];
