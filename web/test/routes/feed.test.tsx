@@ -1,7 +1,35 @@
 import { describe, expect, it, vi } from 'vitest';
-import { example, META, mountOwned, ownTest, settleRouteImport } from './support';
+import { example, META, mountOwned, ownTest, SESSION, settleRouteImport } from './support';
 
 describe('web/test/routes/feed.test.tsx', () => {
+  it('shows the signed-in owner’s private now-playing card above the feed', async ({ signal }) => {
+    const owner = ownTest(signal);
+    const now = Date.now();
+    const nowPlaying = {
+      artist: 'Radiohead',
+      track: 'Reckoner',
+      album: 'In Rainbows',
+      startedAt: new Date(now - 60_000).toISOString(),
+      updatedAt: new Date(now).toISOString(),
+      expiresAt: new Date(now + 300_000).toISOString(),
+      durationSeconds: 300,
+      source: 'listenbrainz',
+      shared: false,
+    };
+    const app = mountOwned(owner, '/feed', async (input) => {
+      const url = new URL(String(input), 'https://music.test');
+      if (url.pathname.endsWith('/now-playing'))
+        return Response.json({ nowPlaying, serverTime: new Date().toISOString() });
+      return undefined;
+    });
+    app.state.session.value = SESSION;
+    await settleRouteImport();
+    await vi.waitFor(() => expect(app.root.textContent).toContain('Reckoner'));
+    expect(app.root.textContent).toContain('Only you can see this');
+    expect(app.root.textContent).toContain('Feed');
+    app.cleanup();
+  });
+
   it('loads the public feed through the same-origin read client without a browser PDS session', async ({ signal }) => {
     const owner = ownTest(signal);
     const app = mountOwned(owner, '/feed');

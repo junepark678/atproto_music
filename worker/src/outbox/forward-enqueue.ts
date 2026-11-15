@@ -73,6 +73,51 @@ export function nowPlayingKey(did: string, startedAtMs: number, artist: string, 
     .digest('hex');
 }
 
+/**
+ * Keep the current delivery's dedupe identity aligned when scrobble proof corrects its start time.
+ * Runs inside the synchronous acceptance transaction, so it reads forward_outbox only through
+ * UNIQUE(link_id,kind,dedupe_key): one exact lookup per link of the DID at its current generation,
+ * never a scan of the shared outbox by DID.
+ */
+export function rewriteNowPlayingForwardStart(
+  db: Db,
+  did: string,
+  artist: string,
+  track: string,
+  oldStartedAtMs: number,
+  startedAtMs: number,
+): void {
+  const oldKey = nowPlayingKey(did, oldStartedAtMs, artist, track);
+  const nextKey = nowPlayingKey(did, startedAtMs, artist, track);
+  const links = db.all<{ id: string; generation: number }>(
+    'SELECT id,generation FROM linked_accounts WHERE did=? ORDER BY id',
+    did,
+  );
+  for (const link of links) {
+    const row = db.one<{ id: string; generation: number; payload_json: string }>(
+      `SELECT id,generation,payload_json FROM forward_outbox
+       WHERE link_id=? AND kind='nowplaying' AND dedupe_key=?`,
+      link.id,
+      storedForwardDedupeKey(link.generation, oldKey),
+    );
+    if (row === null) continue;
+    let payload: Record<string, unknown>;
+    try {
+      payload = JSON.parse(row.payload_json) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    if (payload === null || typeof payload !== 'object') continue;
+    payload.startedAtMs = startedAtMs;
+    db.run(
+      `UPDATE OR IGNORE forward_outbox SET dedupe_key=?,payload_json=? WHERE id=? AND kind='nowplaying'`,
+      storedForwardDedupeKey(row.generation, nextKey),
+      JSON.stringify(payload),
+      row.id,
+    );
+  }
+}
+
 export type ForwardItem =
   | { kind: 'scrobble'; listenKey: string; payload: unknown }
   | { kind: 'nowplaying'; startedAtMs: number; artist: string; track: string; payload: unknown }

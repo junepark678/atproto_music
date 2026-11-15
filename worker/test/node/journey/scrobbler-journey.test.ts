@@ -68,6 +68,90 @@ async function recentTracks(w: World, user: User): Promise<RecentTrack[]> {
 }
 
 describe('scrobbler journeys', () => {
+  it('stores, reads and promptly forwards now-playing from both compat APIs to both linked services', async () => {
+    const { w, alice } = await startWorld();
+    const { session, sk } = await panoSession(w, alice);
+    const start = await w.send('POST', '/api/v1/links/lastfm/start', { as: session });
+    const authorizeUrl = new URL((start.body as { authorizeUrl: string }).authorizeUrl);
+    const cb = new URL(authorizeUrl.searchParams.get('cb') as string);
+    const lfToken = w.lastfm.issueToken();
+    w.lastfm.authorizeToken(lfToken, 'alice_fm');
+    expect((await w.send('GET', `${cb.pathname}${cb.search}&token=${lfToken}`, { as: session })).status).toBe(303);
+    w.lb.addToken('alice_lb', 'alice-listenbrainz-user-token');
+    expect(
+      (
+        await w.send('POST', '/api/v1/links/listenbrainz', {
+          as: session,
+          body: { token: 'alice-listenbrainz-user-token' },
+        })
+      ).status,
+    ).toBe(201);
+    const tokenResponse = await w.send('POST', '/api/v1/account/listenbrainz-tokens', {
+      as: session,
+      body: { label: 'now-playing journey' },
+    });
+    expect(tokenResponse.status).toBe(201);
+    const submitToken = (tokenResponse.body as { token: string }).token;
+
+    // Leave ordinary forward work queued; the newly received now-playing
+    // must take the first Last.fm pacing token while it is still current.
+    expect(
+      (
+        await w.lastfm2(
+          panoScrobble(sk, {
+            artist: 'Portishead',
+            track: 'Roads',
+            album: 'Dummy',
+            timestamp: T0_S - 300,
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    expect((await w.lastfm2({ method: 'track.updateNowPlaying', sk, artist: 'Björk', track: 'Jóga' })).status).toBe(
+      200,
+    );
+    await w.until(
+      () => w.lastfm.nowPlayingCalls.length === 1 && w.lb.submissions.some((s) => s.listenType === 'playing_now'),
+    );
+    expect(
+      (
+        await w.send('POST', '/1/submit-listens', {
+          headers: { authorization: `Token ${submitToken}` },
+          body: {
+            listen_type: 'playing_now',
+            payload: [{ track_metadata: { artist_name: 'Björk', track_name: 'Hidden Place' } }],
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await w.until(
+      () =>
+        w.lastfm.nowPlayingCalls.length === 2 &&
+        w.lb.submissions.filter((s) => s.listenType === 'playing_now').length === 2,
+    );
+
+    const read = await w.send('GET', `/api/v1/users/${encodeURIComponent(alice.did)}/now-playing`, { as: session });
+    expect(read.status).toBe(200);
+    expect(read.body).toMatchObject({ nowPlaying: { artist: 'Björk', track: 'Hidden Place' } });
+    expect(w.lastfm.nowPlayingCalls.map((call) => call.track)).toEqual(['Jóga', 'Hidden Place']);
+    expect(w.lb.submissions.filter((s) => s.listenType === 'playing_now')).toHaveLength(2);
+    expect(w.lb.submissions[0]?.listenType).toBe('playing_now');
+    expect(
+      w.log.logs
+        .filter((line) => line.event === 'forward.nowplaying')
+        .every(
+          (line) =>
+            Object.keys(line)
+              .filter((key) => !['level', 'event', 'time'].includes(key))
+              .sort()
+              .join(',') === 'kind,service,status',
+        ),
+    ).toBe(true);
+    expect(
+      w.log.logs.filter((line) => line.event === 'request' && line.route === '/1/submit-listens').at(-1),
+    ).toMatchObject({ listenType: 'playing_now' });
+  }, 60_000);
+
   it('Pano-shaped getMobileSession, updateNowPlaying and track.scrobble produce a DPoP-authorised PDS record, which is indexed after its proof and listed by user.getRecentTracks', async () => {
     const { w, alice } = await startWorld();
     const { sk } = await panoSession(w, alice);

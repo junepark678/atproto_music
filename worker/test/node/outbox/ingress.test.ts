@@ -4,10 +4,11 @@
 
 import { listenKey } from '@atmusic/core/listen-key';
 import { parseRfc3339 } from '@atmusic/core/timestamp';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { Db } from '../../../src/do/db';
 import { upsertNowPlaying } from '../../../src/do/read/now-playing';
-import { enqueueForwards, nowPlayingKey } from '../../../src/outbox/forward-enqueue';
+import { enqueueForwards, nowPlayingKey, rewriteNowPlayingForwardStart } from '../../../src/outbox/forward-enqueue';
+import { storedForwardDedupeKey } from '../../../src/outbox/forward-key';
 import { acceptListens } from '../../../src/outbox/ingress';
 import { enqueueLove, enqueueUnlove } from '../../../src/outbox/love-ops';
 import { CREATE, listenInput, remoteRecord, SCROBBLE, T0, withHarness } from './support';
@@ -42,6 +43,162 @@ function countingDb(db: Db): Db & { outer: number } {
 }
 
 describe('acceptListens', () => {
+  it('moves the existing now-playing dedupe identity with a scrobble-corrected start so the refresh does not enqueue again', async () => {
+    await withHarness(async (h) => {
+      h.account(h.alice);
+      h.link(h.alice, 'lastfm');
+      h.link(h.alice, 'listenbrainz');
+      const { row } = upsertNowPlaying(h.m, { did: h.alice, artist: 'Radiohead', track: 'Reckoner', source: 'web' });
+      const enqueue = (startedAtMs: number) =>
+        enqueueForwards(h.db, {
+          did: h.alice,
+          items: [
+            {
+              kind: 'nowplaying',
+              startedAtMs,
+              artist: 'Radiohead',
+              track: 'Reckoner',
+              payload: { track: { artist: 'Radiohead', track: 'Reckoner' }, startedAtMs },
+            },
+          ],
+          now: h.kit.clock.nowMs(),
+          random: h.m.random,
+        });
+      enqueue(row.started_at_ms);
+      await acceptListens(h.m, {
+        did: h.alice,
+        origin: 'lastfm',
+        receiptMs: T0,
+        listens: [
+          { input: { artist: 'Radiohead', track: 'Reckoner', listenedAt: new Date(T0 - 120_000).toISOString() } },
+        ],
+      });
+      const corrected = h.db.one<{ started_at_ms: number }>(
+        'SELECT started_at_ms FROM now_playing WHERE did=?',
+        h.alice,
+      )!.started_at_ms;
+      enqueue(corrected);
+      expect(
+        h.db.all<{ dedupe_key: string; payload_json: string }>(
+          "SELECT dedupe_key,payload_json FROM forward_outbox WHERE kind='nowplaying' ORDER BY link_id",
+        ),
+      ).toHaveLength(2);
+      const payload = JSON.parse(
+        h.db.all<{ payload_json: string }>("SELECT payload_json FROM forward_outbox WHERE kind='nowplaying'")[0]!
+          .payload_json,
+      ) as { startedAtMs: number };
+      expect(payload.startedAtMs).toBe(corrected);
+    });
+  });
+
+  it.each(['queued', 'sent'] as const)(
+    'rewrites a generation-2 %s now-playing identity without allowing a duplicate forward',
+    async (state) => {
+      await withHarness(async (h) => {
+        h.account(h.alice);
+        const linkId = h.link(h.alice, 'lastfm');
+        h.db.run('UPDATE linked_accounts SET generation=2 WHERE id=?', linkId);
+        const { row } = upsertNowPlaying(h.m, {
+          did: h.alice,
+          artist: 'Radiohead',
+          track: 'Reckoner',
+          source: 'web',
+        });
+        const enqueue = (startedAtMs: number) =>
+          enqueueForwards(h.db, {
+            did: h.alice,
+            items: [
+              {
+                kind: 'nowplaying',
+                startedAtMs,
+                artist: 'Radiohead',
+                track: 'Reckoner',
+                payload: { track: { artist: 'Radiohead', track: 'Reckoner' }, startedAtMs },
+              },
+            ],
+            now: h.kit.clock.nowMs(),
+            random: h.m.random,
+          });
+        expect(enqueue(row.started_at_ms)).toBe(1);
+        if (state === 'sent') h.db.run("UPDATE forward_outbox SET state='sent' WHERE kind='nowplaying'");
+
+        await acceptListens(h.m, {
+          did: h.alice,
+          origin: 'lastfm',
+          receiptMs: T0,
+          listens: [
+            {
+              input: { artist: 'Radiohead', track: 'Reckoner', listenedAt: new Date(T0 - 120_000).toISOString() },
+            },
+          ],
+        });
+        const corrected = T0 - 120_000;
+
+        expect(enqueue(corrected)).toBe(0);
+        const rows = h.db.all<{ dedupe_key: string; payload_json: string; state: string }>(
+          "SELECT dedupe_key,payload_json,state FROM forward_outbox WHERE kind='nowplaying'",
+        );
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({
+          dedupe_key: storedForwardDedupeKey(2, nowPlayingKey(h.alice, corrected, 'Radiohead', 'Reckoner')),
+          state,
+        });
+        expect(JSON.parse(rows[0]!.payload_json)).toMatchObject({ startedAtMs: corrected });
+      });
+    },
+  );
+
+  it('reads forward_outbox only by link, kind and exact key when it rewrites a now-playing start', async () => {
+    await withHarness(async (h) => {
+      h.account(h.alice);
+      h.link(h.alice, 'lastfm');
+      h.link(h.alice, 'listenbrainz');
+      const { row } = upsertNowPlaying(h.m, { did: h.alice, artist: 'Radiohead', track: 'Reckoner', source: 'web' });
+      enqueueForwards(h.db, {
+        did: h.alice,
+        items: [
+          {
+            kind: 'nowplaying',
+            startedAtMs: row.started_at_ms,
+            artist: 'Radiohead',
+            track: 'Reckoner',
+            payload: { track: { artist: 'Radiohead', track: 'Reckoner' }, startedAtMs: row.started_at_ms },
+          },
+        ],
+        now: h.kit.clock.nowMs(),
+        random: h.m.random,
+      });
+      const reads: string[] = [];
+      const one = h.db.one.bind(h.db);
+      const all = h.db.all.bind(h.db);
+      const spyOne = vi.spyOn(h.db, 'one').mockImplementation(((sql: string, ...p: never[]) => {
+        reads.push(sql);
+        return one(sql, ...p);
+      }) as typeof h.db.one);
+      const spyAll = vi.spyOn(h.db, 'all').mockImplementation(((sql: string, ...p: never[]) => {
+        reads.push(sql);
+        return all(sql, ...p);
+      }) as typeof h.db.all);
+      rewriteNowPlayingForwardStart(
+        h.db,
+        h.alice,
+        'Radiohead',
+        'Reckoner',
+        row.started_at_ms,
+        row.started_at_ms - 60_000,
+      );
+      spyOne.mockRestore();
+      spyAll.mockRestore();
+      const outboxReads = reads.filter((sql) => /FROM forward_outbox/.test(sql));
+      expect(outboxReads).toHaveLength(2);
+      for (const sql of outboxReads) expect(sql).toMatch(/WHERE link_id=\? AND kind='nowplaying' AND dedupe_key=\?/);
+      const payloads = h.db
+        .all<{ payload_json: string }>("SELECT payload_json FROM forward_outbox WHERE kind='nowplaying'")
+        .map((r) => (JSON.parse(r.payload_json) as { startedAtMs: number }).startedAtMs);
+      expect(payloads).toEqual([row.started_at_ms - 60_000, row.started_at_ms - 60_000]);
+    });
+  });
+
   it('marks matching current tracks scrobbled and corrects start only inside duration or 600 second fallback bounds', async () => {
     await withHarness(async (h) => {
       h.account(h.alice);

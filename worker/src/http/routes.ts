@@ -388,3 +388,15 @@ export function noteLastfmMethod(request: Request, method: string): void {
 export function notedLastfmMethod(request: Request): string | undefined {
   return notedLastfmMethods.get(request);
 }
+
+const LISTENBRAINZ_LOG_TYPES = new Set(['single', 'import', 'playing_now']);
+const notedListenbrainzTypes = new WeakMap<Request, string>();
+
+/** Records only a protocol-defined ListenBrainz listen_type for request logs. */
+export function noteListenbrainzType(request: Request, value: string): void {
+  if (LISTENBRAINZ_LOG_TYPES.has(value)) notedListenbrainzTypes.set(request, value);
+}
+
+export function notedListenbrainzType(request: Request): string | undefined {
+  return notedListenbrainzTypes.get(request);
+}
