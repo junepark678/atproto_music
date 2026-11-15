@@ -64,6 +64,20 @@ export function hasUnknownListenSecond(db: Db, did: string): boolean {
 }
 
 /** One keyset slice over pre-existing operation payloads; stable after restart. */
+/**
+ * The legacy seeder's candidate queries: the next scrobble.create operation
+ * (after a rowid) that still owns a listen key with an unknown second. The
+ * EXISTS is answered by listen_keys_operation_second (migration 58); without it
+ * each candidate walked every listen key of the DID.
+ */
+export const LEGACY_SEED_NEXT_SQL = `SELECT rowid,id,did,record_json FROM operations WHERE rowid>? AND kind='scrobble.create'
+     AND record_json IS NOT NULL AND EXISTS (SELECT 1 FROM listen_keys k WHERE k.did=operations.did
+       AND k.operation_id=operations.id AND k.listen_second IS NULL)
+     ORDER BY rowid LIMIT 1`;
+export const LEGACY_SEED_MORE_SQL = `SELECT 1 AS hit FROM operations WHERE rowid>? AND kind='scrobble.create' AND record_json IS NOT NULL
+       AND EXISTS (SELECT 1 FROM listen_keys k WHERE k.did=operations.did AND k.operation_id=operations.id
+         AND k.listen_second IS NULL) LIMIT 1`;
+
 export async function seedLegacyListenSecondSlice(
   db: Db,
   nowMs: number,
@@ -86,10 +100,7 @@ export async function seedLegacyListenSecondSlice(
         )
       : null;
   row ??= db.one<{ rowid: number; id: string; did: string; record_json: string }>(
-    `SELECT rowid,id,did,record_json FROM operations WHERE rowid>? AND kind='scrobble.create'
-     AND record_json IS NOT NULL AND EXISTS (SELECT 1 FROM listen_keys k WHERE k.did=operations.did
-       AND k.operation_id=operations.id AND k.listen_second IS NULL)
-     ORDER BY rowid LIMIT 1`,
+    LEGACY_SEED_NEXT_SQL,
     progress.last_rowid,
   );
   if (row === null) {
@@ -119,14 +130,7 @@ export async function seedLegacyListenSecondSlice(
       nowMs,
     );
   });
-  const more =
-    receipts.length > end ||
-    db.one(
-      `SELECT 1 AS hit FROM operations WHERE rowid>? AND kind='scrobble.create' AND record_json IS NOT NULL
-       AND EXISTS (SELECT 1 FROM listen_keys k WHERE k.did=operations.did AND k.operation_id=operations.id
-         AND k.listen_second IS NULL) LIMIT 1`,
-      row.rowid,
-    ) !== null;
+  const more = receipts.length > end || db.one(LEGACY_SEED_MORE_SQL, row.rowid) !== null;
   return { processed: end - start, more };
 }
 

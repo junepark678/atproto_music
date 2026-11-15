@@ -25,12 +25,23 @@ import {
 import type { OperationRow } from '../app/rows';
 import type { ModuleDeps } from '../do/contracts';
 import type { Db } from '../do/db';
+
+/** Per-candidate operation-id statements; served by migration 58's operation_id indexes. */
+export const REBATCH_ITEMS_OF_OPERATION_SQL =
+  'SELECT job_id, seq, dedupe_key, state FROM import_items WHERE operation_id = ? ORDER BY job_id, seq';
+export const REBATCH_KEYS_OF_OPERATION_SQL =
+  'SELECT dedupe_key, source FROM listen_keys WHERE operation_id = ? ORDER BY dedupe_key';
+export const REBATCH_REPOINT_ITEMS_SQL = 'UPDATE import_items SET operation_id = ? WHERE operation_id = ?';
+export const REBATCH_REPOINT_KEYS_SQL = 'UPDATE listen_keys SET operation_id = ? WHERE operation_id = ?';
+
 import {
   explicitlyUnsent,
   explicitlyUnsentSql,
+  hasDependency,
   IMPORT_PRIORITY,
   insertOperation,
   newOperationId,
+  noDependencySql,
   type Prepared,
   prepare,
 } from '../outbox/operations';
@@ -66,8 +77,7 @@ function safeCandidate(db: Db, op: OperationRow, jobId: string, did: string, col
     op.record_json === null
   )
     return false;
-  if (db.one('SELECT 1 FROM operation_deps WHERE op_id = ? OR pred_id = ? LIMIT 1', op.id, op.id) !== null)
-    return false;
+  if (hasDependency(db, op.id)) return false;
   const uri = `at://${op.did}/${op.collection}/${op.rkey}`;
   if (db.one('SELECT 1 FROM scrobbles WHERE uri = ? LIMIT 1', uri) !== null) return false;
   if (db.one('SELECT 1 FROM record_state WHERE uri = ? LIMIT 1', uri) !== null) return false;
@@ -86,7 +96,7 @@ export async function rebatchUnsentImports(m: ModuleDeps, jobId: string, did: st
        AND o.collection = ? AND o.import_job_id = ? AND o.state IN ('queued','blocked')
        AND ${explicitlyUnsentSql('o')}
        AND o.last_error IS NULL AND o.result_uri IS NULL AND o.idempotency_key IS NULL
-       AND NOT EXISTS (SELECT 1 FROM operation_deps d WHERE d.op_id=o.id OR d.pred_id=o.id)
+       AND ${noDependencySql('o')}
        AND i.job_id = ?
        AND NOT EXISTS (SELECT 1 FROM scrobbles s WHERE s.uri = 'at://' || o.did || '/' || o.collection || '/' || o.rkey)
      ORDER BY o.rowid, i.job_id, i.seq LIMIT ?`,
@@ -163,7 +173,7 @@ export async function rebatchUnsentImports(m: ModuleDeps, jobId: string, did: st
         )
           return false;
         const currentItems = db.all<{ job_id: string; seq: number; dedupe_key: string; state: string }>(
-          'SELECT job_id, seq, dedupe_key, state FROM import_items WHERE operation_id = ? ORDER BY job_id, seq',
+          REBATCH_ITEMS_OF_OPERATION_SQL,
           current.id,
         );
         const expected = candidate.jobs.map(({ jobId, seq, dedupeKey }) => ({
@@ -173,10 +183,7 @@ export async function rebatchUnsentImports(m: ModuleDeps, jobId: string, did: st
           state: 'queued',
         }));
         if (JSON.stringify(currentItems) !== JSON.stringify(expected)) return false;
-        const keys = db.all<{ dedupe_key: string; source: string }>(
-          'SELECT dedupe_key, source FROM listen_keys WHERE operation_id = ? ORDER BY dedupe_key',
-          current.id,
-        );
+        const keys = db.all<{ dedupe_key: string; source: string }>(REBATCH_KEYS_OF_OPERATION_SQL, current.id);
         const expectedKeys = candidate.jobs
           .map((item) => item.dedupeKey)
           .sort()
@@ -208,16 +215,8 @@ export async function rebatchUnsentImports(m: ModuleDeps, jobId: string, did: st
           candidate.operation.id,
         );
         if (cancelled.rowsWritten !== 1) throw new Error('rebatch operation changed during transaction');
-        const repointedItems = db.run(
-          'UPDATE import_items SET operation_id = ? WHERE operation_id = ?',
-          batch.id,
-          candidate.operation.id,
-        );
-        const repointedKeys = db.run(
-          'UPDATE listen_keys SET operation_id = ? WHERE operation_id = ?',
-          batch.id,
-          candidate.operation.id,
-        );
+        const repointedItems = db.run(REBATCH_REPOINT_ITEMS_SQL, batch.id, candidate.operation.id);
+        const repointedKeys = db.run(REBATCH_REPOINT_KEYS_SQL, batch.id, candidate.operation.id);
         if (repointedItems.rowsWritten !== candidate.jobs.length || repointedKeys.rowsWritten !== candidate.jobs.length)
           throw new Error('rebatch membership changed during transaction');
         for (const item of candidate.jobs) {

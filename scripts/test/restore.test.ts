@@ -1161,8 +1161,12 @@ function query(path: string, sql: string, ...params: sqlite.SQLInputValue[]): Re
 function downgradeFixtureTo56(path: string): void {
   const db = openSqliteDb(path, { busyTimeoutMs: BUSY_MS });
   try {
-    expect(migrate(db, MIGRATIONS)).toEqual({ status: 'ready', version: 57 });
+    expect(migrate(db, MIGRATIONS)).toEqual({ status: 'ready', version: 58 });
     db.tx(() => {
+      db.exec('DROP INDEX listen_keys_operation_second');
+      db.exec('DROP INDEX import_items_operation');
+      db.exec('DROP INDEX operation_deps_pred');
+      db.run('DELETE FROM schema_migrations WHERE version=58');
       for (const index of [
         'love_api_intent_alias_scan',
         'love_api_active_love_put',
@@ -1560,10 +1564,10 @@ describe('restore.ts', () => {
     await systemd.boot();
     const result = await restoreCli(oldWorld, systemd, [...baseArgs(oldWorld), '--no-ready-check']);
     expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
-    expect(result.stdout).toContain('migrated the copy from version 55 to 57');
+    expect(result.stdout).toContain('migrated the copy from version 55 to 58');
     const restored = openSqliteDb(live55, { busyTimeoutMs: BUSY_MS });
     try {
-      expect(restored.one('SELECT max(version) AS version FROM schema_migrations')).toEqual({ version: 57 });
+      expect(restored.one('SELECT max(version) AS version FROM schema_migrations')).toEqual({ version: 58 });
       expect(restored.all('SELECT kind,dedupe_key,created_at_ms FROM forward_receipts ORDER BY dedupe_key')).toEqual([
         { kind: 'scrobble', dedupe_key: 'schema55-live-receipt', created_at_ms: 201 },
         { kind: 'scrobble', dedupe_key: 'schema55-receipt', created_at_ms: 101 },
@@ -1592,7 +1596,7 @@ describe('restore.ts', () => {
     expect(query(live55, 'PRAGMA foreign_key_check')).toEqual([]);
   }, 30_000);
 
-  it('migrates real schema-56 backup and live files to 57 through the restore CLI', async () => {
+  it('migrates real schema-56 backup and live files to the current schema through the restore CLI', async () => {
     const world = await buildWorld();
     const backup56 = join(world.dir, 'backup-schema-56.db');
     const live56 = join(world.dir, 'live-schema-56.db');
@@ -1608,10 +1612,10 @@ describe('restore.ts', () => {
     await systemd.boot();
     const result = await restoreCli(oldWorld, systemd, [...baseArgs(oldWorld), '--no-ready-check']);
     expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
-    expect(result.stdout).toContain('migrated the copy from version 56 to 57');
+    expect(result.stdout).toContain('migrated the copy from version 56 to 58');
     const restored = openSqliteDb(live56, { busyTimeoutMs: BUSY_MS });
     try {
-      expect(restored.one('SELECT max(version) AS version FROM schema_migrations')).toEqual({ version: 57 });
+      expect(restored.one('SELECT max(version) AS version FROM schema_migrations')).toEqual({ version: 58 });
       expect(
         restored.all("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'love_api_%' ORDER BY name"),
       ).toHaveLength(8);
@@ -1670,10 +1674,10 @@ describe('restore.ts', () => {
     await systemd.systemctl(['stop', 'atmusic.service', 'atmusic.socket']);
     const result = await restoreCli(oldWorld, systemd, [...baseArgs(oldWorld), '--listen', `127.0.0.1:${servicePort}`]);
     expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
-    expect(result.stdout).toContain('migrated the copy from version 56 to 57');
+    expect(result.stdout).toContain('migrated the copy from version 56 to 58');
     expect(systemd.server).not.toBeNull();
     const db = systemd.server!.server.db;
-    expect(db.one('SELECT max(version) AS version FROM schema_migrations')).toEqual({ version: 57 });
+    expect(db.one('SELECT max(version) AS version FROM schema_migrations')).toEqual({ version: 58 });
     expect(db.one('SELECT 1 FROM love_api_bindings WHERE operation_id=?', parent.apiId)).toBeNull();
     expect(db.one('SELECT 1 FROM love_api_bindings WHERE operation_id=?', parent.reuseId)).toBeNull();
     for (const table of LOVE_API_TABLES) expect(db.one(`SELECT count(*) AS n FROM ${table}`), table).toEqual({ n: 0 });
@@ -2010,7 +2014,7 @@ describe('restore.ts', () => {
     const result = await restoreCli(world, systemd, [...baseArgs(world), '--listen', `127.0.0.1:${servicePort}`]);
     expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
     const db = systemd.server!.server.db;
-    expect(db.one('SELECT max(version) AS version FROM schema_migrations')).toEqual({ version: 57 });
+    expect(db.one('SELECT max(version) AS version FROM schema_migrations')).toEqual({ version: 58 });
     for (const table of LOVE_API_TABLES) {
       const expectedRows = table === 'love_api_intent_epochs' || table === 'love_api_proof_state' ? 1 : 2;
       expect(db.one(`SELECT count(*) AS count FROM ${table}`), table).toEqual({ count: expectedRows });
@@ -2232,7 +2236,7 @@ describe('restore.ts', () => {
     expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
     expect(systemd.server).not.toBe(priorServer);
     const restored = systemd.server!.server.db;
-    expect(restored.one('SELECT max(version) AS version FROM schema_migrations')).toEqual({ version: 57 });
+    expect(restored.one('SELECT max(version) AS version FROM schema_migrations')).toEqual({ version: 58 });
     for (const table of LOVE_API_TABLES) expect(restored.one(`SELECT 1 FROM ${table} LIMIT 1`), table).not.toBeNull();
     expect(restored.one('SELECT api_origin FROM love_api_bindings WHERE operation_id=?', source!.operationId)).toEqual({
       api_origin: 'lastfm',
@@ -2533,7 +2537,7 @@ describe('restore.ts', () => {
     expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
     expect(systemd.server).not.toBe(priorComposition);
     const db = systemd.server!.server.db;
-    expect(db.one('SELECT max(version) AS version FROM schema_migrations')).toEqual({ version: 57 });
+    expect(db.one('SELECT max(version) AS version FROM schema_migrations')).toEqual({ version: 58 });
     expect(
       db.one("SELECT last_sent_dedupe_key FROM forward_love_delivery WHERE last_sent_dedupe_key='live-delivery-love'"),
     ).not.toBeNull();

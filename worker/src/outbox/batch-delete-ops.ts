@@ -14,6 +14,7 @@ import { tombstoneListen } from '../sync/tombstones';
 import { deleteQueuedForwardIdentity } from './forward-key';
 import {
   explicitlyUnsent,
+  hasDependency,
   insertOperation,
   newOperationId,
   outboxCollections,
@@ -135,7 +136,7 @@ export async function prepareUnsentBatchListenRemoval(
     return null;
   const uri = `at://${op.did}/${op.collection}/${op.rkey}`;
   if (
-    m.db.one('SELECT 1 AS x FROM operation_deps WHERE op_id = ? OR pred_id = ?', op.id, op.id) !== null ||
+    hasDependency(m.db, op.id) ||
     m.db.one('SELECT 1 AS x FROM record_state WHERE uri = ?', uri) !== null ||
     m.db.one('SELECT 1 AS x FROM scrobbles WHERE record_uri = ?', uri) !== null
   )
@@ -264,7 +265,7 @@ export function commitUnsentBatchListenRemoval(m: ModuleDeps, plan: BatchListenR
       return null;
     const uri = `at://${op.did}/${op.collection}/${op.rkey}`;
     if (
-      m.db.one('SELECT 1 AS x FROM operation_deps WHERE op_id = ? OR pred_id = ?', op.id, op.id) !== null ||
+      hasDependency(m.db, op.id) ||
       m.db.one('SELECT 1 AS x FROM record_state WHERE uri = ?', uri) !== null ||
       m.db.one('SELECT 1 AS x FROM scrobbles WHERE record_uri = ?', uri) !== null
     )

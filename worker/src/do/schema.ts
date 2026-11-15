@@ -1756,6 +1756,28 @@ const MIGRATION_API_LOVE_RECIPIENT_PROOF: Migration = {
   ],
 };
 
+// 58: operation-id lookups on listen_keys, import_items and operation_deps.
+// The legacy listen-second seeder (outbox/listen-second-receipts.ts) asks, once
+// a minute, whether an operation still owns a listen key with an unknown
+// second, and import rebatching, the outbox runner and the operation runner
+// look keys and items up by operation id alone. Both tables were keyed only by
+// (did, dedupe_key) and (job_id, seq), so each lookup scanned: on an owner
+// database with ~117k listen keys one seeder call took ~25 s synchronously (the
+// systemd watchdog killed the service), and rebatching 1,000 singles held one
+// transaction for ~20 s. The runner's eligibility and rebatching also ask
+// whether an operation has any dependency (`op_id = ? OR pred_id = ?`);
+// operation_deps was keyed only by (op_id, pred_id), so the pred_id branch
+// scanned every retained dependency row.
+const MIGRATION_OPERATION_ID_INDEXES: Migration = {
+  version: 58,
+  name: 'operation_id_indexes',
+  statements: [
+    'CREATE INDEX listen_keys_operation_second ON listen_keys(operation_id,listen_second)',
+    'CREATE INDEX import_items_operation ON import_items(operation_id)',
+    'CREATE INDEX operation_deps_pred ON operation_deps(pred_id)',
+  ],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
   MIGRATION_2,
@@ -1814,6 +1836,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_LINK_COVERAGE_RECEIPTS,
   MIGRATION_LINK_LOVE_COVERAGE,
   MIGRATION_API_LOVE_RECIPIENT_PROOF,
+  MIGRATION_OPERATION_ID_INDEXES,
 ];
 
 /** The schema version this code expects. */

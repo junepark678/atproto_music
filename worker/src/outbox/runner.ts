@@ -80,6 +80,7 @@ import {
   legacyImportNeedsReconcile,
   MAX_ATTEMPTS,
   newOperationId,
+  noDependencySql,
   type OutboxCollections,
   outboxCollections,
   persistRunning,
@@ -266,7 +267,7 @@ class Run {
     this.eligibility = ` AND NOT (
         (o.origin = 'import' AND o.kind = 'scrobble.create' AND o.collection = '${this.collections.scrobble}'
          AND ${explicitlyUnsentSql('o')}
-         AND NOT EXISTS (SELECT 1 FROM operation_deps dd WHERE dd.op_id = o.id OR dd.pred_id = o.id)
+         AND ${noDependencySql('o')}
          AND EXISTS (SELECT 1 FROM import_items i WHERE i.operation_id = o.id AND i.state = 'queued'))
         ${m.config.batchPublication ? '' : `OR o.collection = '${this.collections.scrobbleBatch}'`})`;
   }
