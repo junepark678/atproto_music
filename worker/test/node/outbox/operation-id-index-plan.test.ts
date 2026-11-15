@@ -1,9 +1,11 @@
-// Migration 58 indexes operation-id lookups on listen_keys and import_items.
-// The legacy listen-second seeder runs them once a minute in the linked-pull
-// timer, and import rebatching runs them per candidate inside one transaction.
-// Before the indexes each lookup scanned the table: on a real owner database
-// (~117k listen keys) one seeder call took ~25 s synchronously, which tripped
-// the systemd watchdog, and rebatching 1,000 singles held a ~20 s transaction.
+// Migration 58 indexes operation-id lookups on listen_keys, import_items and
+// operation_deps. The legacy listen-second seeder runs them once a minute in
+// the linked-pull timer, import rebatching runs them per candidate inside one
+// transaction, and the outbox runner's eligibility asks every tick whether an
+// operation has a dependency. Before the indexes each lookup scanned the table:
+// on a real owner database (~117k listen keys) one seeder call took ~25 s
+// synchronously, which tripped the systemd watchdog, and rebatching 1,000
+// singles held a ~20 s transaction.
 import { DatabaseSync } from 'node:sqlite';
 import { expect, it } from 'vitest';
 import {
@@ -13,6 +15,7 @@ import {
   REBATCH_REPOINT_KEYS_SQL,
 } from '../../../src/imports/rebatch';
 import { LEGACY_SEED_MORE_SQL, LEGACY_SEED_NEXT_SQL } from '../../../src/outbox/listen-second-receipts';
+import { HAS_DEPENDENCY_SQL, noDependencySql } from '../../../src/outbox/operations';
 import { withMigratedDb } from '../support/node-db';
 
 /** EXPLAIN QUERY PLAN over a schema-only replica of the migrated schema (the production authorizer denies EXPLAIN). */
@@ -53,3 +56,21 @@ it.each([
   expect(plan).not.toMatch(/SCAN (listen_keys|import_items|k\b|i\b)/);
   expect(plan).not.toContain('sqlite_autoindex_listen_keys_1');
 });
+
+it.each([
+  ['the standalone dependency probe', HAS_DEPENDENCY_SQL, 2],
+  [
+    'the correlated no-dependency filter',
+    `SELECT DISTINCT o.priority FROM operations o WHERE o.state = 'queued' AND ${noDependencySql('o')}`,
+    0,
+  ],
+] as const)(
+  '%s answers both OR branches through an index, never a scan of operation_deps',
+  async (_label, sql, params) => {
+    const plan = planOf(await migratedDdl(), sql, params);
+    expect(plan).toContain('MULTI-INDEX OR');
+    expect(plan).toContain('sqlite_autoindex_operation_deps_1 (op_id=?)');
+    expect(plan).toContain('operation_deps_pred (pred_id=?)');
+    expect(plan).not.toMatch(/SCAN (operation_deps|dep\b)/);
+  },
+);

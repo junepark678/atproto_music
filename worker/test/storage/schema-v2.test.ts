@@ -1342,6 +1342,7 @@ const NEW_INDEXES: Record<string, [string, number, number, Array<[string | null,
     ],
   ],
   import_items_operation: ['import_items', 0, 0, [['operation_id', 0]]],
+  operation_deps_pred: ['operation_deps', 0, 0, [['pred_id', 0]]],
   linked_pull_tombstones_listen_second: [
     'linked_pull_tombstones',
     0,

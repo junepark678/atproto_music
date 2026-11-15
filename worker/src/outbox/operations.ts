@@ -247,6 +247,24 @@ export function predecessorRows(db: Db, id: string): OperationRow[] {
   );
 }
 
+/**
+ * Whether an operation (bound twice) has a predecessor or a successor. The
+ * `op_id` branch uses the primary key and the `pred_id` branch uses
+ * operation_deps_pred (migration 58); without that index the OR scanned every
+ * dependency row.
+ */
+export const HAS_DEPENDENCY_SQL = 'SELECT 1 FROM operation_deps WHERE op_id = ? OR pred_id = ? LIMIT 1';
+
+export function hasDependency(db: Db, id: string): boolean {
+  return db.one(HAS_DEPENDENCY_SQL, id, id) !== null;
+}
+
+/** `hasDependency` negated, as SQL over the operations alias `o`. */
+export function noDependencySql(o = 'o'): string {
+  if (!/^[a-z_]+$/.test(o)) throw new RangeError('invalid alias');
+  return `NOT EXISTS (SELECT 1 FROM operation_deps dep WHERE dep.op_id = ${o}.id OR dep.pred_id = ${o}.id)`;
+}
+
 /** Unsettled operations of `did` at one record key (a delete waits for them). */
 export function unsettledAt(db: Db, did: string, collection: string, rkey: string): string[] {
   return db

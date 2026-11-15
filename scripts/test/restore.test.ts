@@ -1165,6 +1165,7 @@ function downgradeFixtureTo56(path: string): void {
     db.tx(() => {
       db.exec('DROP INDEX listen_keys_operation_second');
       db.exec('DROP INDEX import_items_operation');
+      db.exec('DROP INDEX operation_deps_pred');
       db.run('DELETE FROM schema_migrations WHERE version=58');
       for (const index of [
         'love_api_intent_alias_scan',

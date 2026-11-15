@@ -37,9 +37,11 @@ export const REBATCH_REPOINT_KEYS_SQL = 'UPDATE listen_keys SET operation_id = ?
 import {
   explicitlyUnsent,
   explicitlyUnsentSql,
+  hasDependency,
   IMPORT_PRIORITY,
   insertOperation,
   newOperationId,
+  noDependencySql,
   type Prepared,
   prepare,
 } from '../outbox/operations';
@@ -75,8 +77,7 @@ function safeCandidate(db: Db, op: OperationRow, jobId: string, did: string, col
     op.record_json === null
   )
     return false;
-  if (db.one('SELECT 1 FROM operation_deps WHERE op_id = ? OR pred_id = ? LIMIT 1', op.id, op.id) !== null)
-    return false;
+  if (hasDependency(db, op.id)) return false;
   const uri = `at://${op.did}/${op.collection}/${op.rkey}`;
   if (db.one('SELECT 1 FROM scrobbles WHERE uri = ? LIMIT 1', uri) !== null) return false;
   if (db.one('SELECT 1 FROM record_state WHERE uri = ? LIMIT 1', uri) !== null) return false;
@@ -95,7 +96,7 @@ export async function rebatchUnsentImports(m: ModuleDeps, jobId: string, did: st
        AND o.collection = ? AND o.import_job_id = ? AND o.state IN ('queued','blocked')
        AND ${explicitlyUnsentSql('o')}
        AND o.last_error IS NULL AND o.result_uri IS NULL AND o.idempotency_key IS NULL
-       AND NOT EXISTS (SELECT 1 FROM operation_deps d WHERE d.op_id=o.id OR d.pred_id=o.id)
+       AND ${noDependencySql('o')}
        AND i.job_id = ?
        AND NOT EXISTS (SELECT 1 FROM scrobbles s WHERE s.uri = 'at://' || o.did || '/' || o.collection || '/' || o.rkey)
      ORDER BY o.rowid, i.job_id, i.seq LIMIT ?`,
