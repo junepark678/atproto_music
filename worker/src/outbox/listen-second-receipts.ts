@@ -67,8 +67,8 @@ export function hasUnknownListenSecond(db: Db, did: string): boolean {
 /**
  * The legacy seeder's candidate queries: the next scrobble.create operation
  * (after a rowid) that still owns a listen key with an unknown second. The
- * EXISTS is answered by the partial index listen_keys_unknown_second_operation
- * (migration 58); without it each candidate walked every listen key of the DID.
+ * EXISTS is answered by listen_keys_operation_second (migration 58); without it
+ * each candidate walked every listen key of the DID.
  */
 export const LEGACY_SEED_NEXT_SQL = `SELECT rowid,id,did,record_json FROM operations WHERE rowid>? AND kind='scrobble.create'
      AND record_json IS NOT NULL AND EXISTS (SELECT 1 FROM listen_keys k WHERE k.did=operations.did

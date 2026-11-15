@@ -614,8 +614,8 @@ describe('worker/test/harness', () => {
   it('the migration ledger is ordered across the N/M, M4, S1, S2, S3 and S4 stack', async () => {
     const versions = MIGRATIONS.map((m) => m.version);
     expect(versions.slice(0, 14)).toEqual(Array.from({ length: 14 }, (_, i) => i + 1));
-    // Keep the historically accepted 1–57 ledger explicit; migration 58 (the
-    // legacy listen-second seeder index) is additive and the current tail entry.
+    // Keep the historically accepted 1–57 ledger explicit; migration 58 (operation-id
+    // lookup indexes) is additive and the current tail entry.
     expect(versions.slice(0, 57)).toEqual(Array.from({ length: 57 }, (_, i) => i + 1));
     expect(versions.slice(-1)).toEqual([58]);
     expect(versions.every((version, index) => index === 0 || version > (versions[index - 1] ?? 0))).toBe(true);

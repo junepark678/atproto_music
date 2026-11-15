@@ -777,7 +777,7 @@ describe('migrate', () => {
       [55, 'link_coverage_receipts'],
       [56, 'link_love_coverage'],
       [57, 'api_love_recipient_proof'],
-      [58, 'listen_second_seed_index'],
+      [58, 'operation_id_indexes'],
     ]);
 
     const name = 'migrate-v2-ready';
@@ -847,7 +847,7 @@ describe('migrate', () => {
         { version: 55, name: 'link_coverage_receipts' },
         { version: 56, name: 'link_love_coverage' },
         { version: 57, name: 'api_love_recipient_proof' },
-        { version: 58, name: 'listen_second_seed_index' },
+        { version: 58, name: 'operation_id_indexes' },
       ]);
       expect(db.all('SELECT min_compatible_version FROM schema_compat')).toEqual([{ min_compatible_version: 2 }]);
       // A row in a migration-2 table survives reopening.

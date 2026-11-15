@@ -1332,15 +1332,16 @@ const NEW_INDEXES: Record<string, [string, number, number, Array<[string | null,
       ['listen_second', 0],
     ],
   ],
-  listen_keys_unknown_second_operation: [
+  listen_keys_operation_second: [
     'listen_keys',
     0,
-    1,
+    0,
     [
-      ['did', 0],
       ['operation_id', 0],
+      ['listen_second', 0],
     ],
   ],
+  import_items_operation: ['import_items', 0, 0, [['operation_id', 0]]],
   linked_pull_tombstones_listen_second: [
     'linked_pull_tombstones',
     0,
@@ -2453,7 +2454,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       "55|'link_coverage_receipts'",
       "56|'link_love_coverage'",
       "57|'api_love_recipient_proof'",
-      "58|'listen_second_seed_index'",
+      "58|'operation_id_indexes'",
     ]);
     // The new scrobble columns exist and are NULL on every migrated row.
     expect(after.newColumns).toHaveLength(expectedScrobbles);
@@ -2518,7 +2519,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       { version: 55, name: 'link_coverage_receipts' },
       { version: 56, name: 'link_love_coverage' },
       { version: 57, name: 'api_love_recipient_proof' },
-      { version: 58, name: 'listen_second_seed_index' },
+      { version: 58, name: 'operation_id_indexes' },
     ]);
     expect(after.compat).toEqual([{ singleton: 1, min_compatible_version: 2 }]);
     expect(after.newTablesEmpty).toEqual(['mb_cover_art_usage']);

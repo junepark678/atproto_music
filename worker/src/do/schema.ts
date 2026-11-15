@@ -1756,17 +1756,21 @@ const MIGRATION_API_LOVE_RECIPIENT_PROOF: Migration = {
   ],
 };
 
-// 58: the legacy listen-second seeder (outbox/listen-second-receipts.ts) asks,
-// for each scrobble.create operation, whether any of its listen keys still has
-// an unknown second. Without this index each EXISTS walked every listen key of
-// the DID (one owner with ~117k keys made one call take ~25 s, once a minute,
-// which tripped the systemd watchdog). The partial index shrinks to nothing as
-// seeding completes.
-const MIGRATION_LISTEN_SECOND_SEED_INDEX: Migration = {
+// 58: operation-id lookups on listen_keys and import_items. The legacy
+// listen-second seeder (outbox/listen-second-receipts.ts) asks, once a minute,
+// whether an operation still owns a listen key with an unknown second, and
+// import rebatching, the outbox runner and the operation runner look keys and
+// items up by operation id alone. Both tables were keyed only by (did,
+// dedupe_key) and (job_id, seq), so each lookup scanned: on an owner database
+// with ~117k listen keys one seeder call took ~25 s synchronously (the systemd
+// watchdog killed the service), and rebatching 1,000 singles held one
+// transaction for ~20 s.
+const MIGRATION_OPERATION_ID_INDEXES: Migration = {
   version: 58,
-  name: 'listen_second_seed_index',
+  name: 'operation_id_indexes',
   statements: [
-    'CREATE INDEX listen_keys_unknown_second_operation ON listen_keys(did,operation_id) WHERE listen_second IS NULL',
+    'CREATE INDEX listen_keys_operation_second ON listen_keys(operation_id,listen_second)',
+    'CREATE INDEX import_items_operation ON import_items(operation_id)',
   ],
 };
 
@@ -1828,7 +1832,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_LINK_COVERAGE_RECEIPTS,
   MIGRATION_LINK_LOVE_COVERAGE,
   MIGRATION_API_LOVE_RECIPIENT_PROOF,
-  MIGRATION_LISTEN_SECOND_SEED_INDEX,
+  MIGRATION_OPERATION_ID_INDEXES,
 ];
 
 /** The schema version this code expects. */
