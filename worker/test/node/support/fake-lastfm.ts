@@ -116,7 +116,7 @@ export type LastfmFault =
   /** A Last.fm error body (`{error, message}` / `<lfm status="failed">`) with the §7.6 status. */
   | { code: number; message?: string; status?: number; retryAfter?: number; method?: string }
   /** A bare HTTP error (text/html body, no Last.fm envelope). */
-  | { httpStatus: number; body?: string; method?: string };
+  | { httpStatus: number; body?: string; retryAfter?: number; method?: string };
 
 // ---------------------------------------------------------------------------
 // Response tree → JSON / XML
@@ -498,9 +498,11 @@ export class FakeLastfm implements Routable {
       const fault = i >= 0 ? this.faults.splice(i, 1)[0]! : null;
       if (fault && 'httpStatus' in fault) {
         faultName = `http:${fault.httpStatus}`;
+        const headers: Record<string, string> = { 'content-type': 'text/html; charset=utf-8' };
+        if (fault.retryAfter !== undefined) headers['retry-after'] = String(fault.retryAfter);
         res = new Response(fault.body ?? `<html><body><h1>${fault.httpStatus}</h1></body></html>`, {
           status: fault.httpStatus,
-          headers: { 'content-type': 'text/html; charset=utf-8' },
+          headers,
         });
       } else if (fault) {
         faultName = `code:${fault.code}`;

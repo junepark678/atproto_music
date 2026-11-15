@@ -31,8 +31,9 @@
 // | Last.fm ok, item code 0                 | sent                                    |                        |
 // | Last.fm item code 5                     | queued at the next 00:00 UTC            |                        |
 // | Last.fm other item code                 | ignored (`ignored_<code>`)              |                        |
-// | Last.fm 8, 11, 16, 29; HTTP 5xx, 429;   | backoff 30 s·2^n + U[0,25%], ≤ 6 h      | 29/429 hold the global |
-// |   network or redirect; malformed answer |                                         |   bucket (Retry-After) |
+// | Last.fm 8, 11, 16, 29; HTTP 5xx, 429;   | backoff 30 s·2^n + U[0,25%], ≤ 1 h      | 29/429 hold the global |
+// |   network errors                       | until destination age expiry            | bucket (Retry-After) |
+// | Last.fm malformed answer               | same backoff, failed after 8 attempts   |                        |
 // | Last.fm 9 or 4                          | held                                    | link revoked           |
 // | Last.fm 10 or 26                        | stay queued                             | all Last.fm paused     |
 // | Last.fm other error code, HTTP 4xx      | failed                                  |                        |
@@ -56,8 +57,8 @@
 //
 // Delivery is at least once: a request that timed out after the upstream
 // accepted it is sent again (neither service has an idempotency key).
-// Retryable row requests stop after eight attempted requests, including
-// upstream 429 responses. Local pacing waits do not consume attempts. Link
+// Retryable row requests continue until their destination age expiry.
+// Upstream responses count as attempts; local pacing waits do not. Link
 // health stores the last success/failure times and shows transient errors
 // after three consecutive failures; a successful response clears that error.
 //
@@ -82,6 +83,7 @@ import { canonicalForwardDedupeKey } from '../outbox/forward-key';
 import { hasPresentTrackLove } from '../outbox/live-track-survivor';
 import { nextDeleteWakeAt, runDeleteSlice } from './delete-forwarder';
 import {
+  backoffMalformedRows,
   backoffRows,
   clearLastfmKeyRejected,
   dueRows,
@@ -89,6 +91,7 @@ import {
   expireRows,
   type ForwardListen,
   type ForwardTrack,
+  forwardBackoffMs,
   holdLinkRows,
   lastfmKeyRejectedAt,
   lovePayload,
@@ -147,7 +150,7 @@ export { MAX_LOVE_FRAMING_PER_RUN };
 const RETRYABLE_LASTFM_CODES: ReadonlySet<number> = new Set([8, 11, 16, 29]);
 const REVOKING_LASTFM_CODES: ReadonlySet<number> = new Set([4, 9]);
 const KEY_LASTFM_CODES: ReadonlySet<number> = new Set([10, 26]);
-const MAX_RETRY_AFTER_MS = 6 * 3_600_000;
+const MAX_RETRY_AFTER_MS = 3_600_000;
 
 /** Everything one run needs. Built once by the composition (http/links.ts linksFeature). */
 export interface ForwardRuntime {
@@ -856,9 +859,9 @@ function lastfmFailed(rt: ForwardRuntime, job: Job, out: LastfmFailure, now: num
     const retryable =
       (out.kind === 'error' && RETRYABLE_LASTFM_CODES.has(out.code)) ||
       (out.kind === 'http' && (out.httpStatus >= 500 || out.httpStatus === 429)) ||
-      out.kind === 'network' ||
-      out.kind === 'malformed';
-    if (!retryable || once) {
+      out.kind === 'network';
+    const malformed = out.kind === 'malformed';
+    if ((!retryable && !malformed) || once) {
       noteLinkError(db, job.link, error, now, true);
       settleJobRows(db, job, 'failed', now, error);
       return;
@@ -868,7 +871,8 @@ function lastfmFailed(rt: ForwardRuntime, job: Job, out: LastfmFailure, now: num
     if (rateLimited && 'retryAfterS' in out && out.retryAfterS !== null) {
       rt.pacing.deferLastfm(now + Math.min(MAX_RETRY_AFTER_MS, out.retryAfterS * 1000));
     }
-    backoffRows(db, job.rows, now, rt.random, error);
+    if (malformed) backoffMalformedRows(db, job.rows, now, rt.random, error);
+    else backoffRows(db, job.rows, now, rt.random, error);
   });
   rt.log.log('warn', 'forward.failed', { service: 'lastfm', kind: job.kind, rows: job.rows.length, error });
 }
@@ -984,7 +988,11 @@ async function sendListenbrainz(rt: ForwardRuntime, job: Job, token: string): Pr
       const until = rt.pacing.observeListenbrainz(key, at, out.rate, true) as number;
       noteLinkError(db, job.link, error, at, once);
       if (once) settleJobRows(db, job, 'failed', at, error);
-      else retryRowsAt(db, job.rows, at, () => until, error);
+      // The later of the upstream reset and the row's own exponential backoff:
+      // without an X-RateLimit-Reset-In the reset defaults to one second, and
+      // rows now retry until expiry rather than for eight attempts.
+      else
+        retryRowsAt(db, job.rows, at, (row) => Math.max(until, at + forwardBackoffMs(row.attempts, rt.random)), error);
       return;
     }
     rt.pacing.observeListenbrainz(key, at, out.rate);
