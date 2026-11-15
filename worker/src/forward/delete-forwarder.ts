@@ -14,6 +14,7 @@ export const DELETE_MAX_REQUESTS_PER_RUN = 1;
 const PAGE_SIZE = 1000;
 const MAX_LOOKUP_CANDIDATES = 4000;
 const MAX_DELETE_ACCOUNT_CANDIDATES = 24;
+const NO_MATCH_RETRY_WINDOW_MS = 2 * 60 * 60_000;
 const deleteAccountCursor = new WeakMap<Db, string>();
 type Candidate = ListenWindowEntry;
 function sameCredential(db: Db, row: LinkedAccountRow): boolean {
@@ -79,6 +80,7 @@ interface QueuedDeleteHead {
 }
 
 interface QueuedDeleteRow extends QueuedDeleteHead {
+  created_at_ms: number;
   did: string;
   identity_key: string;
   listened_at: number;
@@ -523,7 +525,22 @@ export async function runDeleteSlice(
     return { requests: 1, state: 'lookup_more', nextDueMs: deps.clock.nowMs() + 1000 };
   }
   const selected = choose(candidates, row);
-  if (selected === null || selected === 'ambiguous' || selected.recordingMsid === null) {
+  const noMatch = selected === null || (selected !== 'ambiguous' && selected.recordingMsid === null);
+  if (noMatch || selected === 'ambiguous') {
+    if (noMatch) {
+      const retryUntil = row.created_at_ms + NO_MATCH_RETRY_WINDOW_MS;
+      if (deps.clock.nowMs() < retryUntil) {
+        const dueAt = Math.min(retryAt(deps.clock.nowMs(), row.attempts, deps.random), retryUntil);
+        deps.db.run(
+          "UPDATE listenbrainz_deletes SET due_at=?,last_error='no_match',updated_at_ms=? WHERE id=? AND generation=? AND state='queued'",
+          dueAt,
+          deps.clock.nowMs(),
+          row.id,
+          row.generation,
+        );
+        return { requests: 1, state: 'no_match_retry', nextDueMs: dueAt };
+      }
+    }
     deps.db.run(
       "UPDATE listenbrainz_deletes SET state='ignored',last_error=?,updated_at_ms=? WHERE id=? AND generation=?",
       selected === 'ambiguous' ? 'ambiguous_match' : 'no_match',

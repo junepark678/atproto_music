@@ -1440,6 +1440,8 @@ describe('ListenBrainz forwarding', () => {
       client: w.rt.listenbrainz,
       pacing: w.rt.pacing,
     };
+    expect((await runDeleteSlice(deps)).state).toBe('no_match_retry');
+    w.clock.advance(2 * 60 * MINUTE);
     expect((await runDeleteSlice(deps)).state).toBe('ignored');
     expect(w.lb.deletions).toEqual([]);
     w.app.db.run(
@@ -1448,7 +1450,7 @@ describe('ListenBrainz forwarding', () => {
       w.clock.nowMs(),
     );
     expect((await runDeleteSlice(deps)).state).toBe('expired');
-    expect(w.seen).toHaveLength(1);
+    expect(w.seen).toHaveLength(2);
   });
 
   it('same-account relink keeps delete work, while a different remote expires the old generation', async () => {

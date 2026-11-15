@@ -35,6 +35,7 @@ const MBID = '8f3471b5-7e6a-48da-86a9-c1c07a0f47ae';
 const SECOND = 1_000;
 const MINUTE = 60 * SECOND;
 const DAY = 24 * 60 * MINUTE;
+const TWO_HOURS = 2 * 60 * MINUTE;
 
 interface World {
   app: TestApp;
@@ -270,7 +271,43 @@ it('review: a live forward for one link does not suppress another link delete in
   expect(w.seen.map(([, path]) => path)).toContain('/1/submit-listens');
   expect(w.seen.map(([, path]) => path)).toContain('/1/user/alice_lb/listens');
   expect(w.app.db.one('SELECT state FROM listenbrainz_deletes WHERE id=?', 'alice-delete')).toEqual({
+    state: 'queued',
+  });
+});
+it('retries ListenBrainz no_match with backoff for two hours before ignoring', async () => {
+  const w = await world();
+  const id = w.link();
+  queueDelete(w, id, 'no-match-window', 1768392000, 'A', 'T');
+  const deps = depsOf(w);
+  const created = w.clock.nowMs();
+
+  expect((await runDeleteSlice(deps)).state).toBe('no_match_retry');
+  let row = w.app.db.one<{ state: string; due_at: number; last_error: string | null }>(
+    'SELECT state,due_at,last_error FROM listenbrainz_deletes WHERE id=?',
+    'no-match-window',
+  )!;
+  expect(row).toMatchObject({ state: 'queued', last_error: 'no_match' });
+
+  while (row.due_at < created + TWO_HOURS) {
+    w.clock.advance(row.due_at - w.clock.nowMs());
+    expect((await runDeleteSlice(deps)).state).toBe('no_match_retry');
+    row = w.app.db.one<{ state: string; due_at: number; last_error: string | null }>(
+      'SELECT state,due_at,last_error FROM listenbrainz_deletes WHERE id=?',
+      'no-match-window',
+    )!;
+  }
+  expect(row.due_at).toBe(created + TWO_HOURS);
+
+  w.clock.advance(TWO_HOURS - 1 - (w.clock.nowMs() - created));
+  expect((await runDeleteSlice(deps)).state).toBeNull();
+  expect(w.app.db.one('SELECT state FROM listenbrainz_deletes WHERE id=?', 'no-match-window')).toEqual({
+    state: 'queued',
+  });
+  w.clock.advance(1);
+  expect((await runDeleteSlice(deps)).state).toBe('ignored');
+  expect(w.app.db.one('SELECT state,last_error FROM listenbrainz_deletes WHERE id=?', 'no-match-window')).toEqual({
     state: 'ignored',
+    last_error: 'no_match',
   });
 });
 it('review: repeated deletion failures update current link health', async () => {
