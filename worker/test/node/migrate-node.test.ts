@@ -84,7 +84,7 @@ describe('migrate over node:sqlite', () => {
       .split(';')
       .map((statement) => statement.trim())
       .filter(Boolean);
-    const migration = MIGRATIONS.at(-1)!;
+    const migration = MIGRATIONS[56]!;
     expect(migration).toMatchObject({ version: 57, name: 'api_love_recipient_proof' });
     expect(createHash('sha256').update(ddl).digest('hex')).toBe(
       '54dc2d344097763e055b0f8f7f10d8f85993ccdaf0e31620b699726c35256a96',
@@ -93,7 +93,7 @@ describe('migrate over node:sqlite', () => {
     expect(migration.statements).toEqual(statements);
     expect(migrate(db, MIGRATIONS.slice(0, 56))).toEqual({ status: 'ready', version: 56 });
     expect(db.exec('SELECT max(version) AS version FROM schema_migrations')).toEqual([{ version: 56 }]);
-    expect(migrate(db)).toEqual({ status: 'ready', version: 57 });
+    expect(migrate(db, MIGRATIONS.slice(0, 57))).toEqual({ status: 'ready', version: 57 });
 
     const tables = db.all<{ name: string }>(
       "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'love_api_%' ORDER BY name",
@@ -123,7 +123,7 @@ describe('migrate over node:sqlite', () => {
   it('migration 30 creates durable per-generation pull state, staging and tombstone tables', () => {
     const db = freshDb();
     migrate(db);
-    expect(SCHEMA_VERSION).toBe(57);
+    expect(SCHEMA_VERSION).toBe(58);
     for (const table of [
       'linked_pull_state',
       'linked_pull_items',

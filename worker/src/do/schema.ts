@@ -1756,6 +1756,20 @@ const MIGRATION_API_LOVE_RECIPIENT_PROOF: Migration = {
   ],
 };
 
+// 58: the legacy listen-second seeder (outbox/listen-second-receipts.ts) asks,
+// for each scrobble.create operation, whether any of its listen keys still has
+// an unknown second. Without this index each EXISTS walked every listen key of
+// the DID (one owner with ~117k keys made one call take ~25 s, once a minute,
+// which tripped the systemd watchdog). The partial index shrinks to nothing as
+// seeding completes.
+const MIGRATION_LISTEN_SECOND_SEED_INDEX: Migration = {
+  version: 58,
+  name: 'listen_second_seed_index',
+  statements: [
+    'CREATE INDEX listen_keys_unknown_second_operation ON listen_keys(did,operation_id) WHERE listen_second IS NULL',
+  ],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
   MIGRATION_2,
@@ -1814,6 +1828,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_LINK_COVERAGE_RECEIPTS,
   MIGRATION_LINK_LOVE_COVERAGE,
   MIGRATION_API_LOVE_RECIPIENT_PROOF,
+  MIGRATION_LISTEN_SECOND_SEED_INDEX,
 ];
 
 /** The schema version this code expects. */
