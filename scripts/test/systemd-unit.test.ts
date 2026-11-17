@@ -84,7 +84,7 @@ afterEach(async () => {
 });
 
 describe('systemd units', () => {
-  it('atmusic.service has Type=notify, NotifyAccess=all, WatchdogSec, TimeoutStartSec=15min, RestartPreventExitStatus=78 75, StateDirectory=atmusic with mode 0700, LoadCredentialEncrypted=secrets and ATMUSIC_LISTEN=127.2.0.1:8888', () => {
+  it('atmusic.service has Type=notify, NotifyAccess=all, WatchdogSec, TimeoutStartSec=15min, RestartPreventExitStatus=78 (75 is restarted), StateDirectory=atmusic with mode 0700, LoadCredentialEncrypted=secrets and ATMUSIC_LISTEN=127.2.0.1:8888', () => {
     // Exactly the reviewed unit of ADR §14.1.
     expect(readFileSync(SERVICE, 'utf8')).toBe(adrServiceBlock());
 
@@ -99,10 +99,11 @@ describe('systemd units', () => {
     // TimeoutStopSec must exceed the production drain window of 25 s (§3.10).
     expect(only(unit, 'Service', 'TimeoutStopSec')).toBe('30s');
 
-    // The never-restarted exit codes are the ones run() uses.
+    // Only configuration errors are never restarted. A locked database (75) is restarted with backoff so a
+    // replacement starts once a predecessor stuck after a watchdog kill releases the lock.
     const prevent = only(unit, 'Service', 'RestartPreventExitStatus').split(/\s+/).map(Number);
-    expect(prevent).toEqual([78, 75]);
-    expect([EXIT_CONFIG, EXIT_DATABASE_LOCKED]).toEqual(prevent);
+    expect(prevent).toEqual([EXIT_CONFIG]);
+    expect(prevent).not.toContain(EXIT_DATABASE_LOCKED);
     expect(only(unit, 'Service', 'Restart')).toBe('on-failure');
 
     expect(only(unit, 'Service', 'StateDirectory')).toBe('atmusic');
