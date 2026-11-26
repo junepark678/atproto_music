@@ -8,9 +8,9 @@
 //   long upgrade is never killed by `TimeoutStartSec` and restarted in a loop;
 // - `READY=1` once the listener is bound (run.ts sends it after `listen`);
 // - `WATCHDOG=1` every `WatchdogSec/3` (`startWatchdog`), but only while the
-//   event-loop-lag probe (the tick arrived less than 5 s late) and the
-//   database probe (`SELECT 1`) both pass: a wedged loop or a dead connection
-//   stops the pings and systemd restarts the service;
+//   timer callback runs and the database probe (`SELECT 1`) passes. Late
+//   callbacks log the delay but ping after recovery; a wedged loop or a dead
+//   connection stops the pings and systemd restarts the service;
 // - `STOPPING=1` first thing on SIGTERM (shutdown.ts).
 //
 // Node cannot send a datagram to a unix socket itself, so every message goes
@@ -43,7 +43,7 @@ import { type HostTimers, nodeTimers, type Stoppable, type TimerHandle } from '.
 export const EXTEND_TIMEOUT_USEC = 60_000_000;
 /** How often EXTEND_TIMEOUT_USEC is repeated while startup work runs. */
 export const EXTEND_INTERVAL_MS = 20_000;
-/** A watchdog tick later than this is a stalled event loop: no WATCHDOG=1 for it. */
+/** A watchdog tick later than this is recorded as event-loop delay. */
 export const WATCHDOG_MAX_LAG_MS = 5_000;
 
 export const READY = 'READY=1';
@@ -207,7 +207,13 @@ export interface WatchdogReport {
   skipped: number;
 }
 
-/** WATCHDOG=1 every `intervalMs`, only while both probes pass (module comment). */
+/**
+ * WATCHDOG=1 when the timer callback runs and the database probe passes.
+ * A late callback is still evidence that the event loop recovered; withholding
+ * its ping can make a transient host stall trigger systemd's watchdog timeout.
+ * A permanently blocked loop cannot run this callback, so systemd still
+ * restarts it, and a failed database probe continues to withhold the ping.
+ */
 export function startWatchdog(options: WatchdogOptions): Stoppable & { report(): WatchdogReport } {
   const timers = options.timers ?? nodeTimers;
   const now = options.now ?? (() => performance.now());
@@ -226,7 +232,10 @@ export function startWatchdog(options: WatchdogOptions): Stoppable & { report():
     } catch {
       dbOk = false;
     }
-    if (lag >= maxLag || !dbOk) {
+    if (lag >= maxLag) {
+      options.log.log('warn', 'systemd.watchdog_late', { lagMs: Math.round(lag), db: dbOk });
+    }
+    if (!dbOk) {
       report.skipped += 1;
       options.log.log('warn', 'systemd.watchdog_skipped', { lagMs: Math.round(lag), db: dbOk });
       return;
