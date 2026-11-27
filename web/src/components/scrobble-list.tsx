@@ -97,7 +97,7 @@ export function ScrobbleText({
             </span>
           )}
         </>
-      ) : null}
+      ) : null}{' '}
       <span class="scrobble-meta">
         <time dateTime={scrobble.listenedAt}>{formatLocalTime(scrobble.listenedAt)}</time>
         {durationSeconds !== undefined ? (

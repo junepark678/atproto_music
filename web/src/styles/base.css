@@ -8,6 +8,15 @@
   color-scheme: light dark;
   --page-width: min(100% - 2rem, 52rem);
   --display-font: Georgia, "Times New Roman", serif;
+  --record-base: #25283d;
+  --record-groove: #30334a;
+  --record-shadow: 0 3px 10px #181a2c33;
+  --record-texture: repeating-radial-gradient(
+    circle,
+    var(--record-base) 0 1px,
+    var(--record-groove) 2px 3px,
+    var(--record-base) 4px 5px
+  );
   --bg: #f2f3f7;
   --fg: #181a2c;
   --muted: #585b73;
@@ -22,6 +31,9 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
+    --record-base: #393c55;
+    --record-groove: #494d6c;
+    --record-shadow: 0 3px 10px #08091166;
     --bg: #121320;
     --fg: #e8e9f3;
     --muted: #a4a7be;

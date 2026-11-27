@@ -72,6 +72,42 @@
   padding: 1rem 0 1rem 1.5rem;
 }
 
+.listening-timeline > li::before {
+  content: "";
+  position: absolute;
+  left: 0.27rem;
+  top: 0;
+  bottom: -1px;
+  width: 1px;
+  background: var(--border);
+}
+.listening-timeline > li:last-child::before {
+  bottom: auto;
+  height: 1.64rem;
+}
+.listening-timeline > li::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 1.35rem;
+  width: 0.58rem;
+  height: 0.58rem;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 4px var(--bg);
+}
+.scrobble-copy {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: var(--display-font);
+  font-size: 1.12rem;
+  line-height: 1.4;
+}
+.scrobble-copy .track {
+  font-weight: 700;
+  font-size: 1.2em;
+}
+
 .scrobble-meta {
   color: var(--muted);
   font-size: 0.875rem;
@@ -96,6 +132,7 @@
   opacity: 0;
 }
 
+.scrobble-copy .external-link,
 .now-playing-card .external-link {
   opacity: 1;
 }
@@ -272,6 +309,11 @@
   border-radius: 4px;
 }
 
+.scrobble-list .confirm {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .actions {
   display: flex;
   gap: 0.5rem;
@@ -299,8 +341,8 @@
   border-radius: 50%;
   color: #fff;
   font-size: 2rem;
-  background: repeating-radial-gradient(circle, #25283d 0 1px, #30334a 2px 3px, #25283d 4px 5px);
-  box-shadow: 0 3px 10px #181a2c33;
+  background: var(--record-texture);
+  box-shadow: var(--record-shadow);
 }
 .now-playing-art:has(.now-playing-cover[data-status="loaded"]) {
   border-radius: 0;
@@ -320,6 +362,7 @@
   opacity: 0;
 }
 .now-playing-content {
+  overflow-wrap: anywhere;
   min-width: 0;
 }
 .now-playing-overline {
@@ -424,6 +467,8 @@
   list-style: none;
 }
 .listening-now li {
+  min-width: 0;
+  overflow-wrap: anywhere;
   display: grid;
   gap: 0.1rem;
 }
@@ -437,44 +482,6 @@
   margin-top: 1rem;
 }
 
-/* Feed styling */
-.listening-timeline > li::before {
-  content: "";
-  position: absolute;
-  left: 0.27rem;
-  top: 0;
-  bottom: -1px;
-  width: 1px;
-  background: var(--border);
-}
-.listening-timeline > li::after {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 1.35rem;
-  width: 0.58rem;
-  height: 0.58rem;
-  border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 0 4px var(--bg);
-}
-.scrobble-copy {
-  min-width: 0;
-  overflow-wrap: anywhere;
-  font-family: var(--display-font);
-  font-size: 1.12rem;
-  line-height: 1.4;
-}
-.now-playing-content,
-.listening-now li,
-.scrobble-list .confirm {
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-.scrobble-copy .track {
-  font-weight: 700;
-  font-size: 1.2em;
-}
 .feed-masthead {
   display: flex;
   align-items: center;
@@ -490,8 +497,8 @@
   width: clamp(2.75rem, 9vw, 5.5rem);
   aspect-ratio: 1;
   border-radius: 50%;
-  background: repeating-radial-gradient(circle, #25283d 0 1px, #30334a 2px 3px, #25283d 4px 5px);
-  box-shadow: 0 5px 14px #181a2c33;
+  background: var(--record-texture);
+  box-shadow: var(--record-shadow);
 }
 .masthead-record span {
   width: 1.3rem;
