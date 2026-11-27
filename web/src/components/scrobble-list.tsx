@@ -29,7 +29,7 @@ export interface ScrobbleListProps {
 
 export function ScrobbleList({ items, label, showActor = false, canDelete, onDelete }: ScrobbleListProps) {
   return (
-    <ol class="scrobble-list" aria-label={label}>
+    <ol class="scrobble-list listening-timeline" aria-label={label}>
       {items.map(({ scrobble, local }) => (
         <li key={scrobble.uri} data-uri={scrobble.uri}>
           <ScrobbleText scrobble={scrobble} showActor={showActor} />
@@ -59,7 +59,7 @@ export function ScrobbleText({
 }) {
   const durationSeconds = scrobble.durationSeconds ?? scrobble.musicbrainz?.durationSeconds;
   return (
-    <>
+    <div class="scrobble-copy">
       <span class="track">
         <MusicBrainzLink
           kind="recording"
@@ -97,9 +97,8 @@ export function ScrobbleText({
             </span>
           )}
         </>
-      ) : null}
+      ) : null}{' '}
       <span class="scrobble-meta">
-        {' · '}
         <time dateTime={scrobble.listenedAt}>{formatLocalTime(scrobble.listenedAt)}</time>
         {durationSeconds !== undefined ? (
           <>
@@ -116,7 +115,7 @@ export function ScrobbleText({
           </>
         ) : null}
       </span>
-    </>
+    </div>
   );
 }
 

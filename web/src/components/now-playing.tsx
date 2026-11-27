@@ -229,15 +229,17 @@ export function NowPlayingCard({ api, did, owner }: { api: ApiClient; did: Did; 
 }
 
 function CoverArt({ releaseMbid }: { releaseMbid: string }) {
-  const [failed, setFailed] = useState(false);
-  if (failed) return null;
+  const [status, setStatus] = useState<'pending' | 'loaded' | 'failed'>('pending');
+  if (status === 'failed') return null;
   return (
     <img
       class="now-playing-cover"
+      data-status={status}
       src={`/api/v1/cover-art/${releaseMbid}`}
       loading="lazy"
       alt=""
-      onError={() => setFailed(true)}
+      onLoad={() => setStatus('loaded')}
+      onError={() => setStatus('failed')}
     />
   );
 }

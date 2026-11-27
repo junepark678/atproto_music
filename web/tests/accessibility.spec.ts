@@ -16,6 +16,7 @@
 
 import AxeBuilder from '@axe-core/playwright';
 import type { APIRequestContext, Locator, Page } from '@playwright/test';
+import scrobblePage from '../../api/examples/scrobble-page.json' with { type: 'json' };
 import {
   account,
   authorizeOnFixtureAs,
@@ -62,6 +63,16 @@ test.beforeAll(async () => {
 });
 
 test('public profile now-playing card is rendered and accessible', async ({ page }) => {
+  const releaseMbid = '33333333-3333-4333-8333-333333333333';
+  const coverRoute = `**/api/v1/cover-art/${releaseMbid}`;
+  const releaseCover = Promise.withResolvers<void>();
+  await page.route(coverRoute, async (route) => {
+    await releaseCover.promise;
+    await route.fulfill({
+      contentType: 'image/svg+xml',
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="80" height="64"><rect width="80" height="64" fill="navy"/></svg>',
+    });
+  });
   await page.route('**/api/v1/users/*/now-playing', (route) =>
     route.fulfill({
       status: 200,
@@ -71,6 +82,7 @@ test('public profile now-playing card is rendered and accessible', async ({ page
           artist: 'Björk',
           track: 'Jóga',
           album: 'Homogenic',
+          releaseMbid,
           startedAt: '2026-01-15T11:58:00Z',
           updatedAt: '2026-01-15T11:58:00Z',
           expiresAt: '2026-01-15T12:03:00Z',
@@ -82,7 +94,7 @@ test('public profile now-playing card is rendered and accessible', async ({ page
       }),
     }),
   );
-  await page.goto(`/u/${bob.did}`);
+  await page.goto(`/u/${bob.did}`, { waitUntil: 'domcontentloaded' });
   await settled(page, `@${bob.handle}`);
   await expect(page.getByRole('article', { name: 'Now playing' })).toContainText('Jóga');
   await expect(page.getByRole('progressbar', { name: 'Track progress' })).toHaveAttribute('max', '180');
@@ -90,7 +102,25 @@ test('public profile now-playing card is rendered and accessible', async ({ page
     'aria-valuetext',
     /^\d:\d{2} \/ 3:00$/,
   );
+  const artwork = page.locator('.now-playing-art');
+  const cover = artwork.locator('img');
+  try {
+    await expect(artwork).toHaveCSS('border-radius', '50%');
+    await expect(cover).toHaveCSS('opacity', '0');
+  } finally {
+    releaseCover.resolve();
+  }
+  await cover.evaluate((img) => img.decode());
+  await expect(cover).toHaveCSS('opacity', '1');
+  await expect(artwork).toHaveCSS('border-radius', '0px');
+  await expect(cover).toHaveCSS('object-fit', 'contain');
   await expectAccessible(page, 'public profile with now-playing card');
+
+  await page.route(coverRoute, (route) => route.fulfill({ status: 404 }));
+  await page.reload();
+  await expect(artwork).toBeVisible();
+  await expect(cover).toHaveCount(0);
+  await expect(artwork).toHaveCSS('border-radius', '50%');
 });
 
 // ---------------------------------------------------------------------------
@@ -192,6 +222,41 @@ async function tabTo(page: Page, target: Locator, label: string, max = 80): Prom
 
 // ---------------------------------------------------------------------------
 
+test('long track titles fit a narrow feed and scope tabs work from the keyboard', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 700 });
+  const track = 'X'.repeat(130);
+  await page.route('**/api/v1/feed?scope=global', (route) =>
+    route.fulfill({ json: { ...scrobblePage, items: [{ ...scrobblePage.items[0], track }] } }),
+  );
+  await page.goto('/feed');
+  await expect(page.getByRole('link', { name: `${track} (MusicBrainz)` })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(320);
+  const global = page.getByRole('tab', { name: 'Global' });
+  const following = page.getByRole('tab', { name: 'Following' });
+  await global.focus();
+  await page.keyboard.press('Control+End');
+  await expect(global).toBeFocused();
+  await expect(global).toHaveAttribute('aria-selected', 'true');
+  await page.keyboard.press('Tab');
+  await expect(page.getByRole('tabpanel')).toBeFocused();
+  await global.focus();
+  for (const [key, focused] of [
+    ['End', following],
+    ['Home', global],
+    ['ArrowLeft', following],
+    ['ArrowRight', global],
+  ] as const) {
+    await page.keyboard.press(key);
+    await expect(focused).toBeFocused();
+    await expect(focused).toHaveAttribute('tabindex', '0');
+    await expect(global).toHaveAttribute('aria-selected', 'true');
+    await expect(page.getByRole('tabpanel', { name: 'Global' })).toContainText(track);
+  }
+  await page.keyboard.press('End');
+  await page.keyboard.press('Space');
+  await expect(following).toHaveAttribute('aria-selected', 'true');
+});
+
 test('signin, feed, profile, scrobble, settings/links, settings/imports, settings/credentials and lastfm/authorize have no axe violations', async ({
   page,
   request,
@@ -243,7 +308,35 @@ test('signin, feed, profile, scrobble, settings/links, settings/imports, setting
   await signIn(page, request, carol);
   await settled(page, 'Feed');
   await expectAccessible(page, 'signed-in /feed');
-  await page.getByRole('tab', { name: 'Following' }).click();
+  const panel = page.getByRole('tabpanel');
+  await expect(panel.locator('li[data-uri]').first()).toBeVisible();
+  // Capture the first render with the new label, before a later effect could clear old rows.
+  await panel.evaluate((element) => {
+    const observer = new MutationObserver(() => {
+      element.dataset.rowsAtSwitch = String(element.querySelectorAll('li[data-uri]').length);
+      observer.disconnect();
+    });
+    observer.observe(element, { attributes: true, attributeFilter: ['aria-labelledby'] });
+  });
+  const releasePage = Promise.withResolvers<void>();
+  await page.route(
+    '**/api/v1/feed?scope=following*',
+    async (route) => {
+      await releasePage.promise;
+      await route.continue();
+    },
+    { times: 1 },
+  );
+  try {
+    await page.getByRole('tab', { name: 'Global' }).press('ArrowRight');
+    await expect(page.getByRole('tab', { name: 'Following' })).toBeFocused();
+    await expect(panel).toHaveAccessibleName('Global');
+    await page.keyboard.press('Enter');
+    await expect(panel).toHaveAttribute('data-rows-at-switch', '0');
+    await expect(panel.locator('[data-state="loading"]')).toBeVisible();
+  } finally {
+    releasePage.resolve();
+  }
   await expect(page.locator('#feed-panel [data-state="empty"]')).toBeVisible();
   await expectAccessible(page, 'signed-in /feed following');
 
@@ -376,7 +469,8 @@ test('keyboard-only journey reaches sign-in, scrobble submit, window tabs, follo
   await tabTo(page, page.getByLabel('Artist'), 'artist field');
   await page.keyboard.type('Kate Bush');
   await tabTo(page, page.getByLabel('Track'), 'track field');
-  await page.keyboard.type('Cloudbusting');
+  const trackTitle = 'W'.repeat(20);
+  await page.keyboard.type(trackTitle);
   await tabTo(page, page.getByLabel('Album (optional)'), 'album field');
   await page.keyboard.type('Hounds of Love');
   const listenedAt = page.getByLabel('Listened at');
@@ -386,10 +480,14 @@ test('keyboard-only journey reaches sign-in, scrobble submit, window tabs, follo
   await expect(listenedAt).toHaveValue(validLocalDateTime);
   await tabTo(page, page.getByRole('button', { name: 'Publish scrobble' }), 'publish button');
   await page.keyboard.press('Enter');
-  const submitted = page.locator('li[data-op-id]').filter({ hasText: 'Cloudbusting' }).locator('.op-status');
+  const submitted = page.locator('li[data-op-id]').filter({ hasText: trackTitle }).locator('.op-status');
   await expect(submitted).toHaveAttribute('data-op-state', 'indexed', { timeout: 60_000 });
+  const desktopSize = page.viewportSize()!;
+  await page.setViewportSize({ width: 320, height: 700 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(320);
+  await page.setViewportSize(desktopSize);
   const records = await pdsListRecords(carol, `${net.prefix}.scrobble`);
-  expect(records.map((r) => r.value.track)).toEqual(['Cloudbusting']);
+  expect(records.map((r) => r.value.track)).toEqual([trackTitle]);
   const history = await request.get(`/api/v1/users/${enc(carol.did)}/scrobbles`);
   expect(((await history.json()) as { items: Array<{ uri: string }> }).items.map((s) => s.uri)).toEqual([
     records[0]?.uri,

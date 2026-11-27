@@ -11,16 +11,17 @@
 //   overlay, and the owner's own records carry a delete control.
 
 import type { Did, FeedScope, Scrobble } from '@atmusic/core/api-types';
-import { useCallback, useState } from 'preact/hooks';
+import { useCallback, useRef, useState } from 'preact/hooks';
 import { useLocation } from 'preact-iso';
 import { ListeningNow, NowPlayingCard } from '../components/now-playing';
 import { withDueAt } from '../components/operation-status';
+import type { OutboxService } from '../components/outbox-service';
 import { usePaged } from '../components/paged';
 import { type ListItem, ScrobbleList } from '../components/scrobble-list';
 import { useSessionHandle } from '../components/session-identity';
 import { EmptyState, ErrorState, LoadingState, SignInPrompt, StaleNotice } from '../components/state-views';
 import { useOutbox, useOutboxOps } from '../components/use-outbox';
-import { overlayScrobbles } from '../outbox/overlay';
+import { type OutboxOperation, overlayScrobbles } from '../outbox/overlay';
 import { useAppState } from '../state/store';
 
 const SCOPES: readonly { id: FeedScope; label: string }[] = [
@@ -33,11 +34,44 @@ export default function Feed() {
   const { query } = useLocation();
   useSessionHandle();
   const [scope, setScope] = useState<FeedScope>(query.scope === 'following' ? 'following' : 'global');
+  const [focusedScope, setFocusedScope] = useState<FeedScope | null>(null);
+  const tabRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  function navigateTab(event: KeyboardEvent, index: number) {
+    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+    let next: number;
+    switch (event.key) {
+      case 'Home':
+        next = 0;
+        break;
+      case 'End':
+        next = SCOPES.length - 1;
+        break;
+      case 'ArrowRight':
+        next = (index + 1) % SCOPES.length;
+        break;
+      case 'ArrowLeft':
+        next = (index + SCOPES.length - 1) % SCOPES.length;
+        break;
+      default:
+        return;
+    }
+    event.preventDefault();
+    tabRefs.current[next]?.focus();
+  }
   const session = state.session.value;
+  const outboxState = useOutbox();
+  const outbox = outboxState.status === 'ready' ? outboxState.outbox : null;
+  const ops = useOutboxOps(outbox);
+  const viewer = scope === 'following' ? (session?.did ?? null) : null;
 
   return (
     <section aria-labelledby="page-title">
-      <h1 id="page-title">Feed</h1>
+      <header class="feed-masthead">
+        <div class="masthead-record" aria-hidden="true">
+          <span />
+        </div>
+        <h1 id="page-title">Feed</h1>
+      </header>
       {session !== null ? (
         <>
           <NowPlayingCard api={state.api} did={session.did} owner />
@@ -45,38 +79,50 @@ export default function Feed() {
         </>
       ) : null}
       <div class="tabs" role="tablist" aria-label="Feed scope">
-        {SCOPES.map((s) => (
+        {SCOPES.map((s, index) => (
           <button
             key={s.id}
             type="button"
             role="tab"
             id={`feed-tab-${s.id}`}
             aria-selected={s.id === scope}
+            tabIndex={s.id === (focusedScope ?? scope) ? 0 : -1}
             aria-controls="feed-panel"
             data-scope={s.id}
+            ref={(element) => {
+              tabRefs.current[index] = element;
+            }}
+            onFocus={() => setFocusedScope(s.id)}
+            onBlur={() => setFocusedScope(null)}
+            onKeyDown={(event) => navigateTab(event, index)}
             onClick={() => setScope(s.id)}
           >
             {s.label}
           </button>
         ))}
       </div>
-      <div id="feed-panel" role="tabpanel" aria-labelledby={`feed-tab-${scope}`}>
+      {/* biome-ignore lint/a11y/noNoninteractiveTabindex: Tab must reach the active panel even when it contains only text. */}
+      <div id="feed-panel" role="tabpanel" tabIndex={0} aria-labelledby={`feed-tab-${scope}`}>
         {scope === 'following' && session === null ? (
           <SignInPrompt>Sign in to see scrobbles from the accounts you follow.</SignInPrompt>
         ) : (
-          <FeedList scope={scope} viewer={scope === 'following' ? (session?.did ?? null) : null} />
+          <FeedList key={viewer ?? scope} scope={scope} viewer={viewer} outbox={outbox} ops={ops} />
         )}
       </div>
     </section>
   );
 }
 
-function FeedList({ scope, viewer }: { scope: FeedScope; viewer: Did | null }) {
+interface FeedListProps {
+  scope: FeedScope;
+  viewer: Did | null;
+  outbox: OutboxService | null;
+  ops: readonly OutboxOperation[] | null;
+}
+
+function FeedList({ scope, viewer, outbox, ops }: FeedListProps) {
   const state = useAppState();
   const session = state.session.value;
-  const outboxState = useOutbox();
-  const outbox = outboxState.status === 'ready' ? outboxState.outbox : null;
-  const ops = useOutboxOps(outbox);
   const key = scope === 'following' ? (viewer === null ? null : `following|${viewer}`) : 'global';
 
   const load = useCallback(
@@ -107,7 +153,19 @@ function FeedList({ scope, viewer }: { scope: FeedScope; viewer: Did | null }) {
       {paged.indexing ? <StaleNotice indexing={paged.indexing} /> : null}
       {items.length === 0 && paged.nextCursor === null ? (
         <EmptyState>
-          {scope === 'following' ? 'No scrobbles from the accounts you follow yet.' : 'No scrobbles yet.'}
+          {scope === 'following' ? (
+            'No scrobbles from the accounts you follow yet.'
+          ) : (
+            <>
+              No scrobbles yet.
+              {state.canPublish.value && session?.status === 'active' ? (
+                <>
+                  {' '}
+                  <a href="/scrobble">Add scrobble</a>
+                </>
+              ) : null}
+            </>
+          )}
         </EmptyState>
       ) : (
         <ScrobbleList
