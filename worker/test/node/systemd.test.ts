@@ -169,17 +169,22 @@ describe('systemd notify', () => {
     watchdog[0]?.callback();
     await tick();
     expect(pings()).toBe(1);
-    // The loop stalled 6 s past the period (lag ≥ 5 s): no ping for that tick.
-    mono += 26_000;
+    // A 38.381 s late callback still probes the database and sends a heartbeat
+    // once the event loop has recovered, keeping a transient host stall from
+    // becoming a systemd watchdog restart.
+    mono += 58_381;
     watchdog[0]?.callback();
     await tick();
-    expect(pings()).toBe(1);
-    expect(h.log.logs.find((l) => l.event === 'systemd.watchdog_skipped')).toMatchObject({ lagMs: 6_000, db: true });
+    expect(pings()).toBe(2);
+    expect(h.log.logs.find((l) => l.event === 'systemd.watchdog_late')).toMatchObject({
+      lagMs: 38_381,
+      db: true,
+    });
     // Back on time: pings again.
     mono += 20_000;
     watchdog[0]?.callback();
     await tick();
-    expect(pings()).toBe(2);
+    expect(pings()).toBe(3);
     expect(h.notes.findIndex((n) => n.state === 'WATCHDOG=1')).toBeGreaterThan(
       h.notes.findIndex((n) => n.state === 'READY=1'),
     );
