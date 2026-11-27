@@ -1,4 +1,6 @@
+import type { Scrobble } from '@atmusic/core/api-types';
 import { describe, expect, it, vi } from 'vitest';
+import { OutboxService } from '../../src/components/outbox-service';
 import { example, META, mountOwned, ownTest, SESSION, settleRouteImport } from './support';
 
 describe('web/test/routes/feed.test.tsx', () => {
@@ -125,6 +127,53 @@ describe('web/test/routes/feed.test.tsx', () => {
     retry?.click();
     await vi.waitFor(() => expect(app.root.textContent).toContain('Recovered Track'));
     expect(app.root.textContent).toContain('Jóga');
+    app.cleanup();
+  });
+
+  it('keeps a queued delete hidden across feed scopes while operation refresh is pending', async ({ signal }) => {
+    const owner = ownTest(signal);
+    const page = example<{ items: Scrobble[] }>('scrobble-page');
+    const deleted = page.items[0]!;
+    const storageKey = `atmusic:server-operations:${SESSION.did}`;
+    sessionStorage.setItem(
+      storageKey,
+      JSON.stringify([
+        {
+          id: 'pending-delete',
+          did: SESSION.did,
+          uri: deleted.uri,
+          kind: 'scrobble_delete',
+          state: 'queued',
+          seq: 1,
+        },
+      ]),
+    );
+    const pendingRefresh = Promise.withResolvers<void>();
+    const refresh = vi
+      .spyOn(OutboxService.prototype, 'refresh')
+      .mockResolvedValueOnce()
+      .mockReturnValue(pendingRefresh.promise);
+    owner.onCleanup(() => {
+      refresh.mockRestore();
+      pendingRefresh.resolve();
+      sessionStorage.removeItem(storageKey);
+    });
+    const app = mountOwned(owner, '/feed?scope=following', async (input) => {
+      const url = new URL(String(input), 'https://music.test');
+      if (url.pathname === '/api/v1/meta')
+        return Response.json({ ...META, capabilities: [...META.capabilities, 'publication'] });
+      if (url.pathname !== '/api/v1/feed') return undefined;
+      const other = { ...deleted, uri: `${deleted.uri}2`, track: `${url.searchParams.get('scope')} track` };
+      return Response.json({ ...page, items: [deleted, other], nextCursor: null });
+    });
+    app.state.session.value = { ...SESSION };
+    await settleRouteImport();
+    const rowTitles = () => [...app.root.querySelectorAll('li[data-uri] .track')].map((el) => el.textContent);
+    await vi.waitFor(() => expect(rowTitles()).toHaveLength(1));
+    expect(rowTitles()[0]).toContain('following track');
+    app.root.querySelector<HTMLButtonElement>('#feed-tab-global')!.click();
+    await vi.waitFor(() => expect(rowTitles().some((title) => title?.includes('global track'))).toBe(true));
+    expect(app.root.querySelector(`li[data-uri="${deleted.uri}"]`)).toBeNull();
     app.cleanup();
   });
 

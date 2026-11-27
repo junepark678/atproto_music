@@ -15,12 +15,13 @@ import { useCallback, useRef, useState } from 'preact/hooks';
 import { useLocation } from 'preact-iso';
 import { ListeningNow, NowPlayingCard } from '../components/now-playing';
 import { withDueAt } from '../components/operation-status';
+import type { OutboxService } from '../components/outbox-service';
 import { usePaged } from '../components/paged';
 import { type ListItem, ScrobbleList } from '../components/scrobble-list';
 import { useSessionHandle } from '../components/session-identity';
 import { EmptyState, ErrorState, LoadingState, SignInPrompt, StaleNotice } from '../components/state-views';
 import { useOutbox, useOutboxOps } from '../components/use-outbox';
-import { overlayScrobbles } from '../outbox/overlay';
+import { type OutboxOperation, overlayScrobbles } from '../outbox/overlay';
 import { useAppState } from '../state/store';
 
 const SCOPES: readonly { id: FeedScope; label: string }[] = [
@@ -59,6 +60,9 @@ export default function Feed() {
     tab?.click();
   }
   const session = state.session.value;
+  const outboxState = useOutbox();
+  const outbox = outboxState.status === 'ready' ? outboxState.outbox : null;
+  const ops = useOutboxOps(outbox);
   const viewer = scope === 'following' ? (session?.did ?? null) : null;
 
   return (
@@ -101,19 +105,23 @@ export default function Feed() {
         {scope === 'following' && session === null ? (
           <SignInPrompt>Sign in to see scrobbles from the accounts you follow.</SignInPrompt>
         ) : (
-          <FeedList key={viewer ?? scope} scope={scope} viewer={viewer} />
+          <FeedList key={viewer ?? scope} scope={scope} viewer={viewer} outbox={outbox} ops={ops} />
         )}
       </div>
     </section>
   );
 }
 
-function FeedList({ scope, viewer }: { scope: FeedScope; viewer: Did | null }) {
+interface FeedListProps {
+  scope: FeedScope;
+  viewer: Did | null;
+  outbox: OutboxService | null;
+  ops: readonly OutboxOperation[] | null;
+}
+
+function FeedList({ scope, viewer, outbox, ops }: FeedListProps) {
   const state = useAppState();
   const session = state.session.value;
-  const outboxState = useOutbox();
-  const outbox = outboxState.status === 'ready' ? outboxState.outbox : null;
-  const ops = useOutboxOps(outbox);
   const key = scope === 'following' ? (viewer === null ? null : `following|${viewer}`) : 'global';
 
   const load = useCallback(
