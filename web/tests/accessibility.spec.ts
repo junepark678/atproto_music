@@ -274,7 +274,32 @@ test('signin, feed, profile, scrobble, settings/links, settings/imports, setting
   await signIn(page, request, carol);
   await settled(page, 'Feed');
   await expectAccessible(page, 'signed-in /feed');
-  await page.getByRole('tab', { name: 'Following' }).click();
+  const panel = page.getByRole('tabpanel');
+  await expect(panel.locator('li[data-uri]').first()).toBeVisible();
+  // Capture the first render with the new label, before a later effect could clear old rows.
+  await panel.evaluate((element) => {
+    const observer = new MutationObserver(() => {
+      element.dataset.rowsAtSwitch = String(element.querySelectorAll('li[data-uri]').length);
+      observer.disconnect();
+    });
+    observer.observe(element, { attributes: true, attributeFilter: ['aria-labelledby'] });
+  });
+  const releasePage = Promise.withResolvers<void>();
+  await page.route(
+    '**/api/v1/feed?scope=following*',
+    async (route) => {
+      await releasePage.promise;
+      await route.continue();
+    },
+    { times: 1 },
+  );
+  try {
+    await page.getByRole('tab', { name: 'Global' }).press('ArrowRight');
+    await expect(panel).toHaveAttribute('data-rows-at-switch', '0');
+    await expect(panel.locator('[data-state="loading"]')).toBeVisible();
+  } finally {
+    releasePage.resolve();
+  }
   await expect(page.locator('#feed-panel [data-state="empty"]')).toBeVisible();
   await expectAccessible(page, 'signed-in /feed following');
 

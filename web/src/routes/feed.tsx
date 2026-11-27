@@ -59,6 +59,7 @@ export default function Feed() {
     tab?.click();
   }
   const session = state.session.value;
+  const viewer = scope === 'following' ? (session?.did ?? null) : null;
 
   return (
     <section aria-labelledby="page-title">
@@ -100,7 +101,7 @@ export default function Feed() {
         {scope === 'following' && session === null ? (
           <SignInPrompt>Sign in to see scrobbles from the accounts you follow.</SignInPrompt>
         ) : (
-          <FeedList scope={scope} viewer={scope === 'following' ? (session?.did ?? null) : null} />
+          <FeedList key={viewer ?? scope} scope={scope} viewer={viewer} />
         )}
       </div>
     </section>
