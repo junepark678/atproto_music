@@ -29,7 +29,7 @@ export interface ScrobbleListProps {
 
 export function ScrobbleList({ items, label, showActor = false, canDelete, onDelete }: ScrobbleListProps) {
   return (
-    <ol class="scrobble-list" aria-label={label}>
+    <ol class="scrobble-list listening-timeline" aria-label={label}>
       {items.map(({ scrobble, local }) => (
         <li key={scrobble.uri} data-uri={scrobble.uri}>
           <ScrobbleText scrobble={scrobble} showActor={showActor} />

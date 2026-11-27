@@ -335,7 +335,7 @@ function History({ did, outbox, ops }: { did: Did; outbox: OutboxService | null;
       {pending.length > 0 ? (
         <>
           <h3 id="pending-title">Not in the index yet</h3>
-          <ul class="scrobble-list" aria-labelledby="pending-title">
+          <ul class="scrobble-list listening-timeline" aria-labelledby="pending-title">
             {pending.map((p) => (
               <li key={p.uri} data-uri={p.uri}>
                 <ScrobbleText scrobble={pendingText(p.record, did)} />

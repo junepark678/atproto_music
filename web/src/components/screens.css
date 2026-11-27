@@ -47,6 +47,14 @@
   color: var(--bg);
 }
 
+@media (forced-colors: active) {
+  .tabs [role="tab"][aria-selected="true"] {
+    text-decoration: underline;
+    text-decoration-thickness: 3px;
+    text-underline-offset: 0.15em;
+  }
+}
+
 .scrobble-list {
   list-style: none;
   padding: 0;
@@ -54,10 +62,14 @@
 }
 
 .scrobble-list > li {
-  position: relative;
-  min-width: 0;
-  padding: 1rem 0 1rem 1.5rem;
+  padding: 0.6rem 0;
+  overflow-wrap: anywhere;
   border-bottom: 1px solid var(--border);
+}
+
+.listening-timeline > li {
+  position: relative;
+  padding: 1rem 0 1rem 1.5rem;
 }
 
 .scrobble-meta {
@@ -419,7 +431,7 @@
 }
 
 /* Feed styling */
-.scrobble-list > li::before {
+.listening-timeline > li::before {
   content: "";
   position: absolute;
   left: 0.27rem;
@@ -428,7 +440,7 @@
   width: 1px;
   background: var(--border);
 }
-.scrobble-list > li::after {
+.listening-timeline > li::after {
   content: "";
   position: absolute;
   left: 0;
@@ -490,11 +502,13 @@
 }
 @media (max-width: 32rem) {
   .feed-masthead {
+    margin-top: 0;
+    padding: 0.5rem 0 0.75rem;
     gap: 0.75rem;
   }
   .masthead-record {
-    flex-basis: 3.5rem;
-    width: 3.5rem;
+    flex-basis: 2.75rem;
+    width: 2.75rem;
   }
   .now-playing-card {
     padding: 0.75rem;

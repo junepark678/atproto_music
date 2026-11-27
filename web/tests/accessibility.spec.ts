@@ -407,7 +407,8 @@ test('keyboard-only journey reaches sign-in, scrobble submit, window tabs, follo
   await tabTo(page, page.getByLabel('Artist'), 'artist field');
   await page.keyboard.type('Kate Bush');
   await tabTo(page, page.getByLabel('Track'), 'track field');
-  await page.keyboard.type('Cloudbusting');
+  const trackTitle = 'W'.repeat(20);
+  await page.keyboard.type(trackTitle);
   await tabTo(page, page.getByLabel('Album (optional)'), 'album field');
   await page.keyboard.type('Hounds of Love');
   const listenedAt = page.getByLabel('Listened at');
@@ -417,10 +418,14 @@ test('keyboard-only journey reaches sign-in, scrobble submit, window tabs, follo
   await expect(listenedAt).toHaveValue(validLocalDateTime);
   await tabTo(page, page.getByRole('button', { name: 'Publish scrobble' }), 'publish button');
   await page.keyboard.press('Enter');
-  const submitted = page.locator('li[data-op-id]').filter({ hasText: 'Cloudbusting' }).locator('.op-status');
+  const submitted = page.locator('li[data-op-id]').filter({ hasText: trackTitle }).locator('.op-status');
   await expect(submitted).toHaveAttribute('data-op-state', 'indexed', { timeout: 60_000 });
+  const desktopSize = page.viewportSize()!;
+  await page.setViewportSize({ width: 320, height: 700 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(320);
+  await page.setViewportSize(desktopSize);
   const records = await pdsListRecords(carol, `${net.prefix}.scrobble`);
-  expect(records.map((r) => r.value.track)).toEqual(['Cloudbusting']);
+  expect(records.map((r) => r.value.track)).toEqual([trackTitle]);
   const history = await request.get(`/api/v1/users/${enc(carol.did)}/scrobbles`);
   expect(((await history.json()) as { items: Array<{ uri: string }> }).items.map((s) => s.uri)).toEqual([
     records[0]?.uri,
