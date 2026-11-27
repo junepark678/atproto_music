@@ -16,7 +16,7 @@
 
 import AxeBuilder from '@axe-core/playwright';
 import type { APIRequestContext, Locator, Page } from '@playwright/test';
-import scrobblePage from '../../api/examples/scrobble-page.json';
+import scrobblePage from '../../api/examples/scrobble-page.json' with { type: 'json' };
 import {
   account,
   authorizeOnFixtureAs,
@@ -200,7 +200,7 @@ test('long track titles fit a narrow feed and scope tabs work from the keyboard'
     route.fulfill({ json: { ...scrobblePage, items: [{ ...scrobblePage.items[0], track }] } }),
   );
   await page.goto('/feed');
-  await expect(page.getByText(track, { exact: true })).toBeVisible();
+  await expect(page.getByRole('link', { name: `${track} (MusicBrainz)` })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(320);
   const global = page.getByRole('tab', { name: 'Global' });
   const following = page.getByRole('tab', { name: 'Following' });
