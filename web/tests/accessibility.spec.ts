@@ -205,6 +205,11 @@ test('long track titles fit a narrow feed and scope tabs work from the keyboard'
   const global = page.getByRole('tab', { name: 'Global' });
   const following = page.getByRole('tab', { name: 'Following' });
   await global.focus();
+  await page.keyboard.press('Control+End');
+  await expect(global).toHaveAttribute('aria-selected', 'true');
+  await page.keyboard.press('Tab');
+  await expect(page.getByRole('tabpanel')).toBeFocused();
+  await global.focus();
   for (const [key, selected] of [
     ['End', following],
     ['Home', global],

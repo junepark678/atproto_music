@@ -35,6 +35,7 @@ export default function Feed() {
   const [scope, setScope] = useState<FeedScope>(query.scope === 'following' ? 'following' : 'global');
   const tabRefs = useRef<(HTMLButtonElement | null)[]>([]);
   function navigateTab(event: KeyboardEvent, index: number) {
+    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
     let next: number;
     switch (event.key) {
       case 'Home':
@@ -94,7 +95,8 @@ export default function Feed() {
           </button>
         ))}
       </div>
-      <div id="feed-panel" role="tabpanel" aria-labelledby={`feed-tab-${scope}`}>
+      {/* biome-ignore lint/a11y/noNoninteractiveTabindex: Tab must reach the active panel even when it contains only text. */}
+      <div id="feed-panel" role="tabpanel" tabIndex={0} aria-labelledby={`feed-tab-${scope}`}>
         {scope === 'following' && session === null ? (
           <SignInPrompt>Sign in to see scrobbles from the accounts you follow.</SignInPrompt>
         ) : (

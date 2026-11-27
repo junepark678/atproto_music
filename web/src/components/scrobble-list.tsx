@@ -32,9 +32,7 @@ export function ScrobbleList({ items, label, showActor = false, canDelete, onDel
     <ol class="scrobble-list" aria-label={label}>
       {items.map(({ scrobble, local }) => (
         <li key={scrobble.uri} data-uri={scrobble.uri}>
-          <div class="scrobble-copy">
-            <ScrobbleText scrobble={scrobble} showActor={showActor} />
-          </div>
+          <ScrobbleText scrobble={scrobble} showActor={showActor} />
           {local !== undefined ? <OperationStatus op={local} /> : null}
           {onDelete !== undefined &&
           canDelete?.(scrobble) &&
@@ -61,7 +59,7 @@ export function ScrobbleText({
 }) {
   const durationSeconds = scrobble.durationSeconds ?? scrobble.musicbrainz?.durationSeconds;
   return (
-    <>
+    <div class="scrobble-copy">
       <span class="track">
         <MusicBrainzLink
           kind="recording"
@@ -117,7 +115,7 @@ export function ScrobbleText({
           </>
         ) : null}
       </span>
-    </>
+    </div>
   );
 }
 

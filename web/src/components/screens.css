@@ -73,7 +73,7 @@
 .musicbrainz-link {
   color: inherit;
   text-decoration: underline;
-  text-decoration-color: var(--border);
+  text-decoration-color: var(--muted);
   text-underline-offset: 0.12em;
 }
 
