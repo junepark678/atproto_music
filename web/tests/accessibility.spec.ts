@@ -16,6 +16,7 @@
 
 import AxeBuilder from '@axe-core/playwright';
 import type { APIRequestContext, Locator, Page } from '@playwright/test';
+import scrobblePage from '../../api/examples/scrobble-page.json';
 import {
   account,
   authorizeOnFixtureAs,
@@ -191,6 +192,31 @@ async function tabTo(page: Page, target: Locator, label: string, max = 80): Prom
 }
 
 // ---------------------------------------------------------------------------
+
+test('long track titles fit a narrow feed and scope tabs work from the keyboard', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 700 });
+  const track = 'X'.repeat(130);
+  await page.route('**/api/v1/feed?scope=global', (route) =>
+    route.fulfill({ json: { ...scrobblePage, items: [{ ...scrobblePage.items[0], track }] } }),
+  );
+  await page.goto('/feed');
+  await expect(page.getByText(track, { exact: true })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(320);
+  const global = page.getByRole('tab', { name: 'Global' });
+  const following = page.getByRole('tab', { name: 'Following' });
+  await global.focus();
+  for (const [key, selected] of [
+    ['End', following],
+    ['Home', global],
+    ['ArrowLeft', following],
+    ['ArrowRight', global],
+  ] as const) {
+    await page.keyboard.press(key);
+    await expect(selected).toBeFocused();
+    await expect(selected).toHaveAttribute('aria-selected', 'true');
+    await expect(selected).toHaveAttribute('tabindex', '0');
+  }
+});
 
 test('signin, feed, profile, scrobble, settings/links, settings/imports, settings/credentials and lastfm/authorize have no axe violations', async ({
   page,

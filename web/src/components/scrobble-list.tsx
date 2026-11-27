@@ -32,7 +32,9 @@ export function ScrobbleList({ items, label, showActor = false, canDelete, onDel
     <ol class="scrobble-list" aria-label={label}>
       {items.map(({ scrobble, local }) => (
         <li key={scrobble.uri} data-uri={scrobble.uri}>
-          <ScrobbleText scrobble={scrobble} showActor={showActor} />
+          <div class="scrobble-copy">
+            <ScrobbleText scrobble={scrobble} showActor={showActor} />
+          </div>
           {local !== undefined ? <OperationStatus op={local} /> : null}
           {onDelete !== undefined &&
           canDelete?.(scrobble) &&
@@ -99,7 +101,6 @@ export function ScrobbleText({
         </>
       ) : null}
       <span class="scrobble-meta">
-        {' · '}
         <time dateTime={scrobble.listenedAt}>{formatLocalTime(scrobble.listenedAt)}</time>
         {durationSeconds !== undefined ? (
           <>

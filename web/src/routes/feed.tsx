@@ -11,7 +11,7 @@
 //   overlay, and the owner's own records carry a delete control.
 
 import type { Did, FeedScope, Scrobble } from '@atmusic/core/api-types';
-import { useCallback, useState } from 'preact/hooks';
+import { useCallback, useRef, useState } from 'preact/hooks';
 import { useLocation } from 'preact-iso';
 import { ListeningNow, NowPlayingCard } from '../components/now-playing';
 import { withDueAt } from '../components/operation-status';
@@ -33,11 +33,40 @@ export default function Feed() {
   const { query } = useLocation();
   useSessionHandle();
   const [scope, setScope] = useState<FeedScope>(query.scope === 'following' ? 'following' : 'global');
+  const tabRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  function navigateTab(event: KeyboardEvent, index: number) {
+    let next: number;
+    switch (event.key) {
+      case 'Home':
+        next = 0;
+        break;
+      case 'End':
+        next = SCOPES.length - 1;
+        break;
+      case 'ArrowRight':
+        next = (index + 1) % SCOPES.length;
+        break;
+      case 'ArrowLeft':
+        next = (index + SCOPES.length - 1) % SCOPES.length;
+        break;
+      default:
+        return;
+    }
+    event.preventDefault();
+    const tab = tabRefs.current[next];
+    tab?.focus();
+    tab?.click();
+  }
   const session = state.session.value;
 
   return (
     <section aria-labelledby="page-title">
-      <h1 id="page-title">Feed</h1>
+      <header class="feed-masthead">
+        <div class="masthead-record" aria-hidden="true">
+          <span />
+        </div>
+        <h1 id="page-title">Feed</h1>
+      </header>
       {session !== null ? (
         <>
           <NowPlayingCard api={state.api} did={session.did} owner />
@@ -45,15 +74,20 @@ export default function Feed() {
         </>
       ) : null}
       <div class="tabs" role="tablist" aria-label="Feed scope">
-        {SCOPES.map((s) => (
+        {SCOPES.map((s, index) => (
           <button
             key={s.id}
             type="button"
             role="tab"
             id={`feed-tab-${s.id}`}
             aria-selected={s.id === scope}
+            tabIndex={s.id === scope ? 0 : -1}
             aria-controls="feed-panel"
             data-scope={s.id}
+            ref={(element) => {
+              tabRefs.current[index] = element;
+            }}
+            onKeyDown={(event) => navigateTab(event, index)}
             onClick={() => setScope(s.id)}
           >
             {s.label}
@@ -107,7 +141,19 @@ function FeedList({ scope, viewer }: { scope: FeedScope; viewer: Did | null }) {
       {paged.indexing ? <StaleNotice indexing={paged.indexing} /> : null}
       {items.length === 0 && paged.nextCursor === null ? (
         <EmptyState>
-          {scope === 'following' ? 'No scrobbles from the accounts you follow yet.' : 'No scrobbles yet.'}
+          {scope === 'following' ? (
+            'No scrobbles from the accounts you follow yet.'
+          ) : (
+            <>
+              No scrobbles yet.
+              {state.canPublish.value && session?.status === 'active' ? (
+                <>
+                  {' '}
+                  <a href="/scrobble">Add a scrobble</a>
+                </>
+              ) : null}
+            </>
+          )}
         </EmptyState>
       ) : (
         <ScrobbleList
