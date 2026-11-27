@@ -70,11 +70,28 @@ curl -sS -H 'Host: 127.2.0.1:8888' http://127.2.0.1:8888/health/ready
 
 Old releases can be removed with `git -C <checkout> worktree remove ~/.local/lib/atmusic/releases/<sha>` once you no longer want to roll back to them.
 
+## Follow master on an existing production host
+
+Use a dedicated, clean HTTPS checkout so the deployment service can fast-forward its own `master` without touching development worktrees. After a manual first install, run the following on the production host. Clone only if the deployment checkout does not already exist.
+
+```sh
+git clone --single-branch --branch master https://github.com/junepark678/atproto_music ~/.local/lib/atmusic/source
+cd ~/.local/lib/atmusic/source
+install -m 0644 config/systemd/atmusic-deploy.{service,timer} ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now atmusic-deploy.timer
+systemctl --user start atmusic-deploy.service
+```
+
+The timer checks GitHub every five minutes and deploys the tip of `origin/master` after the **Backend checks** push workflow passes for that exact commit. The commit must contain the installed release in its history. The deploy service builds an immutable release through `install-local.sh --no-init`, restarts atmusic, and verifies the running release and local readiness. The existing service and database must already be configured. Deployments are logged by `atmusic-deploy.service`.
+
+Stop the timer before manual maintenance or rollback with `systemctl --user stop atmusic-deploy.timer`. If an automatic upgrade fails, inspect the deployment and application journals. The prior release is retained for the conditional rollback procedure above. Reinstall the timer and service unit files and reload systemd when their definitions change.
+
 ## The unit
 
 [`config/systemd/atmusic.service`](../../config/systemd/atmusic.service) is exactly ADR 0005 §14.1 (`scripts/test/systemd-unit.test.ts` checks it byte for byte). Points worth knowing:
 
-- `Type=notify`, `NotifyAccess=all`, `WatchdogSec=60s`: the server sends `READY=1` after it listens, and `WATCHDOG=1` every 20 s only while an event-loop lag probe and `SELECT 1` succeed.
+- `Type=notify`, `NotifyAccess=all`, `WatchdogSec=60s`: the server sends `READY=1` after it listens, and `WATCHDOG=1` every 20 s when the callback runs and `SELECT 1` succeeds. Late callbacks log the delay and send a heartbeat after the event loop recovers.
 - `UnsetEnvironment=` removes `NODE_OPTIONS`, `NODE_TLS_REJECT_UNAUTHORIZED`, `NODE_EXTRA_CA_CERTS`, `NODE_USE_ENV_PROXY`, `NODE_PATH`, the proxy variables in both cases and `SSL_CERT_FILE`/`SSL_CERT_DIR` that the user manager would otherwise pass on; the server exits 78 if one still reaches it. `atmusic.env` cannot set them either.
 - Secrets arrive only as the credential `secrets` (`LoadCredentialEncrypted=`), never in the environment.
 - Never add `MemoryDenyWriteExecute` (V8's JIT aborts) or `PrivateNetwork` (outbound traffic is required); `IPAddressDeny`/`IPAddressAllow` are not enforced in user units. If `SystemCallFilter=~@resources` ever causes EPERM under load, drop only that line.

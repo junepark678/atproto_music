@@ -468,8 +468,8 @@ exec /usr/bin/mv "$@"`,
       ATMUSIC_INIT_STOP_GRACE_SECONDS: '1',
       BASH_ENV: '',
     };
-    const install = () =>
-      spawnSync('bash', [join(src, 'scripts', 'install-local.sh')], {
+    const install = (...args: string[]) =>
+      spawnSync('bash', [join(src, 'scripts', 'install-local.sh'), ...args], {
         cwd: root,
         env,
         encoding: 'utf8',
@@ -517,6 +517,15 @@ exec /usr/bin/mv "$@"`,
     writeFileSync(join(home, '.config', 'atmusic', 'atmusic.env'), 'ATMUSIC_CLIENT_IP_HEADER=cf-connecting-ip\n');
     rmSync(initPidFile, { force: true });
     rmSync(initStopMarker, { force: true });
+    const refusedInit = install('--no-init');
+    expect(refusedInit.status).toBe(1);
+    expect(refusedInit.stderr).toContain('refusing to initialize it');
+    expect(existsSync(initPidFile)).toBe(false);
+    expect(existsSync(db)).toBe(false);
+    expect(readlinkSync(current)).toBe(`releases/${sha}`);
+    for (const unit of ['atmusic.service', 'atmusic.socket'])
+      expect(readFileSync(join(unitDir, unit), 'utf8')).toBe(`pre-init ${unit}\n`);
+
     const initStarted = performance.now();
     const initTimedOut = install();
     let initPid = 0;

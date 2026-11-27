@@ -2,9 +2,10 @@
 # Install or upgrade atmusic as a systemd user service on this machine
 # (ADR 0005 §14.1, §14.3, §3.2; N4-02). docs/deploy/local-node.md is the guide.
 #
-# Usage: scripts/install-local.sh [--enable] [--rev <git revision>]
+# Usage: scripts/install-local.sh [--enable] [--no-init] [--rev <git revision>]
 #
 #   --rev <rev>  the commit to install (default HEAD of this checkout)
+#   --no-init    refuse to install if the configured database is missing
 #   --enable     also run the activation commands (linger, daemon-reload,
 #                enable --now); without it they are only printed
 #
@@ -47,15 +48,17 @@
 set -euo pipefail
 
 usage() {
-  echo 'usage: scripts/install-local.sh [--enable] [--rev <git revision>]' >&2
+  echo 'usage: scripts/install-local.sh [--enable] [--no-init] [--rev <git revision>]' >&2
   exit 2
 }
 
 enable=0
+allow_init=1
 rev=HEAD
 while (($# > 0)); do
   case "$1" in
     --enable) enable=1; shift ;;
+    --no-init) allow_init=0; shift ;;
     --rev) (($# >= 2)) || usage; rev="$2"; shift 2 ;;
     --rev=*) rev="${1#--rev=}"; shift ;;
     -h|--help) sed -n '2,40p' "${BASH_SOURCE[0]}"; exit 0 ;;
@@ -241,6 +244,7 @@ fi
 if [[ -e "$db" ]]; then
   say "database $db exists; the server migrates it itself on start"
 else
+  ((allow_init)) || die "database $db is missing; refusing to initialize it"
   [[ -f "$ENV_FILE" ]] || die "$ENV_FILE is missing: copy config/atmusic.env.example there and fill in the required values first"
   env -i "PATH=$PATH" "HOME=$HOME" python3 -I "$REPO/scripts/run_init.py" --check || die 'safe --init shutdown requires Python/Linux pidfd support'
   workdir="$(mktemp -d "${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/atmusic-init.XXXXXXXX")"

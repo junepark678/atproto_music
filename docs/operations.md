@@ -9,7 +9,7 @@ atmusic runs as one Node 26 process, the systemd user service `atmusic.service`,
 | `GET /health/live` | the process answers (liveness only) |
 | `GET /health/ready` | 200 `{status: "ready"}` when the schema is current, the config parsed, the secrets loaded, the OAuth keyset is valid and the database answers a write probe (a rolled-back transaction); 503 otherwise (`too_new` when the database was written by a newer, incompatible release). The body also carries the warnings `low_disk` (free space below `ATMUSIC_MIN_FREE_BYTES`) and `oauth_store_degraded` (an OAuth session update is held in memory because the write failed); they do not change the status, so a tunnel keeps routing live scrobbles. |
 | `GET /api/v1/meta` | `stage`, `capabilities`, `lexiconPrefix` and the global `indexing` state (`recovering`, `current`, `stale`) |
-| systemd watchdog | `WATCHDOG=1` every `WatchdogSec/3` (20 s) only while an event-loop lag probe (< 5 s) and `SELECT 1` succeed; a hung process is killed (`WatchdogSignal=SIGKILL`) and restarted |
+| systemd watchdog | `WATCHDOG=1` every `WatchdogSec/3` (20 s) when the callback runs and `SELECT 1` succeeds. Late callbacks log `systemd.watchdog_late` and send a heartbeat after recovery. systemd kills (`WatchdogSignal=SIGKILL`) and restarts a hung process. |
 
 From this host: `curl -sS -H 'Host: 127.2.0.1:8888' http://127.2.0.1:8888/health/ready` (the server answers 421 to a `Host` that is neither the public host nor the listen address). systemd has no HTTP health check and none is needed. An external probe of `https://music.214510.xyz/health/ready` (any free uptime monitor) is optional and not installed.
 

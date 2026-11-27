@@ -1,0 +1,8 @@
+[Unit]
+Description=Deploy the latest passing atmusic master commit
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/bash %h/.local/lib/atmusic/source/scripts/deploy-master.sh
+Environment=PATH=/usr/bin:/bin
+Nice=10
+TimeoutStartSec=30min
