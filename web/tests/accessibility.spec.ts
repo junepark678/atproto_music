@@ -239,17 +239,21 @@ test('long track titles fit a narrow feed and scope tabs work from the keyboard'
   await page.keyboard.press('Tab');
   await expect(page.getByRole('tabpanel')).toBeFocused();
   await global.focus();
-  for (const [key, selected] of [
+  for (const [key, focused] of [
     ['End', following],
     ['Home', global],
     ['ArrowLeft', following],
     ['ArrowRight', global],
   ] as const) {
     await page.keyboard.press(key);
-    await expect(selected).toBeFocused();
-    await expect(selected).toHaveAttribute('aria-selected', 'true');
-    await expect(selected).toHaveAttribute('tabindex', '0');
+    await expect(focused).toBeFocused();
+    await expect(focused).toHaveAttribute('tabindex', '0');
+    await expect(global).toHaveAttribute('aria-selected', 'true');
+    await expect(page.getByRole('tabpanel', { name: 'Global' })).toContainText(track);
   }
+  await page.keyboard.press('End');
+  await page.keyboard.press('Space');
+  await expect(following).toHaveAttribute('aria-selected', 'true');
 });
 
 test('signin, feed, profile, scrobble, settings/links, settings/imports, settings/credentials and lastfm/authorize have no axe violations', async ({
@@ -324,6 +328,9 @@ test('signin, feed, profile, scrobble, settings/links, settings/imports, setting
   );
   try {
     await page.getByRole('tab', { name: 'Global' }).press('ArrowRight');
+    await expect(page.getByRole('tab', { name: 'Following' })).toBeFocused();
+    await expect(panel).toHaveAccessibleName('Global');
+    await page.keyboard.press('Enter');
     await expect(panel).toHaveAttribute('data-rows-at-switch', '0');
     await expect(panel.locator('[data-state="loading"]')).toBeVisible();
   } finally {

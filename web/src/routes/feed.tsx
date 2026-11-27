@@ -34,6 +34,7 @@ export default function Feed() {
   const { query } = useLocation();
   useSessionHandle();
   const [scope, setScope] = useState<FeedScope>(query.scope === 'following' ? 'following' : 'global');
+  const [focusedScope, setFocusedScope] = useState<FeedScope | null>(null);
   const tabRefs = useRef<(HTMLButtonElement | null)[]>([]);
   function navigateTab(event: KeyboardEvent, index: number) {
     if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
@@ -55,9 +56,7 @@ export default function Feed() {
         return;
     }
     event.preventDefault();
-    const tab = tabRefs.current[next];
-    tab?.focus();
-    tab?.click();
+    tabRefs.current[next]?.focus();
   }
   const session = state.session.value;
   const outboxState = useOutbox();
@@ -87,12 +86,14 @@ export default function Feed() {
             role="tab"
             id={`feed-tab-${s.id}`}
             aria-selected={s.id === scope}
-            tabIndex={s.id === scope ? 0 : -1}
+            tabIndex={s.id === (focusedScope ?? scope) ? 0 : -1}
             aria-controls="feed-panel"
             data-scope={s.id}
             ref={(element) => {
               tabRefs.current[index] = element;
             }}
+            onFocus={() => setFocusedScope(s.id)}
+            onBlur={() => setFocusedScope(null)}
             onKeyDown={(event) => navigateTab(event, index)}
             onClick={() => setScope(s.id)}
           >
