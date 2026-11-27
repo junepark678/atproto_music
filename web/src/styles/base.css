@@ -155,7 +155,7 @@ main {
 
 .site-footer {
   width: var(--page-width);
-  margin: 3rem auto 0;
+  margin: clamp(1rem, 4vw, 3rem) auto 0;
   padding: 1rem 0;
   border-top: 1px solid var(--border);
   color: var(--muted);

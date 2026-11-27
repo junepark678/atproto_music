@@ -81,9 +81,11 @@
   width: 1px;
   background: var(--border);
 }
+.listening-timeline > li:first-child::before {
+  top: 1.64rem;
+}
 .listening-timeline > li:last-child::before {
-  bottom: auto;
-  height: 1.64rem;
+  bottom: calc(100% - 1.64rem);
 }
 .listening-timeline > li::after {
   content: "";
