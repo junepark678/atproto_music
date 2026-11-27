@@ -50,7 +50,7 @@ Deployment values: the public origin `https://music.214510.xyz` (so the OAuth `c
    Optionally `systemctl --user enable --now atmusic.socket` as well: it keeps `127.2.0.1:8888` open across restarts, so a tunnel sees queued connections instead of 502s.
 5. **Check.** `curl -sS -H 'Host: 127.2.0.1:8888' http://127.2.0.1:8888/health/ready` answers `{"status":"ready"}`; `journalctl --user -u atmusic -n 50` shows `run.ready`; `atmusic-admin status` ([operations.md](../operations.md#admin-cli)) answers over the admin socket.
 
-Startup exits 78 (configuration, never restarted) naming the variable that is wrong, missing or forbidden, and 75 when another process holds the database; both are in `RestartPreventExitStatus=` so systemd does not loop. See [operations.md](../operations.md#exit-codes-and-restarts).
+Startup exits 78 (configuration, never restarted) naming the variable that is wrong, missing or forbidden, and 75 when another process holds the database. Only 78 is in `RestartPreventExitStatus=`; 75 is retried with backoff (bounded by the start limit) so a replacement starts once a stuck predecessor exits. See [operations.md](../operations.md#exit-codes-and-restarts).
 
 ## Upgrades and rollback
 
