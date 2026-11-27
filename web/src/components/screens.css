@@ -67,6 +67,10 @@
   border-bottom: 1px solid var(--border);
 }
 
+.listening-timeline {
+  --timeline-dot-y: 1.64rem;
+}
+
 .listening-timeline > li {
   position: relative;
   padding: 1rem 0 1rem 1.5rem;
@@ -82,16 +86,17 @@
   background: var(--border);
 }
 .listening-timeline > li:first-child::before {
-  top: 1.64rem;
+  top: var(--timeline-dot-y);
 }
 .listening-timeline > li:last-child::before {
-  bottom: calc(100% - 1.64rem);
+  bottom: calc(100% - var(--timeline-dot-y));
 }
 .listening-timeline > li::after {
   content: "";
   position: absolute;
   left: 0;
-  top: 1.35rem;
+  top: var(--timeline-dot-y);
+  transform: translateY(-50%);
   width: 0.58rem;
   height: 0.58rem;
   border-radius: 50%;
