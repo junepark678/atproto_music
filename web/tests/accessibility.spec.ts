@@ -65,12 +65,14 @@ test.beforeAll(async () => {
 test('public profile now-playing card is rendered and accessible', async ({ page }) => {
   const releaseMbid = '33333333-3333-4333-8333-333333333333';
   const coverRoute = `**/api/v1/cover-art/${releaseMbid}`;
-  await page.route(coverRoute, (route) =>
-    route.fulfill({
+  const releaseCover = Promise.withResolvers<void>();
+  await page.route(coverRoute, async (route) => {
+    await releaseCover.promise;
+    await route.fulfill({
       contentType: 'image/svg+xml',
       body: '<svg xmlns="http://www.w3.org/2000/svg" width="80" height="64"><rect width="80" height="64" fill="navy"/></svg>',
-    }),
-  );
+    });
+  });
   await page.route('**/api/v1/users/*/now-playing', (route) =>
     route.fulfill({
       status: 200,
@@ -92,7 +94,7 @@ test('public profile now-playing card is rendered and accessible', async ({ page
       }),
     }),
   );
-  await page.goto(`/u/${bob.did}`);
+  await page.goto(`/u/${bob.did}`, { waitUntil: 'domcontentloaded' });
   await settled(page, `@${bob.handle}`);
   await expect(page.getByRole('article', { name: 'Now playing' })).toContainText('Jóga');
   await expect(page.getByRole('progressbar', { name: 'Track progress' })).toHaveAttribute('max', '180');
@@ -102,7 +104,14 @@ test('public profile now-playing card is rendered and accessible', async ({ page
   );
   const artwork = page.locator('.now-playing-art');
   const cover = artwork.locator('img');
+  try {
+    await expect(artwork).toHaveCSS('border-radius', '50%');
+    await expect(cover).toHaveCSS('opacity', '0');
+  } finally {
+    releaseCover.resolve();
+  }
   await cover.evaluate((img) => img.decode());
+  await expect(cover).toHaveCSS('opacity', '1');
   await expect(artwork).toHaveCSS('border-radius', '0px');
   await expect(cover).toHaveCSS('object-fit', 'contain');
   await expectAccessible(page, 'public profile with now-playing card');

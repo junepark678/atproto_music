@@ -302,7 +302,7 @@
   background: repeating-radial-gradient(circle, #25283d 0 1px, #30334a 2px 3px, #25283d 4px 5px);
   box-shadow: 0 3px 10px #181a2c33;
 }
-.now-playing-art:has(.now-playing-cover) {
+.now-playing-art:has(.now-playing-cover[data-status="loaded"]) {
   border-radius: 0;
   background: var(--surface);
   box-shadow: none;
@@ -315,6 +315,9 @@
   height: 100%;
   object-fit: contain;
   background: var(--surface);
+}
+.now-playing-cover[data-status="pending"] {
+  opacity: 0;
 }
 .now-playing-content {
   min-width: 0;
