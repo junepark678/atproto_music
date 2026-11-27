@@ -141,6 +141,13 @@ describe('web/test/routes/feed.test.tsx', () => {
     await settleRouteImport();
     await vi.waitFor(() => expect(app.root.textContent).toContain('No scrobbles yet'));
     expect(app.root.querySelector('[data-state="loading"]')).toBeNull();
+    const addScrobble = () => app.root.querySelector('#feed-panel a[href="/scrobble"]');
+    expect(addScrobble()).toBeNull();
+    app.state.meta.value = { ...META, capabilities: [...META.capabilities, 'publication'] };
+    app.state.session.value = SESSION;
+    await vi.waitFor(() => expect(addScrobble()?.textContent).toBe('Add a scrobble'));
+    app.state.meta.value = { ...META, lexiconPrefix: null };
+    await vi.waitFor(() => expect(addScrobble()).toBeNull());
     app.cleanup();
   });
 
