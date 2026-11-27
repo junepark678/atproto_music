@@ -63,6 +63,14 @@ test.beforeAll(async () => {
 });
 
 test('public profile now-playing card is rendered and accessible', async ({ page }) => {
+  const releaseMbid = '33333333-3333-4333-8333-333333333333';
+  const coverRoute = `**/api/v1/cover-art/${releaseMbid}`;
+  await page.route(coverRoute, (route) =>
+    route.fulfill({
+      contentType: 'image/svg+xml',
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="80" height="64"><rect width="80" height="64" fill="navy"/></svg>',
+    }),
+  );
   await page.route('**/api/v1/users/*/now-playing', (route) =>
     route.fulfill({
       status: 200,
@@ -72,6 +80,7 @@ test('public profile now-playing card is rendered and accessible', async ({ page
           artist: 'Björk',
           track: 'Jóga',
           album: 'Homogenic',
+          releaseMbid,
           startedAt: '2026-01-15T11:58:00Z',
           updatedAt: '2026-01-15T11:58:00Z',
           expiresAt: '2026-01-15T12:03:00Z',
@@ -91,7 +100,18 @@ test('public profile now-playing card is rendered and accessible', async ({ page
     'aria-valuetext',
     /^\d:\d{2} \/ 3:00$/,
   );
+  const artwork = page.locator('.now-playing-art');
+  const cover = artwork.locator('img');
+  await cover.evaluate((img) => img.decode());
+  await expect(artwork).toHaveCSS('border-radius', '0px');
+  await expect(cover).toHaveCSS('object-fit', 'contain');
   await expectAccessible(page, 'public profile with now-playing card');
+
+  await page.route(coverRoute, (route) => route.fulfill({ status: 404 }));
+  await page.reload();
+  await expect(artwork).toBeVisible();
+  await expect(cover).toHaveCount(0);
+  await expect(artwork).toHaveCSS('border-radius', '50%');
 });
 
 // ---------------------------------------------------------------------------

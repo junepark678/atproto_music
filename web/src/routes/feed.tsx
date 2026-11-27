@@ -152,7 +152,7 @@ function FeedList({ scope, viewer }: { scope: FeedScope; viewer: Did | null }) {
               {state.canPublish.value && session?.status === 'active' ? (
                 <>
                   {' '}
-                  <a href="/scrobble">Add a scrobble</a>
+                  <a href="/scrobble">Add scrobble</a>
                 </>
               ) : null}
             </>

@@ -145,7 +145,7 @@ describe('web/test/routes/feed.test.tsx', () => {
     expect(addScrobble()).toBeNull();
     app.state.meta.value = { ...META, capabilities: [...META.capabilities, 'publication'] };
     app.state.session.value = SESSION;
-    await vi.waitFor(() => expect(addScrobble()?.textContent).toBe('Add a scrobble'));
+    await vi.waitFor(() => expect(addScrobble()?.textContent).toBe('Add scrobble'));
     app.state.meta.value = { ...META, lexiconPrefix: null };
     await vi.waitFor(() => expect(addScrobble()).toBeNull());
     app.cleanup();
